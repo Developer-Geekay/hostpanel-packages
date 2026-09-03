@@ -1,0 +1,126 @@
+{
+  "manifest_version": 1,
+  "feature": "users",
+  "label": "Linux Users",
+  "version": "3.0.0",
+  "requires_core": [3, 0, 0],
+  "api": {
+    "module": "hostpanel_usersd",
+    "unit": "hostpanel-usersd.service",
+    "run_as": "hp-users"
+  },
+  "frontend": {
+    "entry": "frontend/dist/main.js",
+    "_comment": "built bundle the shell imports at runtime and mounts"
+  },
+  "nav": [
+    {
+      "section": "system",
+      "section_label": "System",
+      "section_order": 40,
+      "label": "Linux Users",
+      "icon": "users",
+      "order": 10
+    }
+  ],
+  "ops": {
+    "script": "/opt/hostpanel/packages/users/ops/hp-users",
+    "sudoers": "hostpanel-usersd"
+  },
+  "sandbox": {
+    "read_write_paths": ["/etc", "/home"],
+    "_comment": "Paths this package's ops script must be able to WRITE. The unit runs ProtectSystem=strict, which makes the entire filesystem read-only — and that applies to sudo'd children too, since they inherit the namespace. Without declaring these, useradd fails with 'cannot lock /etc/passwd' even though it is running as root. Declaring them per package is what keeps the sandbox meaningful: the users package can write /etc and /home and nothing else."
+  },
+  "operations": {
+    "user.list": {
+      "verb": "list",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "user.list",
+      "timeout_ms": 10000,
+      "params": {}
+    },
+    "user.get": {
+      "verb": "get",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "user.get",
+      "timeout_ms": 10000,
+      "params": {
+        "username": { "pattern": "^[a-z_][a-z0-9_-]{0,31}$", "required": true }
+      }
+    },
+    "user.create": {
+      "verb": "create",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "user.create",
+      "timeout_ms": 30000,
+      "params": {
+        "username": { "pattern": "^[a-z_][a-z0-9_-]{0,31}$", "required": true },
+        "shell": {
+          "enum": ["/bin/bash", "/usr/sbin/nologin"],
+          "default": "/bin/bash"
+        },
+        "password": { "secret": true, "required": false }
+      }
+    },
+    "user.delete": {
+      "verb": "delete",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "user.delete",
+      "timeout_ms": 60000,
+      "params": {
+        "username": { "pattern": "^[a-z_][a-z0-9_-]{0,31}$", "required": true },
+        "remove_home": {
+          "enum": ["0", "1"],
+          "default": "0",
+          "_comment": "declared as the ops script's 0|1 argument, not a JSON bool; the API accepts a bool and normalises it"
+        }
+      }
+    },
+    "user.set-password": {
+      "verb": "set-password",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "user.set_password",
+      "timeout_ms": 15000,
+      "params": {
+        "username": { "pattern": "^[a-z_][a-z0-9_-]{0,31}$", "required": true },
+        "password": { "secret": true, "required": true }
+      }
+    },
+    "user.lock": {
+      "verb": "lock",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "user.lock",
+      "timeout_ms": 15000,
+      "params": {
+        "username": { "pattern": "^[a-z_][a-z0-9_-]{0,31}$", "required": true }
+      }
+    },
+    "user.unlock": {
+      "verb": "unlock",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "user.unlock",
+      "timeout_ms": 15000,
+      "params": {
+        "username": { "pattern": "^[a-z_][a-z0-9_-]{0,31}$", "required": true }
+      }
+    },
+    "user.chown-home": {
+      "verb": "chown-home",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "user.chown_home",
+      "timeout_ms": 300000,
+      "params": {
+        "username": { "pattern": "^[a-z_][a-z0-9_-]{0,31}$", "required": true },
+        "path": { "pattern": "^/[^\\u0000]*$", "required": true }
+      }
+    }
+  }
+}

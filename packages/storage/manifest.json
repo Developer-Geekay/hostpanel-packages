@@ -1,0 +1,226 @@
+{
+  "manifest_version": 1,
+  "feature": "storage",
+  "label": "Storage & Backups",
+  "version": "3.0.0",
+  "requires_core": [
+    3,
+    0,
+    0
+  ],
+  "api": {
+    "module": "hostpanel_storaged",
+    "unit": "hostpanel-storaged.service",
+    "run_as": "hp-storage"
+  },
+  "frontend": {
+    "entry": "frontend/dist/main.js"
+  },
+  "nav": [
+    {
+      "section": "system",
+      "section_label": "System",
+      "section_order": 40,
+      "label": "Storage & Backups",
+      "icon": "storage",
+      "order": 30
+    }
+  ],
+  "ops": {
+    "script": "/opt/hostpanel/packages/storage/ops/hp-storage",
+    "sudoers": "hostpanel-storaged"
+  },
+  "sandbox": {
+    "read_write_paths": [
+      "/opt/hostpanel/data/storage",
+      "/opt/hostpanel/data/backups",
+      "/opt/hostpanel/etc/storage",
+      "/opt/hostpanel/logs/storage",
+      "/opt/hostpanel/run/storage"
+    ]
+  },
+  "operations": {
+    "storage.list-buckets": {
+      "verb": "list-buckets",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "storage.bucket.list",
+      "timeout_ms": 10000,
+      "params": {}
+    },
+    "storage.create-bucket": {
+      "verb": "create-bucket",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "storage.bucket.create",
+      "timeout_ms": 15000,
+      "params": {
+        "name": {
+          "pattern": "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$",
+          "required": true
+        },
+        "policy": {
+          "enum": [
+            "private",
+            "public-read",
+            "authenticated-read"
+          ],
+          "default": "private"
+        }
+      }
+    },
+    "storage.delete-bucket": {
+      "verb": "delete-bucket",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "storage.bucket.delete",
+      "timeout_ms": 15000,
+      "params": {
+        "name": {
+          "pattern": "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$",
+          "required": true
+        }
+      }
+    },
+    "storage.list-backups": {
+      "verb": "list-backups",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "storage.backup.list",
+      "timeout_ms": 15000,
+      "params": {}
+    },
+    "storage.create-backup": {
+      "verb": "create-backup",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "storage.backup.create",
+      "timeout_ms": 300000,
+      "params": {
+        "name": {
+          "pattern": "^[a-zA-Z0-9_.-]{0,64}$",
+          "default": ""
+        },
+        "targets": {
+          "pattern": "^[a-zA-Z0-9_,.-]{1,64}$",
+          "default": "all"
+        },
+        "destination": {
+          "enum": [
+            "local",
+            "s3",
+            "r2"
+          ],
+          "default": "local"
+        },
+        "compression": {
+          "enum": [
+            "zstd",
+            "gzip",
+            "none"
+          ],
+          "default": "zstd"
+        }
+      }
+    },
+    "storage.restore-backup": {
+      "verb": "restore-backup",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "storage.backup.restore",
+      "timeout_ms": 300000,
+      "params": {
+        "backup_id": {
+          "pattern": "^[a-zA-Z0-9_.-]{1,128}$",
+          "required": true
+        },
+        "targets": {
+          "pattern": "^[a-zA-Z0-9_,.-]{1,64}$",
+          "default": "all"
+        }
+      }
+    },
+    "storage.delete-backup": {
+      "verb": "delete-backup",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "storage.backup.delete",
+      "timeout_ms": 15000,
+      "params": {
+        "backup_id": {
+          "pattern": "^[a-zA-Z0-9_.-]{1,128}$",
+          "required": true
+        }
+      }
+    },
+    "storage.list-schedules": {
+      "verb": "list-schedules",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "storage.schedule.list",
+      "timeout_ms": 10000,
+      "params": {}
+    },
+    "storage.set-schedule": {
+      "verb": "set-schedule",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "storage.schedule.set",
+      "timeout_ms": 15000,
+      "params": {
+        "name": {
+          "pattern": "^[a-zA-Z0-9_-]{1,32}$",
+          "required": true
+        },
+        "cron": {
+          "pattern": "^[^\\u0000]{1,64}$",
+          "required": true
+        },
+        "targets": {
+          "pattern": "^[a-zA-Z0-9_,.-]{1,64}$",
+          "default": "all"
+        },
+        "retention_days": {
+          "pattern": "^[0-9]{1,4}$",
+          "default": "7"
+        },
+        "destination": {
+          "enum": [
+            "local",
+            "s3",
+            "r2"
+          ],
+          "default": "local"
+        },
+        "enabled": {
+          "enum": [
+            "0",
+            "1"
+          ],
+          "default": "1"
+        }
+      }
+    },
+    "storage.delete-schedule": {
+      "verb": "delete-schedule",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "storage.schedule.delete",
+      "timeout_ms": 15000,
+      "params": {
+        "name": {
+          "pattern": "^[a-zA-Z0-9_-]{1,32}$",
+          "required": true
+        }
+      }
+    },
+    "storage.disk-usage": {
+      "verb": "disk-usage",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "storage.disk_usage",
+      "timeout_ms": 20000,
+      "params": {}
+    }
+  }
+}

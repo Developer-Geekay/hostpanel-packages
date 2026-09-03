@@ -1,0 +1,17 @@
+# HostPanel v3 — Apache VirtualHost Template
+<VirtualHost 127.0.0.1:8088 [::1]:8088>
+    ServerName {{DOMAIN}}
+    {{SERVER_ALIASES}}
+    DocumentRoot {{DOC_ROOT}}
+
+    <Directory {{DOC_ROOT}}>
+        Options -Indexes +FollowSymLinks
+        AllowOverride All
+        Require all granted
+    </Directory>
+
+    {{PHP_FCGI_HANDLER}}
+
+    ErrorLog /opt/hostpanel/logs/apache/{{DOMAIN}}_error.log
+    CustomLog /opt/hostpanel/logs/apache/{{DOMAIN}}_access.log combined
+</VirtualHost>

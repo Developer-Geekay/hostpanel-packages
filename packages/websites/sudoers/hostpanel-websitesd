@@ -1,0 +1,2 @@
+# HostPanel Website Manager privilege escalation
+hp-websites ALL=(ALL) NOPASSWD: /opt/hostpanel/packages/websites/ops/hp-websites *

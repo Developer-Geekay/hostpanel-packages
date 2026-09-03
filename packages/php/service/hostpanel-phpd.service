@@ -1,0 +1,34 @@
+# SCAFFOLD — not installed by this step.
+[Unit]
+Description=HostPanel v3 — php feature service
+After=network.target
+
+[Service]
+Type=simple
+User=hp-php
+Group=hp-php
+
+# Port and token. The token file is root-owned 0640 root:hp-php, so the service
+# can read its own credential and nothing else on the box can.
+EnvironmentFile=/etc/hostpanel/php.env
+
+# Loopback ONLY. Binding 0.0.0.0 would expose privileged operations to the network.
+ExecStart=/opt/hostpanel/venv/bin/python -m hostpanel_phpd
+
+Restart=on-failure
+RestartSec=5
+
+# sudo is setuid, and invoking it is this service's entire purpose.
+NoNewPrivileges=no
+
+ProtectSystem=strict
+ProtectKernelTunables=yes
+MemoryMax=128M
+TasksMax=64
+
+# NOTE: do not add ProtectHome=yes — this service reaches no home directory,
+# but systemd sandboxing here is scoped to match the rest of the fleet so a
+# future change (e.g. reading a per-site override) does not silently break.
+
+[Install]
+WantedBy=multi-user.target

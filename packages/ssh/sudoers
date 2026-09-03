@@ -1,0 +1,14 @@
+# HostPanel v3 — ssh feature service.
+#
+# ONE grant, ONE script path. hp-ssh cannot edit ~/.ssh/authorized_keys, write
+# to /etc/ssh/sshd_config.d, or reload sshd directly; only through this script,
+# which validates every argument before acting.
+#
+# This grant is safe ONLY while the target stays root-owned and not writable by
+# hp-ssh. If hp-ssh could write the script, this line would be a root shell.
+# provision-service.sh asserts that ownership before installing this file, and
+# refuses otherwise.
+#
+# Installed 0440 root:root by provision-service.sh, after visudo -c -f.
+
+hp-ssh ALL=(root) NOPASSWD: /opt/hostpanel/packages/ssh/ops/hp-ssh *

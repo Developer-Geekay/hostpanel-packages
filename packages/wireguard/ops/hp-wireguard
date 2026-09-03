@@ -1,0 +1,839 @@
+#!/bin/bash
+# hp-wireguard — root helper for the HostPanel v3 WireGuard daemon.
+#
+# Installed root-owned 0755. The daemon's sudoers file grants THIS SINGLE PATH
+# and nothing else, so `hp-wireguard` (the daemon account) can never edit
+# system files or run arbitrary commands — only through the validation below.
+#
+#   hp-wireguard ALL=(root) NOPASSWD: /opt/hostpanel/packages/wireguard/ops/hp-wireguard *
+#
+# Strict 100% Isolation:
+#   All configuration, server keys, peer definitions, and logs live under /opt/hostpanel.
+#   Never touch system /etc/wireguard.
+#
+# Verbs: engine-status engine-install engine-uninstall
+#        server-status server-start server-stop server-restart server-toggle
+#        server-config server-logs list-peers create-peer delete-peer
+#        get-peer-config get-peer-qr
+#
+# The WireGuard userspace tools (wg, wg-quick — 155 KB) ship inside this package
+# and are installed to /opt/hostpanel/runtimes/wireguard/bin by `engine-install`.
+# They are never resolved from the host's PATH.
+# Exit:  0 ok | 1 internal | 10 not found | 11 precondition | 12 validation
+#        13 conflict | 14 denied | 20 dependency
+#
+# stdout is DATA (JSON where structured). stderr is DIAGNOSTICS.
+
+set -euo pipefail
+
+# OPS_NAME is consumed by die()/warn() in common.sh
+# shellcheck disable=SC2034
+OPS_NAME="hp-wireguard"
+
+# Pinned when root; overridable when unprivileged for tests
+if [ "$(id -u)" = "0" ]; then
+    HP_CORE_LIB=/opt/hostpanel/hpcore/lib
+    HP_WG_DIR=/opt/hostpanel/etc/wireguard
+    HP_WG_RUN=/opt/hostpanel/run/wireguard
+    HP_WG_LOGS=/opt/hostpanel/logs/wireguard
+    HP_WG_RUNTIME=/opt/hostpanel/runtimes/wireguard
+    HP_WG_PKG=/opt/hostpanel/packages/wireguard
+else
+    : "${HP_CORE_LIB:=/opt/hostpanel/hpcore/lib}"
+    : "${HP_WG_DIR:=/opt/hostpanel/etc/wireguard}"
+    : "${HP_WG_RUN:=/opt/hostpanel/run/wireguard}"
+    : "${HP_WG_LOGS:=/opt/hostpanel/logs/wireguard}"
+    : "${HP_WG_RUNTIME:=/opt/hostpanel/runtimes/wireguard}"
+    : "${HP_WG_PKG:=/opt/hostpanel/packages/wireguard}"
+fi
+
+# shellcheck disable=SC1091
+if [ -f "$HP_CORE_LIB/common.sh" ]; then
+    . "$HP_CORE_LIB/common.sh"
+else
+    # Minimal fallback if common.sh is absent
+    die() { echo "${OPS_NAME:-ops}: $1" >&2; exit "${2:-12}"; }
+    warn() { echo "${OPS_NAME:-ops}: $1" >&2; }
+    is_dryrun() { [ "${HP_OPS_DRYRUN:-0}" = "1" ] && [ "$(id -u)" != "0" ]; }
+    act() { if is_dryrun; then echo "WOULD-EXEC: $*" >&2; return 0; fi; "$@"; }
+    require_argc() { [ "$2" -eq "$1" ] || die "expected $1 argument(s), got $2 — usage: $3" 12; }
+fi
+
+HP_WG_CONF="$HP_WG_DIR/wg0.conf"
+HP_WG_PEERS_DIR="$HP_WG_DIR/peers"
+HP_SERVER_KEY="$HP_WG_DIR/server_private.key"
+HP_SERVER_PUBKEY="$HP_WG_DIR/server_public.key"
+HP_STATE_FILE="$HP_WG_RUN/server.state"
+HP_LOG_FILE="$HP_WG_LOGS/wireguard.log"
+
+# ── The WireGuard engine ──────────────────────────────────────────────────────
+#
+# The userspace tools ship INSIDE this package (packages/wireguard/bin/) and are
+# installed to the runtime prefix below by `engine-install`. They are the same
+# aarch64 binaries used in v2.
+#
+# These paths are absolute and are NOT resolved through $PATH. Falling back to
+# `command -v wg` would silently bind the package to whatever the host happens to
+# have in /usr/bin — a different version, or nothing at all — which is exactly
+# what the isolation rule forbids. If our binary is absent the correct outcome is
+# a loud dependency error telling the operator to install the engine, not a quiet
+# switch to a foreign one.
+WG_BIN="$HP_WG_RUNTIME/bin/wg"
+WG_QUICK="$HP_WG_RUNTIME/bin/wg-quick"
+
+#: Shipped originals, verified against these digests before being installed.
+#: A mismatch is a hard refusal — the existing runtime is left untouched.
+WG_SRC_DIR="$HP_WG_PKG/bin"
+WG_SHA256="90bf590ca464333e028bc2b340c63413fc1a166f513efb328d7cd6decd864a5a"
+WG_QUICK_SHA256="8040cda9eb4826d4d16ef8d35613b64f87a871503138423a9fa4427302f55b44"
+
+#: True when the engine is installed and runnable.
+have_wg() { [ -x "$WG_BIN" ]; }
+
+#: Use the engine, or fail with the dependency code (20) rather than degrading.
+require_wg() {
+    have_wg || die "WireGuard engine is not installed — run 'engine-install' first" 20
+}
+
+# wg-quick is a bash script that shells out to `wg`, `ip`, `sysctl` and nft. It
+# finds `wg` on PATH, so our bin/ must come FIRST or it would pick up a host copy
+# (or fail) despite us invoking our own script by absolute path.
+wg_env() { PATH="$HP_WG_RUNTIME/bin:$PATH"; export PATH; }
+
+usage() {
+    cat >&2 <<'EOF'
+usage: hp-wireguard <verb> [args]
+  engine-status
+  engine-install
+  engine-uninstall
+  server-status
+  server-start
+  server-stop
+  server-restart
+  server-toggle     <enabled:0|1>
+  server-config
+  server-logs
+  list-peers
+  create-peer       <name> [ip] [allowed_ips] [dns]  [optional: preshared_key on stdin]
+  delete-peer       <id>
+  get-peer-config   <id>
+  get-peer-qr       <id>
+EOF
+    exit 12
+}
+
+# ── JSON string escape ────────────────────────────────────────────────────────
+json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\t'/\\t}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    printf '%s' "$s"
+}
+
+# ── Reading a peer's JSON ─────────────────────────────────────────────────────
+#
+# These files are written pretty-printed (`"ip": "10.8.0.2"`), and the readers
+# here previously required the compact form (`"ip":"10.8.0.2"`). The patterns
+# matched nothing, so rebuild_wg0_conf emitted a wg0.conf with NO [Peer] blocks
+# at all — while `wg set` had already added the peer to the live interface. The
+# result was a server that worked until it was restarted and then silently
+# dropped every peer, with the panel still listing them because the peer list
+# reads these same files directly.
+#
+# Both spacings are accepted now, so the format the writer happens to use can
+# never break the reader again.
+
+#: Value of a string field, or "" if absent.
+json_str() {
+    grep -o "\"$2\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$1" 2>/dev/null \
+        | head -1 | cut -d'"' -f4 || true
+}
+
+#: Value of an unquoted field (true/false/number), or "" if absent.
+json_bare() {
+    grep -o "\"$2\"[[:space:]]*:[[:space:]]*[^,}[:space:]]*" "$1" 2>/dev/null \
+        | head -1 | sed 's/.*:[[:space:]]*//' || true
+}
+
+# ── Ensure Directories ────────────────────────────────────────────────────────
+ensure_dirs() {
+    mkdir -p "$HP_WG_DIR" "$HP_WG_PEERS_DIR" "$HP_WG_RUN" "$HP_WG_LOGS"
+    chmod 0700 "$HP_WG_DIR" "$HP_WG_PEERS_DIR" 2>/dev/null || true
+}
+
+# ── Generate Base64 32-byte WireGuard Key ─────────────────────────────────────
+gen_wg_key() {
+    if have_wg; then
+        "$WG_BIN" genkey
+        return
+    fi
+    # Outside dry-run a missing engine must stop the operation. Inventing a key
+    # here would write an unusable peer to disk and report success.
+    is_dryrun || die "WireGuard engine is not installed — run 'engine-install' first" 20
+    openssl rand -base64 32 2>/dev/null \
+        || python3 -c "import secrets, base64; print(base64.b64encode(secrets.token_bytes(32)).decode())"
+}
+
+gen_wg_pubkey() {
+    local priv="$1"
+    if have_wg; then
+        printf '%s\n' "$priv" | "$WG_BIN" pubkey
+        return
+    fi
+    # A public key is a Curve25519 scalar multiplication of the private key.
+    # The previous fallback here returned sha256(priv), which is the right SHAPE
+    # — 32 bytes, base64 — and completely wrong: it is not the matching public
+    # key, so every peer built from it would hand the client a config that can
+    # never complete a handshake, while the panel reported success. Simulated
+    # keys are therefore confined to dry-run, where nothing is written for real.
+    is_dryrun || die "WireGuard engine is not installed — run 'engine-install' first" 20
+    printf '%s' "$priv" | openssl dgst -sha256 -binary 2>/dev/null | openssl base64 2>/dev/null \
+        || python3 -c "import hashlib, base64, sys; print(base64.b64encode(hashlib.sha256(sys.argv[1].encode()).digest()).decode())" "$priv"
+}
+
+# ── Ensure Server Keys ────────────────────────────────────────────────────────
+ensure_server_keys() {
+    ensure_dirs
+    if [ ! -f "$HP_SERVER_KEY" ] || [ ! -s "$HP_SERVER_KEY" ]; then
+        local priv pub
+        priv="$(gen_wg_key)"
+        pub="$(gen_wg_pubkey "$priv")"
+        echo "$priv" > "$HP_SERVER_KEY"
+        echo "$pub" > "$HP_SERVER_PUBKEY"
+        chmod 0600 "$HP_SERVER_KEY" "$HP_SERVER_PUBKEY" 2>/dev/null || true
+    fi
+}
+
+# ── Rebuild Server wg0.conf ───────────────────────────────────────────────────
+rebuild_wg0_conf() {
+    ensure_server_keys
+    local priv_key pub_key
+    priv_key="$(cat "$HP_SERVER_KEY" 2>/dev/null || echo "")"
+    pub_key="$(cat "$HP_SERVER_PUBKEY" 2>/dev/null || echo "")"
+
+    local tmp_conf="$HP_WG_DIR/wg0.conf.tmp.$$"
+    cat > "$tmp_conf" <<EOF
+[Interface]
+Address = 10.8.0.1/24
+ListenPort = 51820
+PrivateKey = $priv_key
+SaveConfig = false
+
+# PostUp/PostDown firewall rules can be placed here if routing is enabled
+EOF
+
+    # Append peers
+    if [ -d "$HP_WG_PEERS_DIR" ]; then
+        for pf in "$HP_WG_PEERS_DIR"/*.json; do
+            [ -f "$pf" ] || continue
+            local p_pub p_ip p_psk p_enabled
+            p_pub="$(json_str "$pf" public_key)"
+            p_ip="$(json_str "$pf" ip)"
+            p_psk="$(json_str "$pf" preshared_key)"
+            p_enabled="$(json_bare "$pf" enabled)"
+            [ -n "$p_enabled" ] || p_enabled="true"
+
+            if [ "$p_enabled" = "true" ] && [ -n "$p_pub" ] && [ -n "$p_ip" ]; then
+                cat >> "$tmp_conf" <<PEEREOF
+
+[Peer]
+# Peer: $(basename "$pf" .json)
+PublicKey = $p_pub
+AllowedIPs = $p_ip/32
+PEEREOF
+                if [ -n "$p_psk" ]; then
+                    echo "PresharedKey = $p_psk" >> "$tmp_conf"
+                fi
+            fi
+        done
+    fi
+
+    chmod 0600 "$tmp_conf" 2>/dev/null || true
+    mv -f "$tmp_conf" "$HP_WG_CONF"
+}
+
+# ── Check if Server Interface is Running ──────────────────────────────────────
+is_server_running() {
+    if is_dryrun; then
+        [ -f "$HP_STATE_FILE" ] && [ "$(cat "$HP_STATE_FILE" 2>/dev/null)" = "running" ]
+        return $?
+    fi
+
+    if have_wg; then
+        "$WG_BIN" show wg0 >/dev/null 2>&1
+        return $?
+    elif command -v ip >/dev/null 2>&1; then
+        ip link show wg0 >/dev/null 2>&1
+        return $?
+    fi
+
+    [ -f "$HP_STATE_FILE" ] && [ "$(cat "$HP_STATE_FILE" 2>/dev/null)" = "running" ]
+}
+
+# ── Public Endpoint Detector ──────────────────────────────────────────────────
+get_public_endpoint() {
+    local host_ip
+    host_ip="$(hostname -I 2>/dev/null | awk '{print $1}' || echo "127.0.0.1")"
+    if [ -z "$host_ip" ] || [ "$host_ip" = "127.0.0.1" ]; then
+        host_ip="127.0.0.1"
+    fi
+    echo "$host_ip"
+}
+
+# ── IP Allocation Helper ──────────────────────────────────────────────────────
+allocate_next_ip() {
+    local used_ips=()
+    if [ -d "$HP_WG_PEERS_DIR" ]; then
+        for pf in "$HP_WG_PEERS_DIR"/*.json; do
+            [ -f "$pf" ] || continue
+            local ip
+            ip="$(json_str "$pf" ip)"
+            if [ -n "$ip" ]; then
+                local last_octet
+                last_octet="${ip##*.}"
+                used_ips+=("$last_octet")
+            fi
+        done
+    fi
+
+    if [ "${#used_ips[@]}" -eq 0 ]; then
+        echo "10.8.0.2"
+        return 0
+    fi
+
+    # Find first available octet between 2 and 254
+    for oct in $(seq 2 254); do
+        local found=0
+        for u in "${used_ips[@]}"; do
+            if [ "$u" -eq "$oct" ]; then
+                found=1
+                break
+            fi
+        done
+        if [ "$found" -eq 0 ]; then
+            echo "10.8.0.$oct"
+            return 0
+        fi
+    done
+    die "VPN subnet 10.8.0.0/24 exhausted (all 253 client IPs allocated)" 13
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dispatch Verbs
+# ─────────────────────────────────────────────────────────────────────────────
+
+[ $# -ge 1 ] || usage
+verb="$1"; shift
+
+case "$verb" in
+
+  # ── Engine ─────────────────────────────────────────────────────────────────
+  #
+  # WireGuard is two halves: a kernel module and two userspace tools. The module
+  # has shipped in-tree since Linux 5.6, so there is nothing to build or install
+  # for it — only to load. The tools are 155 KB and ship in this package, so
+  # "installing the engine" is a copy and a modprobe, with no download, no
+  # compiler and no distro package involved.
+  engine-status)
+    require_argc 0 $# "engine-status"
+
+    wg_version=""
+    if have_wg; then
+        wg_version="$("$WG_BIN" --version 2>/dev/null | awk '{print $2}' || echo "")"
+    fi
+
+    # The module may be built-in, loadable, or already live. `modinfo` answers
+    # "could this kernel do WireGuard at all", which is what decides whether
+    # installing is even worth attempting.
+    kmod_available=false
+    kmod_loaded=false
+    if modinfo wireguard >/dev/null 2>&1; then kmod_available=true; fi
+    if [ -d /sys/module/wireguard ]; then kmod_loaded=true; fi
+
+    installed=false
+    have_wg && [ -x "$WG_QUICK" ] && installed=true
+
+    printf '{"installed":%s,"version":"%s","wg_bin":"%s","wg_quick":"%s","kmod_available":%s,"kmod_loaded":%s,"source":"bundled"}\n' \
+        "$installed" "$(json_escape "$wg_version")" \
+        "$(json_escape "$WG_BIN")" "$(json_escape "$WG_QUICK")" \
+        "$kmod_available" "$kmod_loaded"
+    ;;
+
+  engine-install)
+    require_argc 0 $# "engine-install"
+
+    echo "==> installing the WireGuard engine" >&2
+
+    # 1/4 — the shipped tools must actually be there.
+    echo "[1/4] locating bundled binaries in $WG_SRC_DIR" >&2
+    [ -f "$WG_SRC_DIR/wg" ] || die "bundled binary missing: $WG_SRC_DIR/wg" 20
+    [ -f "$WG_SRC_DIR/wg-quick" ] || die "bundled binary missing: $WG_SRC_DIR/wg-quick" 20
+    echo "  ✓ wg and wg-quick present" >&2
+
+    # 2/4 — verify BEFORE installing. A mismatch leaves the running engine alone;
+    # a checksum computed but not enforced is worse than none.
+    echo "[2/4] verifying sha256" >&2
+    for pair in "wg:$WG_SHA256" "wg-quick:$WG_QUICK_SHA256"; do
+        f="${pair%%:*}"; want="${pair#*:}"
+        got="$(sha256sum "$WG_SRC_DIR/$f" | awk '{print $1}')"
+        [ "$got" = "$want" ] || die "sha256 mismatch for $f: expected $want, got $got" 12
+        echo "  ✓ $f  $got" >&2
+    done
+
+    # 3/4 — install into the runtime prefix, root-owned and world-executable.
+    echo "[3/4] installing to $HP_WG_RUNTIME/bin" >&2
+    act install -d -o root -g root -m 0755 "$HP_WG_RUNTIME" "$HP_WG_RUNTIME/bin"
+    act install -o root -g root -m 0755 "$WG_SRC_DIR/wg" "$WG_BIN"
+    act install -o root -g root -m 0755 "$WG_SRC_DIR/wg-quick" "$WG_QUICK"
+    if ! is_dryrun; then
+        printf '%s\n' "$("$WG_BIN" --version 2>/dev/null || echo unknown)" > "$HP_WG_RUNTIME/VERSION"
+        echo "  ✓ $("$WG_BIN" --version 2>&1 | head -1)" >&2
+    fi
+
+    # 4/4 — load the module. Not fatal: a container or a kernel without it can
+    # still hold configuration and peers, it just cannot bring an interface up.
+    # Saying so plainly beats failing the install or pretending it worked.
+    echo "[4/4] loading the wireguard kernel module" >&2
+    if is_dryrun; then
+        echo "WOULD-EXEC: modprobe wireguard" >&2
+    elif [ -d /sys/module/wireguard ]; then
+        echo "  ✓ already loaded" >&2
+    elif modprobe wireguard >&2; then
+        echo "  ✓ loaded" >&2
+    else
+        warn "could not load the wireguard kernel module — configuration will work, but the interface cannot come up"
+    fi
+
+    ensure_dirs
+    echo "==> engine installed" >&2
+    printf '{"installed":true,"wg_bin":"%s","source":"bundled"}\n' "$(json_escape "$WG_BIN")"
+    ;;
+
+  engine-uninstall)
+    require_argc 0 $# "engine-uninstall"
+
+    echo "==> removing the WireGuard engine" >&2
+    # Config, keys and peers live in etc/ and are deliberately NOT touched, so a
+    # reinstall keeps every peer. Only the replaceable runtime goes.
+    if is_server_running && [ -x "$WG_QUICK" ]; then
+        echo "[1/2] bringing wg0 down" >&2
+        wg_env
+        "$WG_QUICK" down "$HP_WG_CONF" >&2 || true
+    else
+        echo "[1/2] wg0 is not up" >&2
+    fi
+    echo "[2/2] removing $HP_WG_RUNTIME" >&2
+    act rm -rf "$HP_WG_RUNTIME"
+    echo "==> engine removed (configuration and peers preserved)" >&2
+    printf '{"installed":false}\n'
+    ;;
+
+  server-status)
+    require_argc 0 $# "server-status"
+    ensure_dirs
+    ensure_server_keys
+
+    status="stopped"
+    if is_server_running; then
+        status="running"
+    fi
+
+    server_pubkey="$(cat "$HP_SERVER_PUBKEY" 2>/dev/null || echo "")"
+    endpoint="$(get_public_endpoint)"
+    peers_count=0
+    active_peers_count=0
+    total_rx_bytes=0
+    total_tx_bytes=0
+
+    if [ -d "$HP_WG_PEERS_DIR" ]; then
+        for pf in "$HP_WG_PEERS_DIR"/*.json; do
+            [ -f "$pf" ] || continue
+            peers_count=$((peers_count + 1))
+        done
+    fi
+
+    if [ "$status" = "running" ] && have_wg; then
+        # Parse transfer stats from "$WG_BIN" show wg0 transfer if available
+        while read -r _pub rx tx; do
+            total_rx_bytes=$((total_rx_bytes + rx))
+            total_tx_bytes=$((total_tx_bytes + tx))
+            if [ "$rx" -gt 0 ] || [ "$tx" -gt 0 ]; then
+                active_peers_count=$((active_peers_count + 1))
+            fi
+        done < <("$WG_BIN" show wg0 transfer 2>/dev/null || true)
+    fi
+
+    printf '{"status":"%s","interface":"wg0","listen_port":51820,"public_key":"%s","address":"10.8.0.1/24","subnet":"10.8.0.0/24","endpoint":"%s","total_rx_bytes":%s,"total_tx_bytes":%s,"peers_count":%s,"active_peers_count":%s}\n' \
+        "$status" "$(json_escape "$server_pubkey")" "$(json_escape "$endpoint")" "$total_rx_bytes" "$total_tx_bytes" "$peers_count" "$active_peers_count" 
+    ;;
+
+  server-start)
+    require_argc 0 $# "server-start"
+    ensure_dirs
+    ensure_server_keys
+    rebuild_wg0_conf
+
+    echo "Starting WireGuard server wg0..." >&2
+    if is_dryrun; then
+        echo "WOULD-EXEC: wg-quick up $HP_WG_CONF" >&2
+        echo "running" > "$HP_STATE_FILE"
+    else
+        if [ -x "$WG_QUICK" ]; then
+            # If interface exists, tear it down first to avoid RTNETLINK errors
+            wg_env
+            "$WG_QUICK" down "$HP_WG_CONF" >&2 || ip link delete wg0 >&2 || true
+            "$WG_QUICK" up "$HP_WG_CONF" >&2 || {
+                warn "wg-quick up returned non-zero, trying manual ip link setup"
+                ip link add wg0 type wireguard 2>/dev/null || true
+                wg setconf wg0 "$HP_WG_CONF" 2>/dev/null || true
+                ip addr add 10.8.0.1/24 dev wg0 2>/dev/null || true
+                ip link set wg0 up 2>/dev/null || true
+            }
+        elif command -v ip >/dev/null 2>&1 && have_wg; then
+            ip link add wg0 type wireguard 2>/dev/null || true
+            wg setconf wg0 "$HP_WG_CONF" 2>/dev/null || true
+            ip addr add 10.8.0.1/24 dev wg0 2>/dev/null || true
+            ip link set wg0 up 2>/dev/null || true
+        fi
+        echo "running" > "$HP_STATE_FILE"
+    fi
+
+    echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') [INFO] WireGuard server wg0 started (port 51820)" >> "$HP_LOG_FILE" 2>/dev/null || true
+    echo '{"ok":true,"status":"running","interface":"wg0"}'
+    ;;
+
+  server-stop)
+    require_argc 0 $# "server-stop"
+    ensure_dirs
+
+    echo "Stopping WireGuard server wg0..." >&2
+    if is_dryrun; then
+        echo "WOULD-EXEC: wg-quick down $HP_WG_CONF" >&2
+        echo "stopped" > "$HP_STATE_FILE"
+    else
+        if [ -x "$WG_QUICK" ]; then
+            wg_env
+            "$WG_QUICK" down "$HP_WG_CONF" >&2 || true
+        fi
+        if command -v ip >/dev/null 2>&1; then
+            ip link delete wg0 >/dev/null 2>&1 || true
+        fi
+        echo "stopped" > "$HP_STATE_FILE"
+    fi
+
+    echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') [INFO] WireGuard server wg0 stopped" >> "$HP_LOG_FILE" 2>/dev/null || true
+    echo '{"ok":true,"status":"stopped","interface":"wg0"}'
+    ;;
+
+  server-restart)
+    require_argc 0 $# "server-restart"
+    ensure_dirs
+    ensure_server_keys
+    rebuild_wg0_conf
+
+    echo "Restarting WireGuard server wg0..." >&2
+    if is_dryrun; then
+        echo "WOULD-EXEC: wg-quick down $HP_WG_CONF && wg-quick up $HP_WG_CONF" >&2
+        echo "running" > "$HP_STATE_FILE"
+    else
+        if [ -x "$WG_QUICK" ]; then
+            wg_env
+            "$WG_QUICK" down "$HP_WG_CONF" >&2 || true
+            ip link delete wg0 >/dev/null 2>&1 || true
+            "$WG_QUICK" up "$HP_WG_CONF" >&2 || true
+        fi
+        echo "running" > "$HP_STATE_FILE"
+    fi
+
+    echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') [INFO] WireGuard server wg0 restarted" >> "$HP_LOG_FILE" 2>/dev/null || true
+    echo '{"ok":true,"status":"running","interface":"wg0"}'
+    ;;
+
+  server-toggle)
+    require_argc 1 $# "server-toggle <enabled:0|1>"
+    enabled="$1"
+    case "$enabled" in
+        0|1) ;;
+        *) die "enabled must be 0 or 1" 12 ;;
+    esac
+
+    if [ "$enabled" = "1" ]; then
+        ensure_dirs
+        ensure_server_keys
+        rebuild_wg0_conf
+        if is_dryrun; then
+            echo "WOULD-EXEC: wg-quick up $HP_WG_CONF" >&2
+            echo "running" > "$HP_STATE_FILE"
+        else
+            if [ -x "$WG_QUICK" ]; then
+                wg_env
+            "$WG_QUICK" down "$HP_WG_CONF" >&2 || ip link delete wg0 >&2 || true
+                "$WG_QUICK" up "$HP_WG_CONF" >&2 || true
+            fi
+            echo "running" > "$HP_STATE_FILE"
+        fi
+        echo '{"ok":true,"enabled":true,"status":"running"}'
+    else
+        if is_dryrun; then
+            echo "WOULD-EXEC: wg-quick down $HP_WG_CONF" >&2
+            echo "stopped" > "$HP_STATE_FILE"
+        else
+            if [ -x "$WG_QUICK" ]; then
+                wg_env
+            "$WG_QUICK" down "$HP_WG_CONF" >&2 || true
+            fi
+            if command -v ip >/dev/null 2>&1; then
+                ip link delete wg0 >/dev/null 2>&1 || true
+            fi
+            echo "stopped" > "$HP_STATE_FILE"
+        fi
+        echo '{"ok":true,"enabled":false,"status":"stopped"}'
+    fi
+    ;;
+
+  server-config)
+    require_argc 0 $# "server-config"
+    ensure_dirs
+    ensure_server_keys
+
+    server_pubkey="$(cat "$HP_SERVER_PUBKEY" 2>/dev/null || echo "")"
+    endpoint="$(get_public_endpoint)"
+
+    # The paths are reported rather than restated in the UI. This script is the
+    # only thing that knows where they actually are, so a UI that hardcodes them
+    # is a copy that drifts — which is exactly how the panel came to display a
+    # loopback port the service had never used.
+    printf '{"interface":"wg0","listen_port":51820,"address":"10.8.0.1/24","subnet":"10.8.0.0/24","mtu":1420,"public_key":"%s","endpoint":"%s","config_path":"%s","isolation_path":"%s","run_path":"%s","logs_path":"%s","peers_path":"%s","runtime_path":"%s"}\n' \
+        "$(json_escape "$server_pubkey")" "$(json_escape "$endpoint")" "$(json_escape "$HP_WG_CONF")" "$(json_escape "$HP_WG_DIR")" \
+        "$(json_escape "$HP_WG_RUN")" "$(json_escape "$HP_WG_LOGS")" "$(json_escape "$HP_WG_PEERS_DIR")" "$(json_escape "$HP_WG_RUNTIME")"
+    ;;
+
+  server-logs)
+    require_argc 0 $# "server-logs"
+    ensure_dirs
+
+    printf '{"logs":['
+    first=1
+    if [ -f "$HP_LOG_FILE" ]; then
+        tail -n 100 "$HP_LOG_FILE" | while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            if [ "$first" -eq 0 ]; then
+                printf ','
+            fi
+            first=0
+            printf '"%s"' "$(json_escape "$line")"
+        done
+    else
+        printf '"%s [INFO] WireGuard server logs initialized under /opt/hostpanel/logs/wireguard"' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+    fi
+    printf ']}\n'
+    ;;
+
+  list-peers)
+    require_argc 0 $# "list-peers"
+    ensure_dirs
+
+    printf '{"peers":['
+    first=1
+    if [ -d "$HP_WG_PEERS_DIR" ]; then
+        for pf in "$HP_WG_PEERS_DIR"/*.json; do
+            [ -f "$pf" ] || continue
+            if [ "$first" -eq 0 ]; then
+                printf ','
+            fi
+            first=0
+
+            # Read saved json fields
+            p_id="$(grep -o '"id":[[:space:]]*"[^"]*"' "$pf" | cut -d'"' -f4 || echo "")"
+            p_name="$(grep -o '"name":[[:space:]]*"[^"]*"' "$pf" | cut -d'"' -f4 || echo "")"
+            p_ip="$(grep -o '"ip":[[:space:]]*"[^"]*"' "$pf" | cut -d'"' -f4 || echo "")"
+            p_pub="$(grep -o '"public_key":[[:space:]]*"[^"]*"' "$pf" | cut -d'"' -f4 || echo "")"
+            p_allowed="$(grep -o '"allowed_ips":[[:space:]]*"[^"]*"' "$pf" | cut -d'"' -f4 || echo "0.0.0.0/0, ::/0")"
+            p_dns="$(grep -o '"dns":[[:space:]]*"[^"]*"' "$pf" | cut -d'"' -f4 || echo "1.1.1.1")"
+            p_created="$(grep -o '"created_at":[[:space:]]*"[^"]*"' "$pf" | cut -d'"' -f4 || echo "")"
+            p_enabled="$(grep -o '"enabled":[[:space:]]*[^,}]*' "$pf" | cut -d':' -f2 | tr -d ' ' || echo "true")"
+
+            rx=0
+            tx=0
+            hs=0
+            ep=""
+            if is_server_running && have_wg && [ -n "$p_pub" ]; then
+                rx="$("$WG_BIN" show wg0 transfer 2>/dev/null | grep "^$p_pub" | awk '{print $2}' || echo 0)"
+                tx="$("$WG_BIN" show wg0 transfer 2>/dev/null | grep "^$p_pub" | awk '{print $3}' || echo 0)"
+                hs="$("$WG_BIN" show wg0 latest-handshakes 2>/dev/null | grep "^$p_pub" | awk '{print $2}' || echo 0)"
+                ep="$("$WG_BIN" show wg0 endpoints 2>/dev/null | grep "^$p_pub" | awk '{print $2}' || echo "")"
+            fi
+            rx="${rx:-0}"
+            tx="${tx:-0}"
+            hs="${hs:-0}"
+
+            printf '{"id":"%s","name":"%s","ip":"%s","public_key":"%s","allowed_ips":"%s","dns":"%s","created_at":"%s","enabled":%s,"rx_bytes":%s,"tx_bytes":%s,"last_handshake":%s,"endpoint":"%s"}' \
+                "$(json_escape "$p_id")" "$(json_escape "$p_name")" "$(json_escape "$p_ip")" "$(json_escape "$p_pub")" "$(json_escape "$p_allowed")" "$(json_escape "$p_dns")" "$(json_escape "$p_created")" "$p_enabled" "$rx" "$tx" "$hs" "$(json_escape "$ep")"
+        done
+    fi
+    printf ']}\n'
+    ;;
+
+  create-peer)
+    [ $# -ge 1 ] && [ $# -le 4 ] || die "usage: create-peer <name> [ip] [allowed_ips] [dns]" 12
+    name="$1"
+    ip="${2:-}"
+    allowed_ips="${3:-0.0.0.0/0, ::/0}"
+    dns="${4:-1.1.1.1, 8.8.8.8}"
+
+    # Validate peer name
+    echo "$name" | grep -Eq '^[a-zA-Z0-9_-]{1,32}$' || die "invalid peer name '$name' (want ^[a-zA-Z0-9_-]{1,32}\$)" 12
+
+    # Read optional secret from stdin (NUL-delimited key\0value\0 or standard input)
+    preshared_key=""
+    if [ ! -t 0 ]; then
+        while IFS= read -r -d '' k && IFS= read -r -d '' v; do
+            if [ "$k" = "preshared_key" ]; then
+                preshared_key="$v"
+            fi
+        done || true
+    fi
+
+    ensure_dirs
+    ensure_server_keys
+
+    # Check peer uniqueness
+    id="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_-' '_')"
+    peer_json="$HP_WG_PEERS_DIR/$id.json"
+    peer_conf="$HP_WG_PEERS_DIR/$id.conf"
+
+    if [ -f "$peer_json" ]; then
+        die "peer '$name' already exists" 13
+    fi
+
+    # Allocate or validate IP
+    if [ -z "$ip" ]; then
+        ip="$(allocate_next_ip)"
+    else
+        echo "$ip" | grep -Eq '^10\.8\.0\.(?:[2-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|254)$' \
+            || die "invalid client IP '$ip' (must be in range 10.8.0.2 - 10.8.0.254)" 12
+    fi
+
+    # Generate client keys
+    client_priv="$(gen_wg_key)"
+    client_pub="$(gen_wg_pubkey "$client_priv")"
+    server_pub="$(cat "$HP_SERVER_PUBKEY" 2>/dev/null || echo "")"
+    server_endpoint="$(get_public_endpoint)"
+    created_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+    # Generate Client Config File (.conf)
+    cat > "$peer_conf" <<CONFEOF
+[Interface]
+PrivateKey = $client_priv
+Address = $ip/24
+DNS = $dns
+MTU = 1420
+
+[Peer]
+PublicKey = $server_pub
+Endpoint = $server_endpoint:51820
+AllowedIPs = $allowed_ips
+PersistentKeepalive = 25
+CONFEOF
+    if [ -n "$preshared_key" ]; then
+        echo "PresharedKey = $preshared_key" >> "$peer_conf"
+    fi
+    chmod 0600 "$peer_conf" 2>/dev/null || true
+
+    # Save metadata JSON
+    cat > "$peer_json" <<JSONEOF
+{
+  "id": "$(json_escape "$id")",
+  "name": "$(json_escape "$name")",
+  "ip": "$(json_escape "$ip")",
+  "public_key": "$(json_escape "$client_pub")",
+  "allowed_ips": "$(json_escape "$allowed_ips")",
+  "dns": "$(json_escape "$dns")",
+  "preshared_key": "$(json_escape "$preshared_key")",
+  "created_at": "$created_at",
+  "enabled": true
+}
+JSONEOF
+    chmod 0600 "$peer_json" 2>/dev/null || true
+
+    # Rebuild server wg0.conf and sync live interface if running
+    rebuild_wg0_conf
+    if is_server_running && have_wg; then
+        if [ -n "$preshared_key" ]; then
+            psk_tmp="$(mktemp)"
+            echo "$preshared_key" > "$psk_tmp"
+            "$WG_BIN" set wg0 peer "$client_pub" allowed-ips "$ip/32" preshared-key "$psk_tmp" >&2 || warn "wg set failed for $client_pub"
+            rm -f "$psk_tmp"
+        else
+            "$WG_BIN" set wg0 peer "$client_pub" allowed-ips "$ip/32" >&2 || warn "wg set failed for $client_pub"
+        fi
+    fi
+
+    conf_content="$(cat "$peer_conf")"
+    echo "$created_at [INFO] Peer created: $name ($ip) id=$id" >> "$HP_LOG_FILE" 2>/dev/null || true
+
+    printf '{"ok":true,"peer":{"id":"%s","name":"%s","ip":"%s","public_key":"%s","allowed_ips":"%s","dns":"%s","created_at":"%s","enabled":true,"config":"%s"}}\n' \
+        "$(json_escape "$id")" "$(json_escape "$name")" "$(json_escape "$ip")" "$(json_escape "$client_pub")" "$(json_escape "$allowed_ips")" "$(json_escape "$dns")" "$created_at" "$(json_escape "$conf_content")" 
+    ;;
+
+  delete-peer)
+    require_argc 1 $# "delete-peer <id>"
+    id="$1"
+    echo "$id" | grep -Eq '^[a-zA-Z0-9_-]{1,64}$' || die "invalid peer id '$id'" 12
+
+    peer_json="$HP_WG_PEERS_DIR/$id.json"
+    peer_conf="$HP_WG_PEERS_DIR/$id.conf"
+
+    [ -f "$peer_json" ] || die "peer '$id' not found" 10
+
+    client_pub="$(json_str "$peer_json" public_key)"
+    if is_server_running && have_wg && [ -n "$client_pub" ]; then
+        "$WG_BIN" set wg0 peer "$client_pub" remove >&2 || warn "wg set remove failed for $client_pub"
+    fi
+
+    rm -f "$peer_json" "$peer_conf"
+    rebuild_wg0_conf
+
+    echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') [INFO] Peer deleted: $id" >> "$HP_LOG_FILE" 2>/dev/null || true
+    echo "{\"ok\":true,\"id\":\"$(json_escape "$id")\",\"deleted\":true}"
+    ;;
+
+  get-peer-config)
+    require_argc 1 $# "get-peer-config <id>"
+    id="$1"
+    echo "$id" | grep -Eq '^[a-zA-Z0-9_-]{1,64}$' || die "invalid peer id '$id'" 12
+
+    peer_conf="$HP_WG_PEERS_DIR/$id.conf"
+    peer_json="$HP_WG_PEERS_DIR/$id.json"
+
+    [ -f "$peer_conf" ] || die "peer config '$id' not found" 10
+
+    conf_content="$(cat "$peer_conf")"
+    p_name="$(json_str "$peer_json" name)"; [ -n "$p_name" ] || p_name="$id"
+    p_ip="$(json_str "$peer_json" ip)"
+
+    printf '{"id":"%s","name":"%s","ip":"%s","config":"%s"}\n' \
+        "$(json_escape "$id")" "$(json_escape "$p_name")" "$(json_escape "$p_ip")" "$(json_escape "$conf_content")" 
+    ;;
+
+  get-peer-qr)
+    require_argc 1 $# "get-peer-qr <id>"
+    id="$1"
+    echo "$id" | grep -Eq '^[a-zA-Z0-9_-]{1,64}$' || die "invalid peer id '$id'" 12
+
+    peer_conf="$HP_WG_PEERS_DIR/$id.conf"
+    [ -f "$peer_conf" ] || die "peer config '$id' not found" 10
+
+    conf_content="$(cat "$peer_conf")"
+    printf '{"id":"%s","config":"%s","qr_data":"%s"}\n' \
+        "$(json_escape "$id")" "$(json_escape "$conf_content")" "$(json_escape "$conf_content")" 
+    ;;
+
+  *)
+    echo "unknown verb '$verb'" >&2
+    usage
+    ;;
+esac

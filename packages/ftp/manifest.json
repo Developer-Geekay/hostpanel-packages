@@ -1,0 +1,179 @@
+{
+  "manifest_version": 1,
+  "feature": "ftp",
+  "label": "FTP Accounts",
+  "version": "3.0.0",
+  "requires_core": [
+    3,
+    0,
+    0
+  ],
+  "api": {
+    "module": "hostpanel_ftpd",
+    "unit": "hostpanel-ftpd.service",
+    "run_as": "hp-ftp"
+  },
+  "frontend": {
+    "entry": "frontend/dist/main.js",
+    "_comment": "built bundle the shell imports at runtime and mounts"
+  },
+  "nav": [
+    {
+      "section": "hosting",
+      "section_label": "Hosting",
+      "section_order": 10,
+      "label": "FTP Accounts",
+      "icon": "upload-cloud",
+      "order": 50
+    }
+  ],
+  "ops": {
+    "script": "/opt/hostpanel/packages/ftp/ops/hp-ftp",
+    "sudoers": "hostpanel-ftpd"
+  },
+  "sandbox": {
+    "read_write_paths": [
+      "/etc/pure-ftpd",
+      "/home"
+    ],
+    "_comment": "The pure-ftpd virtual-user database, and the home directories those accounts are confined to. Paths this package's ops script must be able to WRITE. The unit runs ProtectSystem=strict, which makes the entire filesystem read-only \u2014 and that applies to sudo'd children too, since they inherit the unit's mount namespace. Without declaring these the script fails with 'Read-only file system' while running as root, which looks nothing like a permissions problem. Declaring them per package is what keeps the sandbox meaningful."
+  },
+  "requires": {
+    "system_groups": [
+      "ftpgroup"
+    ],
+    "system_accounts": [
+      "ftpuser"
+    ],
+    "_comment": "pure-ftpd's virtual users all map onto a single underlying uid and gid; every account this package creates is owned by them. Declared here so provisioning creates them once, under review, rather than having the ops script create system users lazily inside an operation."
+  },
+  "operations": {
+    "ftp.list": {
+      "verb": "list",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "ftp.list",
+      "timeout_ms": 10000,
+      "params": {}
+    },
+    "ftp.create": {
+      "verb": "create",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "ftp.create",
+      "timeout_ms": 30000,
+      "params": {
+        "username": {
+          "pattern": "^[a-zA-Z0-9_][a-zA-Z0-9_.@-]{0,63}$",
+          "required": true
+        },
+        "home": {
+          "pattern": "^/[^\\u0000]*$",
+          "required": true
+        },
+        "password": {
+          "secret": true,
+          "required": true
+        }
+      }
+    },
+    "ftp.delete": {
+      "verb": "delete",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "ftp.delete",
+      "timeout_ms": 30000,
+      "params": {
+        "username": {
+          "pattern": "^[a-zA-Z0-9_][a-zA-Z0-9_.@-]{0,63}$",
+          "required": true
+        }
+      }
+    },
+    "ftp.set-password": {
+      "verb": "set-password",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "ftp.set_password",
+      "timeout_ms": 15000,
+      "params": {
+        "username": {
+          "pattern": "^[a-zA-Z0-9_][a-zA-Z0-9_.@-]{0,63}$",
+          "required": true
+        },
+        "password": {
+          "secret": true,
+          "required": true
+        }
+      }
+    },
+    "ftp.set-home": {
+      "verb": "set-home",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "ftp.set_home",
+      "timeout_ms": 15000,
+      "params": {
+        "username": {
+          "pattern": "^[a-zA-Z0-9_][a-zA-Z0-9_.@-]{0,63}$",
+          "required": true
+        },
+        "home": {
+          "pattern": "^/[^\\u0000]*$",
+          "required": true
+        }
+      }
+    },
+    "ftp.disable": {
+      "verb": "disable",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "ftp.disable",
+      "timeout_ms": 15000,
+      "params": {
+        "username": {
+          "pattern": "^[a-zA-Z0-9_][a-zA-Z0-9_.@-]{0,63}$",
+          "required": true
+        }
+      }
+    },
+    "ftp.enable": {
+      "verb": "enable",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "ftp.enable",
+      "timeout_ms": 15000,
+      "params": {
+        "username": {
+          "pattern": "^[a-zA-Z0-9_][a-zA-Z0-9_.@-]{0,63}$",
+          "required": true
+        },
+        "password": {
+          "secret": true,
+          "required": true
+        }
+      }
+    },
+    "ftp.set-quota": {
+      "verb": "set-quota",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "ftp.set_quota",
+      "timeout_ms": 15000,
+      "params": {
+        "username": {
+          "pattern": "^[a-zA-Z0-9_][a-zA-Z0-9_.@-]{0,63}$",
+          "required": true
+        },
+        "max_files": {
+          "pattern": "^[0-9]{1,9}$",
+          "required": true
+        },
+        "max_mb": {
+          "pattern": "^[0-9]{1,9}$",
+          "required": true
+        }
+      }
+    }
+  }
+}

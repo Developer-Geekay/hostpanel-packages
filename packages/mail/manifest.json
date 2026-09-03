@@ -1,0 +1,254 @@
+{
+  "manifest_version": 1,
+  "feature": "mail",
+  "label": "Mail Accounts & Domains",
+  "version": "3.0.0",
+  "requires_core": [
+    3,
+    0,
+    0
+  ],
+  "api": {
+    "module": "hostpanel_maild",
+    "unit": "hostpanel-maild.service",
+    "run_as": "hp-mail"
+  },
+  "frontend": {
+    "entry": "frontend/dist/main.js"
+  },
+  "nav": [
+    {
+      "section": "hosting",
+      "section_label": "Hosting",
+      "section_order": 10,
+      "label": "Mail",
+      "icon": "mail",
+      "order": 40
+    }
+  ],
+  "ops": {
+    "script": "/opt/hostpanel/packages/mail/ops/hp-mail",
+    "sudoers": "hostpanel-maild"
+  },
+  "sandbox": {
+    "read_write_paths": [
+      "/opt/hostpanel/etc/mail",
+      "/opt/hostpanel/data/mail",
+      "/opt/hostpanel/logs/mail",
+      "/opt/hostpanel/run/mail",
+      "/tmp"
+    ]
+  },
+  "operations": {
+    "mail.status": {
+      "verb": "status",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "mail.status",
+      "timeout_ms": 10000,
+      "params": {}
+    },
+    "mail.list-domains": {
+      "verb": "list-domains",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "mail.domain.list",
+      "timeout_ms": 10000,
+      "params": {}
+    },
+    "mail.add-domain": {
+      "verb": "add-domain",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "mail.domain.add",
+      "timeout_ms": 30000,
+      "params": {
+        "domain": {
+          "pattern": "^[a-zA-Z0-9][-a-zA-Z0-9.]*[a-zA-Z0-9]\\.[a-zA-Z]{2,}$",
+          "required": true
+        }
+      }
+    },
+    "mail.delete-domain": {
+      "verb": "delete-domain",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "mail.domain.delete",
+      "timeout_ms": 30000,
+      "params": {
+        "domain": {
+          "pattern": "^[a-zA-Z0-9][-a-zA-Z0-9.]*[a-zA-Z0-9]\\.[a-zA-Z]{2,}$",
+          "required": true
+        }
+      }
+    },
+    "mail.get-dkim": {
+      "verb": "get-dkim",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "mail.domain.dkim",
+      "timeout_ms": 10000,
+      "params": {
+        "domain": {
+          "pattern": "^[a-zA-Z0-9][-a-zA-Z0-9.]*[a-zA-Z0-9]\\.[a-zA-Z]{2,}$",
+          "required": true
+        }
+      }
+    },
+    "mail.list-mailboxes": {
+      "verb": "list-mailboxes",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "mail.mailbox.list",
+      "timeout_ms": 10000,
+      "params": {
+        "domain": {
+          "pattern": "^[a-zA-Z0-9][-a-zA-Z0-9.]*[a-zA-Z0-9]\\.[a-zA-Z]{2,}$",
+          "required": false
+        }
+      }
+    },
+    "mail.create-mailbox": {
+      "verb": "create-mailbox",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "mail.mailbox.create",
+      "timeout_ms": 30000,
+      "params": {
+        "email": {
+          "pattern": "^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\\.[a-zA-Z0-9-.]+$",
+          "required": true
+        },
+        "password": {
+          "secret": true,
+          "required": true
+        },
+        "quota_mb": {
+          "pattern": "^[0-9]{1,9}$",
+          "required": false,
+          "default": "1024"
+        }
+      }
+    },
+    "mail.delete-mailbox": {
+      "verb": "delete-mailbox",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "mail.mailbox.delete",
+      "timeout_ms": 30000,
+      "params": {
+        "email": {
+          "pattern": "^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\\.[a-zA-Z0-9-.]+$",
+          "required": true
+        }
+      }
+    },
+    "mail.set-password": {
+      "verb": "set-password",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "mail.mailbox.set_password",
+      "timeout_ms": 15000,
+      "params": {
+        "email": {
+          "pattern": "^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\\.[a-zA-Z0-9-.]+$",
+          "required": true
+        },
+        "password": {
+          "secret": true,
+          "required": true
+        }
+      }
+    },
+    "mail.set-quota": {
+      "verb": "set-quota",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "mail.mailbox.set_quota",
+      "timeout_ms": 15000,
+      "params": {
+        "email": {
+          "pattern": "^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\\.[a-zA-Z0-9-.]+$",
+          "required": true
+        },
+        "quota_mb": {
+          "pattern": "^[0-9]{1,9}$",
+          "required": true
+        }
+      }
+    },
+    "mail.list-aliases": {
+      "verb": "list-aliases",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "mail.alias.list",
+      "timeout_ms": 10000,
+      "params": {
+        "domain": {
+          "pattern": "^[a-zA-Z0-9][-a-zA-Z0-9.]*[a-zA-Z0-9]\\.[a-zA-Z]{2,}$",
+          "required": false
+        }
+      }
+    },
+    "mail.create-alias": {
+      "verb": "create-alias",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "mail.alias.create",
+      "timeout_ms": 15000,
+      "params": {
+        "source": {
+          "pattern": "^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\\.[a-zA-Z0-9-.]+$",
+          "required": true
+        },
+        "destination": {
+          "pattern": "^[^\\u0000\r\n]+$",
+          "required": true
+        }
+      }
+    },
+    "mail.delete-alias": {
+      "verb": "delete-alias",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "mail.alias.delete",
+      "timeout_ms": 15000,
+      "params": {
+        "source": {
+          "pattern": "^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\\.[a-zA-Z0-9-.]+$",
+          "required": true
+        }
+      }
+    },
+    "mail.get-queue": {
+      "verb": "get-queue",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "mail.queue.get",
+      "timeout_ms": 10000,
+      "params": {}
+    },
+    "mail.flush-queue": {
+      "verb": "flush-queue",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "mail.queue.flush",
+      "timeout_ms": 30000,
+      "params": {}
+    },
+    "mail.logs": {
+      "verb": "logs",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "mail.logs",
+      "timeout_ms": 10000,
+      "params": {
+        "lines": {
+          "pattern": "^[0-9]{1,5}$",
+          "required": false,
+          "default": "50"
+        }
+      }
+    }
+  }
+}

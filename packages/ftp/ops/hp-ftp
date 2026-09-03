@@ -1,0 +1,394 @@
+#!/bin/bash
+# hp-ftp — root helper for the HostPanel v3 ftp daemon.
+#
+# Installed root-owned 0755. The daemon's sudoers file grants THIS SINGLE PATH
+# and nothing else, so `hp-ftp` (the daemon account) can never invoke `pure-pw`
+# directly — only through the validation below.
+#
+#   hp-ftp ALL=(root) NOPASSWD: /opt/hostpanel/packages/ftp/ops/hp-ftp *
+#
+# Manages pure-ftpd VIRTUAL users via `pure-pw` against a PureDB passwd file —
+# not real Linux accounts. Every virtual user is mapped to ONE shared system
+# uid/gid (HP_FTP_SYS_USER / HP_FTP_SYS_GROUP) for filesystem permissions,
+# exactly the pattern most shared-hosting panels use, so this script never
+# calls useradd/userdel itself.
+#
+# NOT VERIFIED against a live pure-ftpd/pure-pw binary — neither is installed
+# on the dev VM this was built and tested against. The `pure-pw` invocations
+# below use the flags most stably documented across pure-ftpd's history
+# (useradd/usermod/userdel/mkdb/show, -f/-u/-g/-d/-c/-n/-N); confirm them
+# against `pure-pw --help` / `man pure-pw` on the actual target host before
+# trusting this in production. The validation path (arity, identifier shape,
+# deny-list, path confinement) is fully covered by ops/tests/run.sh and does
+# not depend on pure-pw being present.
+#
+# ── Enable/disable, honestly ──────────────────────────────────────────────
+# pure-pw has no native "disable this account" flag. This script does not
+# invent a fake one. Instead:
+#   disable: the account's password is replaced with a long random value the
+#            operator never sees (a real auth-level lock, not a bluff), and
+#            its GECOS field is set to the literal marker HP-DISABLED so
+#            `list` can report status without HostPanel keeping any state of
+#            its own — the marker lives on the resource itself, the same way
+#            a database's own system catalog is the source of truth rather
+#            than a side table.
+#   enable:  requires a NEW password from the operator. The random lockout
+#            password from `disable` is never stored anywhere, so there is no
+#            "previous" password to restore — this package holds no state.
+#
+# Verbs: list create delete set-password set-home disable enable set-quota
+# Exit:  0 ok | 1 internal | 10 not found | 11 precondition | 12 validation
+#        13 conflict | 14 denied | 20 dependency
+#
+# stdout is DATA (JSON where structured). stderr is DIAGNOSTICS.
+
+set -euo pipefail
+
+# shellcheck disable=SC2034
+OPS_NAME="hp-ftp"
+# shellcheck disable=SC1091
+if [ "$(id -u)" = "0" ]; then
+    HP_CORE_LIB=/opt/hostpanel/hpcore/lib
+else
+    : "${HP_CORE_LIB:=/opt/hostpanel/hpcore/lib}"
+fi
+. "$HP_CORE_LIB/common.sh"
+
+# Pinned when root, exactly like HP_HOME_ROOT in hp-users: the environment
+# cannot redirect a privileged script at an attacker-controlled root.
+# Overridable only unprivileged, for the negative-test suite.
+if [ "$(id -u)" = "0" ]; then
+    HP_FTP_ROOT=/home
+    HP_FTP_PASSWD_FILE=/etc/pure-ftpd/pureftpd.passwd
+    HP_FTP_DB_FILE=/etc/pure-ftpd/pureftpd.pdb
+    HP_FTP_SYS_USER=ftpuser
+    HP_FTP_SYS_GROUP=ftpgroup
+else
+    : "${HP_FTP_ROOT:=/home}"
+    : "${HP_FTP_PASSWD_FILE:=/etc/pure-ftpd/pureftpd.passwd}"
+    : "${HP_FTP_DB_FILE:=/etc/pure-ftpd/pureftpd.pdb}"
+    : "${HP_FTP_SYS_USER:=ftpuser}"
+    : "${HP_FTP_SYS_GROUP:=ftpgroup}"
+fi
+
+DISABLED_MARKER="HP-DISABLED"
+
+usage() {
+    cat >&2 <<'EOF'
+usage: hp-ftp <verb> [args]
+  list
+  create        <username> <home>        [required: password\0<value>\0 on stdin]
+  delete        <username>
+  set-password  <username>               [required: password\0<value>\0 on stdin]
+  set-home      <username> <home>
+  disable       <username>
+  enable        <username>               [required: password\0<value>\0 on stdin]
+  set-quota     <username> <max-files:0=unlimited> <max-mb:0=unlimited>
+EOF
+    exit 12
+}
+
+# ── Validation ─────────────────────────────────────────────────────────────
+
+valid_ftp_username() {
+    local u="$1"
+    [ -n "$u" ] || die "ftp username must not be empty" 12
+    echo "$u" | grep -Eq '^[a-zA-Z0-9_][a-zA-Z0-9_.@-]{0,63}$' \
+        || die "invalid ftp username '$u' (want ^[a-zA-Z0-9_][a-zA-Z0-9_.@-]{0,63}\$)" 12
+}
+
+valid_quota_number() {
+    local label="$1" n="$2"
+    echo "$n" | grep -Eq '^[0-9]{1,9}$' \
+        || die "$label must be a non-negative integer (0 = unlimited), got '$n'" 12
+}
+
+# Reserved/protected virtual usernames. FTP virtual users are not real Linux
+# accounts, so the OS-account deny-list in common.sh does not apply — this is
+# this package's own, narrower list.
+guard_protected_ftp_user() {
+    case "$1" in
+        root|admin|anonymous|ftp)
+            die "'$1' is a reserved FTP account name and cannot be used" 14 ;;
+    esac
+    if [ "$1" = "$HP_FTP_SYS_USER" ] || [ "$1" = "$HP_FTP_SYS_GROUP" ]; then
+        die "'$1' is the configured underlying system account and cannot be used as a virtual FTP username" 14
+    fi
+}
+
+# ftp_prepare_home <raw-path> — validate an operator-supplied home directory
+# against HP_FTP_ROOT, creating it if it does not yet exist, and defeating a
+# symlink planted inside the allowed root by re-checking the prefix on the
+# REALPATH once the directory is known to exist. Echoes the path to use.
+#
+# Under HP_OPS_DRYRUN the directory is never actually created (mkdir goes
+# through act()), so there is nothing on disk yet for realpath to resolve —
+# the syntactic checks (absolute, no '..', prefix) still run, which is what
+# the negative-test suite exercises. Dry-run is inert under sudo, so
+# production always takes the real branch and always gets the re-check.
+ftp_prepare_home() {
+    local raw="$1"
+    valid_abs_path "$raw"
+    no_traversal "$raw"
+    case "$raw" in
+        "$HP_FTP_ROOT"/*) ;;
+        *) die "home path '$raw' is outside the permitted root '$HP_FTP_ROOT'" 12 ;;
+    esac
+    if [ ! -e "$raw" ]; then
+        act mkdir -p "$raw" || die "failed to create home directory '$raw'" 20
+    fi
+    if [ -e "$raw" ]; then
+        resolve_and_recheck "$raw" "$HP_FTP_ROOT"
+    else
+        printf '%s\n' "$raw"
+    fi
+}
+
+# ── System mapping ────────────────────────────────────────────────────────
+
+ftp_sys_uid() {
+    id -u "$HP_FTP_SYS_USER" 2>/dev/null \
+        || die "system user '$HP_FTP_SYS_USER' does not exist — pure-ftpd is not provisioned correctly" 20
+}
+
+ftp_sys_gid() {
+    getent group "$HP_FTP_SYS_GROUP" 2>/dev/null | awk -F: '{print $3}' \
+        || die "system group '$HP_FTP_SYS_GROUP' does not exist — pure-ftpd is not provisioned correctly" 20
+}
+
+# ── pure-pw wrapper ───────────────────────────────────────────────────────
+
+pure_pw() {
+    pure-pw "$@" -f "$HP_FTP_PASSWD_FILE"
+}
+
+ftp_rebuild_db() {
+    act pure-pw mkdb "$HP_FTP_DB_FILE" -f "$HP_FTP_PASSWD_FILE" \
+        || die "pure-pw mkdb failed" 20
+}
+
+ftp_account_exists() {
+    pure_pw show "$1" >/dev/null 2>&1
+}
+
+# json_escape <value> — see packages/database/ops/hp-database for the same
+# helper and the same reasoning: values read back from the passwd file were
+# not necessarily created through this script's own validated path.
+json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    printf '%s' "$s"
+}
+
+# Field positions in the plaintext passwd file this script relies on:
+# name(1) uid(3) gid(4) gecos(5) home(6). Quota and bandwidth fields exist
+# further along the line but this script does not rely on their exact column
+# position — verify against `pure-pw show` on the real host before extending
+# this. `ftp_list` (below) is the one place that reads them.
+
+# ── Verbs ──────────────────────────────────────────────────────────────────
+
+ftp_list() {
+    [ -f "$HP_FTP_PASSWD_FILE" ] || { printf '{"accounts":[]}\n'; return 0; }
+    printf '{"accounts":['
+    local first=1 line name uid gid gecos home enabled
+    while IFS=: read -r name _hash uid gid gecos home _rest; do
+        if [ -z "$name" ]; then
+            continue
+        fi
+        enabled=true
+        if [ "$gecos" = "$DISABLED_MARKER" ]; then
+            enabled=false
+        fi
+        [ "$first" -eq 1 ] || printf ','
+        first=0
+        printf '{"username":"%s","uid":%s,"gid":%s,"home":"%s","enabled":%s}' \
+            "$(json_escape "$name")" "${uid:-0}" "${gid:-0}" "$(json_escape "$home")" "$enabled"
+    done < "$HP_FTP_PASSWD_FILE" 2>/dev/null || true
+    printf ']}\n'
+}
+
+ftp_create() {
+    local user="$1" raw_home="$2" password="$3" home uid gid
+    guard_protected_ftp_user "$user"
+    # Path shape ("other args") BEFORE the existence precondition — same
+    # ordering rule as ftp_set_home, and for the same reason: a malformed or
+    # escaping path must be reported as VALIDATION, not hidden behind whatever
+    # the existence check happens to say.
+    home="$(ftp_prepare_home "$raw_home")"
+    if ftp_account_exists "$user"; then
+        die "ftp account '$user' already exists" 13
+    fi
+    uid="$(ftp_sys_uid)"
+    gid="$(ftp_sys_gid)"
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: pure-pw useradd '$user' -u $uid -g $gid -d '$home' <<< '<redacted>/<redacted>'" >&2
+    else
+        printf '%s\n%s\n' "$password" "$password" \
+            | pure_pw useradd "$user" -u "$uid" -g "$gid" -d "$home" -c '' \
+            || die "pure-pw useradd failed for '$user'" 20
+        ftp_rebuild_db
+    fi
+    printf '{"username":"%s","home":"%s","created":true}\n' "$user" "$home"
+}
+
+ftp_delete() {
+    local user="$1"
+    guard_protected_ftp_user "$user"
+    ftp_account_exists "$user" || die "ftp account '$user' does not exist" 10
+    act pure_pw userdel "$user" || die "pure-pw userdel failed for '$user'" 20
+    ftp_rebuild_db
+    printf '{"username":"%s","deleted":true}\n' "$user"
+}
+
+ftp_set_password() {
+    local user="$1" password="$2"
+    guard_protected_ftp_user "$user"
+    ftp_account_exists "$user" || die "ftp account '$user' does not exist" 10
+    if is_dryrun; then
+        echo "WOULD-EXEC: pure-pw usermod '$user' -m <<< '<redacted>/<redacted>'" >&2
+    else
+        printf '%s\n%s\n' "$password" "$password" \
+            | pure_pw usermod "$user" -m \
+            || die "pure-pw usermod (password) failed for '$user'" 20
+        ftp_rebuild_db
+    fi
+    printf '{"username":"%s","password_set":true}\n' "$user"
+}
+
+ftp_set_home() {
+    local user="$1" raw_home="$2" home
+    guard_protected_ftp_user "$user"
+    # Path shape ("other args") BEFORE the existence precondition: a traversal
+    # or symlink-escape attempt must report VALIDATION, not NOT_FOUND, or the
+    # rejection reason is hidden behind an unrelated error — the same ordering
+    # rule chown-home follows in hp-users.
+    home="$(ftp_prepare_home "$raw_home")"
+    ftp_account_exists "$user" || die "ftp account '$user' does not exist" 10
+    act pure_pw usermod "$user" -d "$home" || die "pure-pw usermod (home) failed for '$user'" 20
+    ftp_rebuild_db
+    printf '{"username":"%s","home":"%s"}\n' "$user" "$home"
+}
+
+ftp_disable() {
+    local user="$1" random_pw
+    guard_protected_ftp_user "$user"
+    ftp_account_exists "$user" || die "ftp account '$user' does not exist" 10
+    if is_dryrun; then
+        echo "WOULD-EXEC: pure-pw usermod '$user' -c '$DISABLED_MARKER' -m <<< '<redacted lockout password>'" >&2
+    else
+        # A password the operator never sees. head -c reads raw bytes from
+        # /dev/urandom; base64 keeps it printable for pure-pw's stdin prompt.
+        random_pw="$(head -c 48 /dev/urandom | base64 | tr -d '\n' | head -c 64)"
+        printf '%s\n%s\n' "$random_pw" "$random_pw" \
+            | pure_pw usermod "$user" -c "$DISABLED_MARKER" -m \
+            || die "pure-pw usermod (disable) failed for '$user'" 20
+        ftp_rebuild_db
+    fi
+    printf '{"username":"%s","enabled":false}\n' "$user"
+}
+
+ftp_enable() {
+    local user="$1" password="$2"
+    guard_protected_ftp_user "$user"
+    ftp_account_exists "$user" || die "ftp account '$user' does not exist" 10
+    if is_dryrun; then
+        echo "WOULD-EXEC: pure-pw usermod '$user' -c '' -m <<< '<redacted>/<redacted>'" >&2
+    else
+        printf '%s\n%s\n' "$password" "$password" \
+            | pure_pw usermod "$user" -c '' -m \
+            || die "pure-pw usermod (enable) failed for '$user'" 20
+        ftp_rebuild_db
+    fi
+    printf '{"username":"%s","enabled":true}\n' "$user"
+}
+
+ftp_set_quota() {
+    local user="$1" max_files="$2" max_mb="$3"
+    guard_protected_ftp_user "$user"
+    ftp_account_exists "$user" || die "ftp account '$user' does not exist" 10
+    act pure_pw usermod "$user" -n "$max_files" -N "$max_mb" \
+        || die "pure-pw usermod (quota) failed for '$user'" 20
+    ftp_rebuild_db
+    printf '{"username":"%s","max_files":%s,"max_mb":%s}\n' "$user" "$max_files" "$max_mb"
+}
+
+# ── Dispatch ─────────────────────────────────────────────────────────────────
+# Validation order: arity -> identifier -> deny-list -> other args ->
+# preconditions -> act, matching every other package's ops script.
+
+[ $# -ge 1 ] || usage
+verb="$1"; shift
+
+case "$verb" in
+
+  list)
+    require_argc 0 $# "list"
+    ftp_list
+    ;;
+
+  create)
+    require_argc 2 $# "create <username> <home>"
+    username="$1"; raw_home="$2"
+    valid_ftp_username "$username"
+    guard_protected_ftp_user "$username"
+    read_secrets
+    password="$(secret password)"
+    [ -n "$password" ] || die "no password supplied on stdin" 12
+    ftp_create "$username" "$raw_home" "$password"
+    ;;
+
+  delete)
+    require_argc 1 $# "delete <username>"
+    valid_ftp_username "$1"
+    ftp_delete "$1"
+    ;;
+
+  set-password)
+    require_argc 1 $# "set-password <username>"
+    username="$1"
+    valid_ftp_username "$username"
+    guard_protected_ftp_user "$username"
+    read_secrets
+    password="$(secret password)"
+    [ -n "$password" ] || die "no password supplied on stdin" 12
+    ftp_set_password "$username" "$password"
+    ;;
+
+  set-home)
+    require_argc 2 $# "set-home <username> <home>"
+    valid_ftp_username "$1"
+    ftp_set_home "$1" "$2"
+    ;;
+
+  disable)
+    require_argc 1 $# "disable <username>"
+    valid_ftp_username "$1"
+    ftp_disable "$1"
+    ;;
+
+  enable)
+    require_argc 1 $# "enable <username>"
+    username="$1"
+    valid_ftp_username "$username"
+    guard_protected_ftp_user "$username"
+    read_secrets
+    password="$(secret password)"
+    [ -n "$password" ] || die "no password supplied on stdin" 12
+    ftp_enable "$username" "$password"
+    ;;
+
+  set-quota)
+    require_argc 3 $# "set-quota <username> <max-files> <max-mb>"
+    valid_ftp_username "$1"
+    valid_quota_number "max-files" "$2"
+    valid_quota_number "max-mb" "$3"
+    ftp_set_quota "$1" "$2" "$3"
+    ;;
+
+  *)
+    die "unknown verb: $verb" 12
+    ;;
+esac

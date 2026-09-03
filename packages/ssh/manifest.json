@@ -1,0 +1,143 @@
+{
+  "manifest_version": 1,
+  "feature": "ssh",
+  "label": "SSH Access",
+  "version": "3.0.0",
+  "requires_core": [
+    3,
+    0,
+    0
+  ],
+  "api": {
+    "module": "hostpanel_sshd",
+    "unit": "hostpanel-sshd.service",
+    "run_as": "hp-ssh"
+  },
+  "frontend": {
+    "entry": "frontend/dist/main.js",
+    "_comment": "built bundle the shell imports at runtime and mounts"
+  },
+  "nav": [
+    {
+      "section": "network",
+      "section_label": "Network & Access",
+      "section_order": 30,
+      "label": "SSH Access",
+      "icon": "terminal",
+      "order": 10
+    }
+  ],
+  "ops": {
+    "script": "/opt/hostpanel/packages/ssh/ops/hp-ssh",
+    "sudoers": "hostpanel-sshd"
+  },
+  "sandbox": {
+    "read_write_paths": [
+      "/etc/ssh",
+      "/home"
+    ],
+    "_comment": "sshd_config.d drop-ins for per-user password auth, and each account's ~/.ssh/authorized_keys. Paths this package's ops script must be able to WRITE. The unit runs ProtectSystem=strict, which makes the entire filesystem read-only \u2014 and that applies to sudo'd children too, since they inherit the unit's mount namespace. Without declaring these the script fails with 'Read-only file system' while running as root, which looks nothing like a permissions problem. Declaring them per package is what keeps the sandbox meaningful."
+  },
+  "operations": {
+    "ssh.list-keys": {
+      "verb": "list-keys",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "ssh.list_keys",
+      "timeout_ms": 10000,
+      "params": {
+        "username": {
+          "pattern": "^[a-z_][a-z0-9_-]{0,31}$",
+          "required": true
+        }
+      }
+    },
+    "ssh.add-key": {
+      "verb": "add-key",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "ssh.add_key",
+      "timeout_ms": 15000,
+      "params": {
+        "username": {
+          "pattern": "^[a-z_][a-z0-9_-]{0,31}$",
+          "required": true
+        },
+        "key": {
+          "secret": true,
+          "required": true,
+          "_comment": "a public key, not confidential \u2014 routed via the stdin channel only because it is long free text that should not sit in argv/ps"
+        },
+        "comment": {
+          "secret": true,
+          "required": false
+        }
+      }
+    },
+    "ssh.remove-key": {
+      "verb": "remove-key",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "ssh.remove_key",
+      "timeout_ms": 10000,
+      "params": {
+        "username": {
+          "pattern": "^[a-z_][a-z0-9_-]{0,31}$",
+          "required": true
+        },
+        "fingerprint": {
+          "pattern": "^(SHA256:[A-Za-z0-9+/]{1,64}|MD5:[0-9a-f:]{1,64})$",
+          "required": true
+        }
+      }
+    },
+    "ssh.get-password-auth": {
+      "verb": "get-password-auth",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "ssh.get_password_auth",
+      "timeout_ms": 5000,
+      "params": {
+        "username": {
+          "pattern": "^[a-z_][a-z0-9_-]{0,31}$",
+          "required": true
+        }
+      }
+    },
+    "ssh.set-password-auth": {
+      "verb": "set-password-auth",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "ssh.set_password_auth",
+      "timeout_ms": 15000,
+      "params": {
+        "username": {
+          "pattern": "^[a-z_][a-z0-9_-]{0,31}$",
+          "required": true
+        },
+        "enabled": {
+          "enum": [
+            "0",
+            "1"
+          ],
+          "required": true,
+          "_comment": "declared as the ops script's 0|1 argument, not a JSON bool; the API accepts a bool and normalises it"
+        }
+      }
+    },
+    "ssh.sessions": {
+      "verb": "sessions",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "ssh.sessions",
+      "timeout_ms": 5000,
+      "params": {
+        "username": {
+          "pattern": "^[a-z_][a-z0-9_-]{0,31}$",
+          "required": false,
+          "_comment": "optional filter; omitted lists every active session"
+        }
+      }
+    }
+  }
+}

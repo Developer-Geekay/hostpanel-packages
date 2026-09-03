@@ -1,0 +1,216 @@
+{
+  "manifest_version": 1,
+  "feature": "nginx",
+  "label": "Nginx Web Server",
+  "version": "3.0.0",
+  "requires_core": [
+    3,
+    0,
+    0
+  ],
+  "api": {
+    "module": "hostpanel_nginxd",
+    "unit": "hostpanel-nginxd.service",
+    "run_as": "hp-nginx"
+  },
+  "frontend": {
+    "entry": "frontend/dist/main.js"
+  },
+  "nav": [
+    {
+      "section": "runtime",
+      "section_label": "Web Servers & Runtimes",
+      "section_order": 15,
+      "label": "Nginx",
+      "icon": "nginx",
+      "order": 10
+    }
+  ],
+  "ops": {
+    "script": "/opt/hostpanel/packages/nginx/ops/hp-nginx",
+    "sudoers": "hostpanel-nginxd"
+  },
+  "sandbox": {
+    "read_write_paths": [
+      "/opt/hostpanel/etc/nginx",
+      "/opt/hostpanel/data/vhosts",
+      "/opt/hostpanel/logs/nginx",
+      "/opt/hostpanel/run",
+      "/tmp"
+    ]
+  },
+  "operations": {
+    "engine.status": {
+      "verb": "engine-status",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "nginx.engine.status",
+      "timeout_ms": 10000
+    },
+    "engine.start": {
+      "verb": "engine-start",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "nginx.engine.start",
+      "timeout_ms": 15000
+    },
+    "engine.stop": {
+      "verb": "engine-stop",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "nginx.engine.stop",
+      "timeout_ms": 15000
+    },
+    "engine.restart": {
+      "verb": "engine-restart",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "nginx.engine.restart",
+      "timeout_ms": 15000
+    },
+    "engine.reload": {
+      "verb": "engine-reload",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "nginx.engine.reload",
+      "timeout_ms": 15000
+    },
+    "engine.test_config": {
+      "verb": "engine-test",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "nginx.engine.test",
+      "timeout_ms": 10000,
+      "params": {
+        "content": {
+          "type": "string",
+          "secret": true
+        }
+      }
+    },
+    "engine.config_get": {
+      "verb": "engine-config-get",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "nginx.engine.config.read",
+      "timeout_ms": 5000
+    },
+    "engine.config_set": {
+      "verb": "engine-config-set",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "nginx.engine.config.write",
+      "timeout_ms": 15000,
+      "params": {
+        "content": {
+          "type": "string",
+          "secret": true
+        }
+      }
+    },
+    "engine.logs": {
+      "verb": "engine-logs",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "nginx.engine.logs",
+      "timeout_ms": 5000,
+      "params": {
+        "lines": {
+          "type": "integer"
+        },
+        "log_type": {
+          "enum": ["error", "access"]
+        },
+        "domain": {
+          "type": "string",
+          "default": ""
+        }
+      }
+    },
+    "engine.install": {
+      "verb": "engine-install",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "nginx.engine.install",
+      "timeout_ms": 180000
+    },
+    "vhost.list": {
+      "verb": "vhost-list",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "nginx.vhost.list",
+      "timeout_ms": 5000
+    },
+    "vhost.get": {
+      "verb": "vhost-get",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "nginx.vhost.read",
+      "timeout_ms": 5000,
+      "params": {
+        "domain": {
+          "type": "string"
+        }
+      }
+    },
+    "vhost.set": {
+      "verb": "vhost-set",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "nginx.vhost.write",
+      "timeout_ms": 15000,
+      "params": {
+        "domain": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string",
+          "secret": true
+        }
+      }
+    },
+    "vhost.delete": {
+      "verb": "vhost-delete",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "nginx.vhost.delete",
+      "timeout_ms": 15000,
+      "params": {
+        "domain": {
+          "type": "string"
+        }
+      }
+    },
+    "vhost.enable": {
+      "verb": "vhost-enable",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "nginx.vhost.enable",
+      "timeout_ms": 10000,
+      "params": {
+        "domain": {
+          "type": "string"
+        }
+      }
+    },
+    "vhost.disable": {
+      "verb": "vhost-disable",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "nginx.vhost.disable",
+      "timeout_ms": 10000,
+      "params": {
+        "domain": {
+          "type": "string"
+        }
+      }
+    },
+    "module.list": {
+      "verb": "module-list",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "nginx.module.list",
+      "timeout_ms": 5000
+    }
+  }
+}

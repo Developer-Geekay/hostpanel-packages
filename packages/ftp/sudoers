@@ -1,0 +1,13 @@
+# HostPanel v3 — ftp feature service.
+#
+# ONE grant, ONE script path. hp-ftp cannot invoke `pure-pw` directly; only
+# through this script, which validates every argument before acting.
+#
+# This grant is safe ONLY while the target stays root-owned and not writable by
+# hp-ftp. If hp-ftp could write the script, this line would be a root shell.
+# provision-service.sh asserts that ownership before installing this file, and
+# refuses otherwise.
+#
+# Installed 0440 root:root by provision-service.sh, after visudo -c -f.
+
+hp-ftp ALL=(root) NOPASSWD: /opt/hostpanel/packages/ftp/ops/hp-ftp *

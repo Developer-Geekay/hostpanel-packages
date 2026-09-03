@@ -1,0 +1,16 @@
+# HostPanel v3 — Nginx Server Block Template
+server {
+    listen 80;
+    server_name {{DOMAIN}} {{SERVER_ALIASES}};
+    root {{DOC_ROOT}};
+    index index.php index.html index.htm;
+
+    access_log /opt/hostpanel/logs/nginx/{{DOMAIN}}_access.log main;
+    error_log  /opt/hostpanel/logs/nginx/{{DOMAIN}}_error.log warn;
+
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    {{PHP_OR_PROXY_BLOCK}}
+}

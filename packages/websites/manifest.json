@@ -1,0 +1,359 @@
+{
+  "manifest_version": 1,
+  "feature": "websites",
+  "label": "Websites",
+  "version": "3.0.0",
+  "requires_core": [
+    3,
+    0,
+    0
+  ],
+  "api": {
+    "module": "hostpanel_websitesd",
+    "unit": "hostpanel-websitesd.service",
+    "run_as": "hp-websites"
+  },
+  "frontend": {
+    "entry": "frontend/dist/main.js"
+  },
+  "nav": [
+    {
+      "section": "hosting",
+      "section_label": "Hosting",
+      "section_order": 10,
+      "label": "Websites",
+      "icon": "language",
+      "order": 10
+    }
+  ],
+  "ops": {
+    "script": "/opt/hostpanel/packages/websites/ops/hp-websites",
+    "sudoers": "hostpanel-websitesd"
+  },
+  "sandbox": {
+    "read_write_paths": [
+      "/opt/hostpanel/etc/nginx",
+      "/opt/hostpanel/etc/apache",
+      "/opt/hostpanel/data",
+      "/opt/hostpanel/logs/nginx",
+      "/opt/hostpanel/logs/apache",
+      "/opt/hostpanel/run",
+      "/tmp"
+    ]
+  },
+  "operations": {
+    "vhost.list": {
+      "verb": "vhost-list",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "websites.vhost.list",
+      "timeout_ms": 10000,
+      "params": {}
+    },
+    "vhost.get": {
+      "verb": "vhost-get",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "websites.vhost.get",
+      "timeout_ms": 10000,
+      "params": {
+        "domain": {
+          "type": "string"
+        }
+      }
+    },
+    "vhost.create": {
+      "verb": "vhost-create",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "websites.vhost.create",
+      "timeout_ms": 30000,
+      "params": {
+        "domain": {
+          "type": "string"
+        },
+        "aliases": {
+          "type": "string",
+          "default": ""
+        },
+        "doc_root": {
+          "type": "string",
+          "default": ""
+        },
+        "mode": {
+          "enum": [
+            "static",
+            "php",
+            "hybrid_apache",
+            "proxy",
+            "redirect"
+          ],
+          "default": "hybrid_apache"
+        },
+        "php_version": {
+          "type": "string",
+          "default": "8.3"
+        },
+        "proxy_target": {
+          "type": "string",
+          "default": ""
+        },
+        "redirect_target": {
+          "type": "string",
+          "default": ""
+        },
+        "force_https": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "vhost.update": {
+      "verb": "vhost-update",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "websites.vhost.update",
+      "timeout_ms": 30000,
+      "params": {
+        "domain": {
+          "type": "string"
+        },
+        "aliases": {
+          "type": "string",
+          "default": ""
+        },
+        "doc_root": {
+          "type": "string",
+          "default": ""
+        },
+        "mode": {
+          "enum": [
+            "static",
+            "php",
+            "hybrid_apache",
+            "proxy",
+            "redirect"
+          ],
+          "default": "hybrid_apache"
+        },
+        "php_version": {
+          "type": "string",
+          "default": "8.3"
+        },
+        "proxy_target": {
+          "type": "string",
+          "default": ""
+        },
+        "redirect_target": {
+          "type": "string",
+          "default": ""
+        },
+        "force_https": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "vhost.delete": {
+      "verb": "vhost-delete",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "websites.vhost.delete",
+      "timeout_ms": 15000,
+      "params": {
+        "domain": {
+          "type": "string"
+        }
+      }
+    },
+    "vhost.logs": {
+      "verb": "vhost-logs",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "websites.vhost.logs",
+      "timeout_ms": 10000,
+      "params": {
+        "domain": {
+          "type": "string"
+        },
+        "lines": {
+          "type": "integer",
+          "default": 50
+        },
+        "log_type": {
+          "type": "string",
+          "default": "access"
+        },
+        "engine": {
+          "type": "string",
+          "default": "nginx"
+        }
+      }
+    },
+    "vhost.ssl_get": {
+      "verb": "vhost-ssl-get",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "websites.vhost.ssl_get",
+      "timeout_ms": 10000,
+      "params": {
+        "domain": {
+          "type": "string"
+        }
+      }
+    },
+    "vhost.ssl_set": {
+      "verb": "vhost-ssl-set",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "websites.vhost.ssl_set",
+      "timeout_ms": 20000,
+      "params": {
+        "domain": {
+          "type": "string"
+        },
+        "cert": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "force_https": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "vhost.ssl_selfsigned": {
+      "verb": "vhost-ssl-selfsigned",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "websites.vhost.ssl_selfsigned",
+      "timeout_ms": 20000,
+      "params": {
+        "domain": {
+          "type": "string"
+        }
+      }
+    },
+    "vhost.security_get": {
+      "verb": "vhost-security-get",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "websites.vhost.security_get",
+      "timeout_ms": 10000,
+      "params": {
+        "domain": {
+          "type": "string"
+        }
+      }
+    },
+    "vhost.security_set": {
+      "verb": "vhost-security-set",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "websites.vhost.security_set",
+      "timeout_ms": 15000,
+      "params": {
+        "domain": {
+          "type": "string"
+        },
+        "block_hidden": {
+          "type": "boolean",
+          "default": true
+        },
+        "hotlink": {
+          "type": "boolean",
+          "default": false
+        },
+        "ip_allow": {
+          "type": "string",
+          "default": ""
+        },
+        "ip_deny": {
+          "type": "string",
+          "default": ""
+        },
+        "basic_auth": {
+          "type": "string",
+          "default": ""
+        }
+      }
+    },
+    "vhost.php_get": {
+      "verb": "vhost-php-get",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "websites.vhost.php_get",
+      "timeout_ms": 10000,
+      "params": {
+        "domain": {
+          "type": "string"
+        }
+      }
+    },
+    "vhost.php_set": {
+      "verb": "vhost-php-set",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "websites.vhost.php_set",
+      "timeout_ms": 15000,
+      "params": {
+        "domain": {
+          "type": "string"
+        },
+        "upload_max_filesize": {
+          "type": "string",
+          "default": "64M"
+        },
+        "post_max_size": {
+          "type": "string",
+          "default": "64M"
+        },
+        "memory_limit": {
+          "type": "string",
+          "default": "256M"
+        },
+        "max_execution_time": {
+          "type": "string",
+          "default": "120"
+        }
+      }
+    },
+    "vhost.htaccess_get": {
+      "verb": "vhost-htaccess-get",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "websites.vhost.htaccess_get",
+      "timeout_ms": 10000,
+      "params": {
+        "domain": {
+          "type": "string"
+        }
+      }
+    },
+    "vhost.htaccess_set": {
+      "verb": "vhost-htaccess-set",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "websites.vhost.htaccess_set",
+      "timeout_ms": 15000,
+      "params": {
+        "domain": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        }
+      }
+    },
+    "engine.check": {
+      "verb": "engine-check",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "websites.engine.check",
+      "timeout_ms": 10000,
+      "params": {}
+    }
+  }
+}

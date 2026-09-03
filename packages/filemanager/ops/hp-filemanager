@@ -1,0 +1,529 @@
+#!/bin/bash
+# hp-filemanager — root helper for the HostPanel v3 filemanager daemon.
+#
+# Installed root-owned 0755. The daemon's sudoers file grants THIS SINGLE PATH
+# and nothing else:
+#
+#   hp-filemanager ALL=(root) NOPASSWD: /opt/hostpanel/packages/filemanager/ops/hp-filemanager *
+#
+# Verbs: file-list file-stat file-read file-write file-mkdir file-delete
+#        file-move file-copy file-chmod file-chown file-compress file-extract
+# Exit:  0 ok | 1 internal | 10 not found | 11 precondition | 12 validation
+#        13 conflict | 14 denied | 20 dependency
+#
+# stdout is DATA (JSON where structured). stderr is DIAGNOSTICS.
+
+set -euo pipefail
+
+export PATH="/opt/hostpanel/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
+
+OPS_NAME="hp-filemanager"
+if [ "$(id -u)" = "0" ]; then
+    HP_CORE_LIB=/opt/hostpanel/hpcore/lib
+else
+    : "${HP_CORE_LIB:=/opt/hostpanel/hpcore/lib}"
+fi
+# shellcheck disable=SC1091
+. "$HP_CORE_LIB/common.sh"
+
+usage() {
+    cat >&2 <<'EOF'
+usage: hp-filemanager <verb> [args]
+  file-list       <path>
+  file-stat       <path>
+  file-read       <path>
+  file-write      <path>                               [required: content\0<value>\0 on stdin]
+  file-mkdir      <path>
+  file-delete     <path>
+  file-move       <source> <target>
+  file-copy       <source> <target>
+  file-chmod      <path> <mode>
+  file-chown      <path> <owner> [group]
+  file-compress   <source_path> <archive_path> <type:zip|tar.gz|tar.bz2|tar|tgz>
+  file-extract    <archive_path> <target_dir>
+EOF
+    exit 12
+}
+
+guard_protected_path() {
+    local p="$1"
+    p="$(echo "$p" | sed 's:/*$::')"
+    [ -z "$p" ] && p="/"
+    case "$p" in
+        /|/etc|/var|/opt|/opt/hostpanel|/opt/hostpanel/hpcore|/opt/hostpanel/portald|/opt/hostpanel/venv|/opt/hostpanel/bin|/opt/hostpanel/etc|/opt/hostpanel/packages|/boot|/sys|/proc|/dev|/usr|/lib|/lib64|/sbin|/bin|/root|/home)
+            die "'$p' is a protected system path and cannot be modified" 14 ;;
+        /etc/*|/boot/*|/sys/*|/proc/*|/dev/*|/usr/*|/lib/*|/lib64/*|/sbin/*|/bin/*|/opt/hostpanel/hpcore/*|/opt/hostpanel/portald/*|/opt/hostpanel/venv/*)
+            die "'$p' is within a protected system directory and cannot be modified" 14 ;;
+    esac
+}
+
+# ── file-list ─────────────────────────────────────────────────────────────────
+op_file_list() {
+    require_argc 1 $# "file-list <path>"
+    local path="$1"
+    valid_abs_path "$path"
+    no_traversal "$path"
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: file-list $path" >&2
+        printf '{"path":"%s","entries":[{"name":"test.txt","path":"%s/test.txt","is_dir":false,"is_symlink":false,"size":1024,"mode":"0644","permissions":"-rw-r--r--","owner":"root","group":"root","mtime":1724272000,"mtime_iso":"2026-08-21T20:00:00Z","extension":"txt","mime_type":"text/plain"}],"total":1}\n' "$path" "$path"
+        return 0
+    fi
+
+    [ -e "$path" ] || die "path '$path' does not exist" 10
+    [ -d "$path" ] || die "path '$path' is not a directory" 11
+
+    python3 -c '
+import os, sys, stat, json, pwd, grp, datetime, mimetypes
+
+target = sys.argv[1]
+entries = []
+
+try:
+    with os.scandir(target) as it:
+        for entry in it:
+            try:
+                st = entry.stat(follow_symlinks=False)
+                is_dir = entry.is_dir(follow_symlinks=False)
+                is_sym = entry.is_symlink()
+                
+                try:
+                    owner = pwd.getpwuid(st.st_uid).pw_name
+                except Exception:
+                    owner = str(st.st_uid)
+                try:
+                    group = grp.getgrgid(st.st_gid).gr_name
+                except Exception:
+                    group = str(st.st_gid)
+                
+                mode_oct = oct(st.st_mode & 0o777)[2:].zfill(4)
+                perm_str = stat.filemode(st.st_mode)
+                mtime_iso = datetime.datetime.fromtimestamp(st.st_mtime, tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                ext = os.path.splitext(entry.name)[1].lstrip(".").lower()
+                mime, _ = mimetypes.guess_type(entry.name)
+                if not mime:
+                    mime = "inode/directory" if is_dir else "application/octet-stream"
+
+                entries.append({
+                    "name": entry.name,
+                    "path": os.path.join(target, entry.name),
+                    "is_dir": is_dir,
+                    "is_symlink": is_sym,
+                    "size": st.st_size if not is_dir else 4096,
+                    "mode": mode_oct,
+                    "permissions": perm_str,
+                    "owner": owner,
+                    "group": group,
+                    "mtime": int(st.st_mtime),
+                    "mtime_iso": mtime_iso,
+                    "extension": ext,
+                    "mime_type": mime
+                })
+            except Exception:
+                continue
+except PermissionError:
+    print(json.dumps({"path": target, "error": "Permission denied", "entries": [], "total": 0}))
+    sys.exit(0)
+
+# Sort: directories first, then alphabetically case-insensitive
+entries.sort(key=lambda x: (not x["is_dir"], x["name"].lower()))
+print(json.dumps({"path": target, "entries": entries, "total": len(entries)}))
+' "$path"
+}
+
+# ── file-stat ─────────────────────────────────────────────────────────────────
+op_file_stat() {
+    require_argc 1 $# "file-stat <path>"
+    local path="$1"
+    valid_abs_path "$path"
+    no_traversal "$path"
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: file-stat $path" >&2
+        printf '{"path":"%s","stat":{"name":"test","path":"%s","is_dir":false,"is_symlink":false,"size":1024,"mode":"0644","permissions":"-rw-r--r--","owner":"root","group":"root","mtime":1724272000,"mtime_iso":"2026-08-21T20:00:00Z","extension":"","mime_type":"text/plain"}}\n' "$path" "$path"
+        return 0
+    fi
+
+    [ -e "$path" ] || [ -L "$path" ] || die "path '$path' does not exist" 10
+
+    python3 -c '
+import os, sys, stat, json, pwd, grp, datetime, mimetypes
+
+target = sys.argv[1]
+st = os.lstat(target)
+is_dir = os.path.isdir(target)
+is_sym = os.path.islink(target)
+symlink_target = os.readlink(target) if is_sym else ""
+
+try:
+    owner = pwd.getpwuid(st.st_uid).pw_name
+except Exception:
+    owner = str(st.st_uid)
+try:
+    group = grp.getgrgid(st.st_gid).gr_name
+except Exception:
+    group = str(st.st_gid)
+
+mode_oct = oct(st.st_mode & 0o777)[2:].zfill(4)
+perm_str = stat.filemode(st.st_mode)
+mtime_iso = datetime.datetime.fromtimestamp(st.st_mtime, tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+ext = os.path.splitext(os.path.basename(target))[1].lstrip(".").lower()
+mime, _ = mimetypes.guess_type(target)
+if not mime:
+    mime = "inode/directory" if is_dir else "application/octet-stream"
+
+res = {
+    "name": os.path.basename(target),
+    "path": target,
+    "is_dir": is_dir,
+    "is_file": stat.S_ISREG(st.st_mode),
+    "is_symlink": is_sym,
+    "symlink_target": symlink_target,
+    "size": st.st_size,
+    "mode": mode_oct,
+    "permissions": perm_str,
+    "owner": owner,
+    "group": group,
+    "mtime": int(st.st_mtime),
+    "mtime_iso": mtime_iso,
+    "extension": ext,
+    "mime_type": mime
+}
+print(json.dumps({"path": target, "stat": res}))
+' "$path"
+}
+
+# ── file-read ─────────────────────────────────────────────────────────────────
+op_file_read() {
+    require_argc 1 $# "file-read <path>"
+    local path="$1"
+    valid_abs_path "$path"
+    no_traversal "$path"
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: file-read $path" >&2
+        printf '{"path":"%s","content":"sample content","size":14,"encoding":"utf-8"}\n' "$path"
+        return 0
+    fi
+
+    [ -e "$path" ] || die "file '$path' does not exist" 10
+    [ -f "$path" ] || die "'$path' is a directory and cannot be read as a file" 11
+
+    python3 -c '
+import os, sys, json
+
+target = sys.argv[1]
+try:
+    with open(target, "r", encoding="utf-8", errors="replace") as f:
+        content = f.read(10 * 1024 * 1024) # 10MB limit
+    st = os.stat(target)
+    print(json.dumps({
+        "path": target,
+        "content": content,
+        "size": st.st_size,
+        "encoding": "utf-8"
+    }))
+except Exception as e:
+    sys.stderr.write(f"failed reading {target}: {e}\n")
+    sys.exit(1)
+' "$path"
+}
+
+# ── file-write ────────────────────────────────────────────────────────────────
+op_file_write() {
+    require_argc 1 $# "file-write <path>"
+    local path="$1"
+    valid_abs_path "$path"
+    no_traversal "$path"
+    guard_protected_path "$path"
+
+    read_secrets
+    local content
+    content="$(secret "content")"
+
+    # If no secret, read raw stdin if not a tty
+    if [ -z "$content" ] && [ ! -t 0 ] && [ "${#_SEC_KEYS[@]}" -eq 0 ]; then
+        content="$(cat)"
+    fi
+
+    local size="${#content}"
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: file-write $path (bytes: $size)" >&2
+        printf '{"path":"%s","written":true,"size":%d}\n' "$path" "$size"
+        return 0
+    fi
+
+    local dir
+    dir="$(dirname "$path")"
+    [ -d "$dir" ] || mkdir -p "$dir"
+
+    printf '%s' "$content" | atomic_write "$path"
+    printf '{"path":"%s","written":true,"size":%d}\n' "$path" "$size"
+}
+
+# ── file-mkdir ────────────────────────────────────────────────────────────────
+op_file_mkdir() {
+    require_argc 1 $# "file-mkdir <path>"
+    local path="$1"
+    valid_abs_path "$path"
+    no_traversal "$path"
+    guard_protected_path "$path"
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: mkdir -p $path" >&2
+        printf '{"path":"%s","created":true}\n' "$path"
+        return 0
+    fi
+
+    if [ -f "$path" ]; then
+        die "a file already exists at '$path'" 13
+    fi
+
+    if [ -d "$path" ]; then
+        printf '{"path":"%s","created":false,"exists":true}\n' "$path"
+        return 0
+    fi
+
+    act mkdir -p "$path" || die "failed creating directory '$path'" 1
+    printf '{"path":"%s","created":true}\n' "$path"
+}
+
+# ── file-delete ───────────────────────────────────────────────────────────────
+op_file_delete() {
+    require_argc 1 $# "file-delete <path>"
+    local path="$1"
+    valid_abs_path "$path"
+    no_traversal "$path"
+    guard_protected_path "$path"
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: rm -rf $path" >&2
+        printf '{"path":"%s","deleted":true}\n' "$path"
+        return 0
+    fi
+
+    [ -e "$path" ] || [ -L "$path" ] || die "path '$path' does not exist" 10
+
+    act rm -rf "$path" || die "failed deleting '$path'" 1
+    printf '{"path":"%s","deleted":true}\n' "$path"
+}
+
+# ── file-move ─────────────────────────────────────────────────────────────────
+op_file_move() {
+    require_argc 2 $# "file-move <source> <target>"
+    local src="$1" dst="$2"
+    valid_abs_path "$src"
+    no_traversal "$src"
+    guard_protected_path "$src"
+
+    valid_abs_path "$dst"
+    no_traversal "$dst"
+    guard_protected_path "$dst"
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: mv $src $dst" >&2
+        printf '{"source":"%s","target":"%s","moved":true}\n' "$src" "$dst"
+        return 0
+    fi
+
+    [ -e "$src" ] || [ -L "$src" ] || die "source '$src' does not exist" 10
+
+    local dst_dir
+    dst_dir="$(dirname "$dst")"
+    [ -d "$dst_dir" ] || act mkdir -p "$dst_dir"
+
+    act mv "$src" "$dst" || die "failed moving '$src' to '$dst'" 1
+    printf '{"source":"%s","target":"%s","moved":true}\n' "$src" "$dst"
+}
+
+# ── file-copy ─────────────────────────────────────────────────────────────────
+op_file_copy() {
+    require_argc 2 $# "file-copy <source> <target>"
+    local src="$1" dst="$2"
+    valid_abs_path "$src"
+    no_traversal "$src"
+
+    valid_abs_path "$dst"
+    no_traversal "$dst"
+    guard_protected_path "$dst"
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: cp -a $src $dst" >&2
+        printf '{"source":"%s","target":"%s","copied":true}\n' "$src" "$dst"
+        return 0
+    fi
+
+    [ -e "$src" ] || [ -L "$src" ] || die "source '$src' does not exist" 10
+
+    local dst_dir
+    dst_dir="$(dirname "$dst")"
+    [ -d "$dst_dir" ] || act mkdir -p "$dst_dir"
+
+    act cp -a "$src" "$dst" || die "failed copying '$src' to '$dst'" 1
+    printf '{"source":"%s","target":"%s","copied":true}\n' "$src" "$dst"
+}
+
+# ── file-chmod ────────────────────────────────────────────────────────────────
+op_file_chmod() {
+    require_argc 2 $# "file-chmod <path> <mode>"
+    local path="$1" mode="$2"
+    valid_abs_path "$path"
+    no_traversal "$path"
+    guard_protected_path "$path"
+
+    echo "$mode" | grep -Eq '^0?[0-7]{3,4}$' || die "invalid octal mode '$mode'" 12
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: chmod $mode $path" >&2
+        printf '{"path":"%s","mode":"%s","chmod":true}\n' "$path" "$mode"
+        return 0
+    fi
+
+    [ -e "$path" ] || [ -L "$path" ] || die "path '$path' does not exist" 10
+
+    act chmod "$mode" "$path" || die "failed changing permissions on '$path'" 1
+    printf '{"path":"%s","mode":"%s","chmod":true}\n' "$path" "$mode"
+}
+
+# ── file-chown ────────────────────────────────────────────────────────────────
+op_file_chown() {
+    local argc=$#
+    [ "$argc" -eq 2 ] || [ "$argc" -eq 3 ] || die "expected 2 or 3 arguments, got $argc — usage: file-chown <path> <owner> [group]" 12
+    local path="$1" owner="$2" group="${3:-}"
+    valid_abs_path "$path"
+    no_traversal "$path"
+    guard_protected_path "$path"
+
+    valid_username "$owner"
+    if [ -n "$group" ]; then
+        echo "$group" | grep -Eq '^[a-zA-Z0-9_][a-zA-Z0-9_-]{0,31}$' || die "invalid group '$group'" 12
+    fi
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: chown $owner:$group $path" >&2
+        printf '{"path":"%s","owner":"%s","group":"%s","chown":true}\n' "$path" "$owner" "$group"
+        return 0
+    fi
+
+    [ -e "$path" ] || [ -L "$path" ] || die "path '$path' does not exist" 10
+
+    if [ -n "$group" ]; then
+        act chown "$owner:$group" "$path" || die "failed changing ownership on '$path'" 1
+    else
+        act chown "$owner" "$path" || die "failed changing ownership on '$path'" 1
+    fi
+    printf '{"path":"%s","owner":"%s","group":"%s","chown":true}\n' "$path" "$owner" "$group"
+}
+
+# ── file-compress ─────────────────────────────────────────────────────────────
+op_file_compress() {
+    require_argc 3 $# "file-compress <source_path> <archive_path> <archive_type>"
+    local src="$1" archive="$2" atype="$3"
+    valid_abs_path "$src"
+    no_traversal "$src"
+    valid_abs_path "$archive"
+    no_traversal "$archive"
+    guard_protected_path "$archive"
+
+    case "$atype" in
+        zip|tar.gz|tar.bz2|tar|tgz) ;;
+        *) die "unsupported archive type '$atype' (expected zip, tar.gz, tar.bz2, tar, tgz)" 12 ;;
+    esac
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: compress $src -> $archive ($atype)" >&2
+        printf '{"source_path":"%s","archive_path":"%s","archive_type":"%s","compressed":true}\n' "$src" "$archive" "$atype"
+        return 0
+    fi
+
+    [ -e "$src" ] || die "source '$src' does not exist" 10
+
+    local arch_dir
+    arch_dir="$(dirname "$archive")"
+    [ -d "$arch_dir" ] || mkdir -p "$arch_dir"
+
+    local src_dir src_base
+    src_dir="$(dirname "$src")"
+    src_base="$(basename "$src")"
+
+    case "$atype" in
+        zip)
+            (cd "$src_dir" && zip -r -q "$archive" "$src_base") || die "zip compression failed" 1
+            ;;
+        tar.gz|tgz)
+            tar -czf "$archive" -C "$src_dir" "$src_base" || die "tar.gz compression failed" 1
+            ;;
+        tar.bz2)
+            tar -cjf "$archive" -C "$src_dir" "$src_base" || die "tar.bz2 compression failed" 1
+            ;;
+        tar)
+            tar -cf "$archive" -C "$src_dir" "$src_base" || die "tar compression failed" 1
+            ;;
+    esac
+
+    printf '{"source_path":"%s","archive_path":"%s","archive_type":"%s","compressed":true}\n' "$src" "$archive" "$atype"
+}
+
+# ── file-extract ──────────────────────────────────────────────────────────────
+op_file_extract() {
+    require_argc 2 $# "file-extract <archive_path> <target_dir>"
+    local archive="$1" target="$2"
+    valid_abs_path "$archive"
+    no_traversal "$archive"
+    valid_abs_path "$target"
+    no_traversal "$target"
+    guard_protected_path "$target"
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: extract $archive -> $target" >&2
+        printf '{"archive_path":"%s","target_dir":"%s","extracted":true}\n' "$archive" "$target"
+        return 0
+    fi
+
+    [ -e "$archive" ] || die "archive '$archive' does not exist" 10
+    [ -f "$archive" ] || die "archive '$archive' is not a regular file" 11
+
+    [ -d "$target" ] || mkdir -p "$target"
+
+    case "$archive" in
+        *.zip)
+            unzip -q -o "$archive" -d "$target" || die "unzip failed" 1
+            ;;
+        *.tar.gz|*.tgz)
+            tar -xzf "$archive" -C "$target" || die "tar.gz extraction failed" 1
+            ;;
+        *.tar.bz2|*.tbz2)
+            tar -xjf "$archive" -C "$target" || die "tar.bz2 extraction failed" 1
+            ;;
+        *.tar)
+            tar -xf "$archive" -C "$target" || die "tar extraction failed" 1
+            ;;
+        *)
+            # Try tar then unzip
+            tar -xf "$archive" -C "$target" 2>/dev/null || unzip -q -o "$archive" -d "$target" || die "archive extraction failed" 1
+            ;;
+    esac
+
+    printf '{"archive_path":"%s","target_dir":"%s","extracted":true}\n' "$archive" "$target"
+}
+
+# ── dispatch ──────────────────────────────────────────────────────────────────
+[ $# -gt 0 ] || usage
+verb="$1"; shift
+
+case "$verb" in
+    file-list)      op_file_list "$@" ;;
+    file-stat)      op_file_stat "$@" ;;
+    file-read)      op_file_read "$@" ;;
+    file-write)     op_file_write "$@" ;;
+    file-mkdir)     op_file_mkdir "$@" ;;
+    file-delete)    op_file_delete "$@" ;;
+    file-move)      op_file_move "$@" ;;
+    file-copy)      op_file_copy "$@" ;;
+    file-chmod)     op_file_chmod "$@" ;;
+    file-chown)     op_file_chown "$@" ;;
+    file-compress)  op_file_compress "$@" ;;
+    file-extract)   op_file_extract "$@" ;;
+    *)              die "unknown verb '$verb'" 12 ;;
+esac

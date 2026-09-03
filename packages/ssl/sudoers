@@ -1,0 +1,1 @@
+hp-ssl ALL=(root) NOPASSWD: /opt/hostpanel/packages/ssl/ops/hp-ssl *

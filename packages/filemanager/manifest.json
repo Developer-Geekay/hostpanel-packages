@@ -1,0 +1,243 @@
+{
+  "manifest_version": 1,
+  "feature": "filemanager",
+  "label": "File Manager",
+  "version": "3.0.0",
+  "requires_core": [
+    3,
+    0,
+    0
+  ],
+  "api": {
+    "module": "hostpanel_filemanagerd",
+    "unit": "hostpanel-filemanagerd.service",
+    "run_as": "hp-filemanager"
+  },
+  "frontend": {
+    "entry": "frontend/dist/main.js",
+    "_comment": "built bundle the shell imports at runtime and mounts"
+  },
+  "nav": [
+    {
+      "section": "hosting",
+      "section_label": "Hosting",
+      "section_order": 10,
+      "label": "File Manager",
+      "icon": "folder",
+      "order": 20
+    }
+  ],
+  "ops": {
+    "script": "/opt/hostpanel/packages/filemanager/ops/hp-filemanager",
+    "sudoers": "hostpanel-filemanagerd"
+  },
+  "sandbox": {
+    "read_write_paths": [
+      "/opt/hostpanel/data",
+      "/opt/hostpanel/run",
+      "/tmp"
+    ],
+    "_comment": "Paths this package's ops script must be able to WRITE. The unit runs ProtectSystem=strict, which makes the entire filesystem read-only. Declaring them per package is what keeps the sandbox meaningful."
+  },
+  "operations": {
+    "file.list": {
+      "verb": "file-list",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "file.list",
+      "timeout_ms": 15000,
+      "params": {
+        "path": {
+          "pattern": "^/[^\\u0000]*$",
+          "required": true
+        }
+      }
+    },
+    "file.stat": {
+      "verb": "file-stat",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "file.stat",
+      "timeout_ms": 15000,
+      "params": {
+        "path": {
+          "pattern": "^/[^\\u0000]*$",
+          "required": true
+        }
+      }
+    },
+    "file.read": {
+      "verb": "file-read",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "file.read",
+      "timeout_ms": 30000,
+      "params": {
+        "path": {
+          "pattern": "^/[^\\u0000]*$",
+          "required": true
+        }
+      }
+    },
+    "file.write": {
+      "verb": "file-write",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "file.write",
+      "timeout_ms": 30000,
+      "params": {
+        "path": {
+          "pattern": "^/[^\\u0000]*$",
+          "required": true
+        },
+        "content": {
+          "secret": true,
+          "required": true
+        }
+      }
+    },
+    "file.mkdir": {
+      "verb": "file-mkdir",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "file.mkdir",
+      "timeout_ms": 15000,
+      "params": {
+        "path": {
+          "pattern": "^/[^\\u0000]*$",
+          "required": true
+        }
+      }
+    },
+    "file.delete": {
+      "verb": "file-delete",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "file.delete",
+      "timeout_ms": 30000,
+      "params": {
+        "path": {
+          "pattern": "^/[^\\u0000]*$",
+          "required": true
+        }
+      }
+    },
+    "file.move": {
+      "verb": "file-move",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "file.move",
+      "timeout_ms": 30000,
+      "params": {
+        "source": {
+          "pattern": "^/[^\\u0000]*$",
+          "required": true
+        },
+        "target": {
+          "pattern": "^/[^\\u0000]*$",
+          "required": true
+        }
+      }
+    },
+    "file.copy": {
+      "verb": "file-copy",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "file.copy",
+      "timeout_ms": 60000,
+      "params": {
+        "source": {
+          "pattern": "^/[^\\u0000]*$",
+          "required": true
+        },
+        "target": {
+          "pattern": "^/[^\\u0000]*$",
+          "required": true
+        }
+      }
+    },
+    "file.chmod": {
+      "verb": "file-chmod",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "file.chmod",
+      "timeout_ms": 15000,
+      "params": {
+        "path": {
+          "pattern": "^/[^\\u0000]*$",
+          "required": true
+        },
+        "mode": {
+          "pattern": "^0?[0-7]{3,4}$",
+          "required": true
+        }
+      }
+    },
+    "file.chown": {
+      "verb": "file-chown",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "file.chown",
+      "timeout_ms": 15000,
+      "params": {
+        "path": {
+          "pattern": "^/[^\\u0000]*$",
+          "required": true
+        },
+        "owner": {
+          "pattern": "^[a-zA-Z0-9_][a-zA-Z0-9_-]{0,31}$",
+          "required": true
+        },
+        "group": {
+          "pattern": "^[a-zA-Z0-9_][a-zA-Z0-9_-]{0,31}$",
+          "required": false,
+          "default": ""
+        }
+      }
+    },
+    "file.compress": {
+      "verb": "file-compress",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "file.compress",
+      "timeout_ms": 120000,
+      "params": {
+        "source_path": {
+          "pattern": "^/[^\\u0000]*$",
+          "required": true
+        },
+        "archive_path": {
+          "pattern": "^/[^\\u0000]*$",
+          "required": true
+        },
+        "archive_type": {
+          "enum": [
+            "zip",
+            "tar.gz",
+            "tar.bz2",
+            "tar",
+            "tgz"
+          ],
+          "required": true
+        }
+      }
+    },
+    "file.extract": {
+      "verb": "file-extract",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "file.extract",
+      "timeout_ms": 120000,
+      "params": {
+        "archive_path": {
+          "pattern": "^/[^\\u0000]*$",
+          "required": true
+        },
+        "target_dir": {
+          "pattern": "^/[^\\u0000]*$",
+          "required": true
+        }
+      }
+    }
+  }
+}

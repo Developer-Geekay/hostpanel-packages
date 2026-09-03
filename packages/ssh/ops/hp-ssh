@@ -1,0 +1,385 @@
+#!/bin/bash
+# hp-ssh — root helper for the HostPanel v3 ssh daemon.
+#
+# Installed root-owned 0755. The daemon's sudoers file grants THIS SINGLE PATH
+# and nothing else, so `hp-ssh` (the daemon account) can never edit
+# ~/.ssh/authorized_keys, /etc/ssh/sshd_config.d or reload sshd directly —
+# only through the validation below.
+#
+#   hp-ssh ALL=(root) NOPASSWD: /opt/hostpanel/packages/ssh/ops/hp-ssh *
+#
+# Modelled on packages/users/ops/hp-users, which established this shape.
+#
+# Verbs: list-keys add-key remove-key get-password-auth set-password-auth
+#        sessions
+# Exit:  0 ok | 1 internal | 10 not found | 11 precondition | 12 validation
+#        13 conflict | 14 denied | 20 dependency
+#
+# stdout is DATA (JSON where structured). stderr is DIAGNOSTICS.
+#
+# Public keys are NOT secret, but they are long and pasted verbatim, so — per
+# the project brief — `key` and `comment` travel on stdin like a secret would.
+# That reuses the existing NUL-delimited channel purely to keep long/free-text
+# values out of argv and out of `ps`; it says nothing about confidentiality.
+
+set -euo pipefail
+
+# OPS_NAME is consumed by die()/warn() in common.sh, which shellcheck cannot
+# see because the source path is a variable.
+# shellcheck disable=SC2034
+OPS_NAME="hp-ssh"
+# shellcheck source=lib/common.sh
+# Shared validators live in hpcore, not in this package: every package's ops
+# script sources the same file, so the validate-then-act rules cannot drift
+# between features. HP_CORE_LIB lets the test suite point at the repo copy; in
+# production it defaults to the installed path.
+# Pinned when root: sudo always invokes this as root, so the environment cannot
+# redirect a privileged script at an attacker-controlled copy of the
+# validators. Overridable only unprivileged, which is how the test suite runs.
+if [ "$(id -u)" = "0" ]; then
+    HP_CORE_LIB=/opt/hostpanel/hpcore/lib
+else
+    : "${HP_CORE_LIB:=/opt/hostpanel/hpcore/lib}"
+fi
+# The library path is resolved at runtime from HP_CORE_LIB, so no static path
+# is correct in every context and shellcheck cannot follow it.
+# shellcheck disable=SC1091
+. "$HP_CORE_LIB/common.sh"
+
+# Roots and system paths are overridable ONLY when not running as root, so the
+# negative-test suite can point them at scratch locations on a developer
+# machine. As root — which is how sudo always invokes this — they are pinned
+# to their real values and the environment is ignored entirely. See
+# packages/users/ops/hp-users for the rationale; the same reasoning applies
+# here verbatim.
+if [ "$(id -u)" = "0" ]; then
+    HP_HOME_ROOT=/home
+    HP_SSHD_DROPIN_DIR=/etc/ssh/sshd_config.d
+    HP_SSHD_CONFIG=/etc/ssh/sshd_config
+    HP_SSHD_SERVICE=ssh
+else
+    : "${HP_HOME_ROOT:=/home}"
+    : "${HP_SSHD_DROPIN_DIR:=/etc/ssh/sshd_config.d}"
+    : "${HP_SSHD_CONFIG:=/etc/ssh/sshd_config}"
+    : "${HP_SSHD_SERVICE:=ssh}"
+fi
+
+usage() {
+    cat >&2 <<'EOF'
+usage: hp-ssh <verb> [args]
+  list-keys           <username>
+  add-key             <username>                 [required: key\0<value>\0 on stdin]
+                                                   [optional: comment\0<value>\0 on stdin]
+  remove-key          <username> <fingerprint>
+  get-password-auth   <username>
+  set-password-auth   <username> <enabled:0|1>
+  sessions            [username]
+EOF
+    exit 12
+}
+
+# ── package-local helpers ─────────────────────────────────────────────────────
+# Not in hpcore/lib/common.sh: these are specific to ssh key/session handling
+# and are not shared by any other package yet. If a second package needs them,
+# they belong in common.sh instead — until then, duplicating that boundary is
+# worse than a few private functions here.
+
+# json_escape <string> — minimal JSON string escaping in pure bash.
+#
+# Unlike user_json in common.sh, the values here (key comments, `who` output)
+# are attacker-influenced free text and CAN contain a quote or backslash, so
+# they cannot be trusted to interpolate into a printf format unescaped. No
+# python3/jq spawned inside a root-owned script merely to escape a string.
+json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\t'/\\t}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    printf '%s' "$s"
+}
+
+# user_home <username> — the account's home directory, from the trusted
+# account database (never from user input).
+user_home() {
+    passwd_db | awk -F: -v want="$1" '$1==want{print $6; f=1; exit} END{if(!f) exit 1}'
+}
+
+# resolved_ssh_paths <username> — sets SSH_DIR and AUTH_KEYS for a user whose
+# existence has already been confirmed by require_user_exists.
+#
+# The home directory comes from the passwd database, not from the caller, but
+# it is still re-validated with resolve_and_recheck: a home directory that is
+# itself a symlink (or that some other process moved outside HP_HOME_ROOT)
+# must not become a write target. This is the exact defence chown-home uses
+# in hp-users, applied here for the same reason.
+resolved_ssh_paths() {
+    local username="$1" home
+    home="$(user_home "$username")" || die "cannot read home directory for '$username'" 1
+    [ -n "$home" ] || die "user '$username' has no home directory on record" 11
+    RESOLVED_HOME="$(resolve_and_recheck "$home" "$HP_HOME_ROOT")"
+    SSH_DIR="$RESOLVED_HOME/.ssh"
+    AUTH_KEYS="$SSH_DIR/authorized_keys"
+}
+
+#: Public key types this build accepts. Checked before ssh-keygen runs, so a
+#: junk first token is rejected with a clear message instead of whatever
+#: ssh-keygen happens to print for it.
+valid_key_type() {
+    case "$1" in
+        ssh-rsa|ssh-ed25519|ssh-dss| \
+        ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521| \
+        sk-ecdsa-sha2-nistp256@openssh.com|sk-ssh-ed25519@openssh.com) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+valid_fingerprint() {
+    echo "$1" | grep -Eq '^(SHA256:[A-Za-z0-9+/]{1,64}|MD5:[0-9a-f:]{1,64})$' \
+        || die "invalid fingerprint '$1' (want SHA256:... or MD5:...)" 12
+}
+
+# key_fingerprint <one authorized_keys line, or a pasted public key> — prints
+# "<bits> <fingerprint> <type>" on success, or fails (caller decides the exit
+# code — a submitted key failing this is a 12, an unparsable stored line is
+# skipped rather than fatal).
+key_fingerprint() {
+    local out
+    out="$(printf '%s\n' "$1" | ssh-keygen -lf - 2>/dev/null)" || return 1
+    printf '%s\n' "$out" | awk '{
+        bits=$1; fp=$2; type=$NF; gsub(/[()]/,"",type);
+        printf "%s %s %s\n", bits, fp, type
+    }'
+}
+
+# each_authorized_line <file> — non-blank, non-comment lines, robust to a
+# missing trailing newline.
+each_authorized_line() {
+    local file="$1" line
+    [ -f "$file" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in ''|'#'*) continue ;; esac
+        printf '%s\n' "$line"
+    done < "$file"
+}
+
+[ $# -ge 1 ] || usage
+verb="$1"; shift
+
+case "$verb" in
+
+  # ── keys: read ──────────────────────────────────────────────────────────────
+
+  list-keys)
+    require_argc 1 $# "list-keys <username>"
+    username="$1"
+    valid_username "$username"
+    require_user_exists "$username"
+    resolved_ssh_paths "$username"
+
+    printf '{"username":"%s","keys":[' "$username"
+    first=1
+    while IFS= read -r line; do
+        fp_out="$(key_fingerprint "$line")" || continue   # skip unparsable lines
+        bits="$(printf '%s\n' "$fp_out" | awk '{print $1}')"
+        fp="$(printf '%s\n' "$fp_out" | awk '{print $2}')"
+        type="$(printf '%s\n' "$fp_out" | awk '{print $3}')"
+        comment="$(printf '%s\n' "$line" | cut -d' ' -f3- -s)"
+        [ -n "$comment" ] || comment=""
+        [ "$first" -eq 1 ] || printf ','
+        first=0
+        printf '{"fingerprint":"%s","type":"%s","bits":%s,"comment":"%s"}' \
+            "$fp" "$type" "$bits" "$(json_escape "$comment")"
+    done < <(each_authorized_line "$AUTH_KEYS")
+    printf ']}\n'
+    ;;
+
+  # ── keys: write ───────────────────────────────────────────────────────────────
+
+  add-key)
+    require_argc 1 $# "add-key <username>"
+    username="$1"
+    valid_username "$username"
+    guard_protected "$username"
+
+    read_secrets
+    key="$(secret key)"
+    comment="$(secret comment)"
+    [ -n "$key" ] || die "no key supplied on stdin" 12
+    # A pasted key must be exactly one line; anything else is not a public key.
+    case "$key" in *$'\n'*) die "key must be a single line" 12 ;; esac
+
+    key_type="$(printf '%s\n' "$key" | awk '{print $1}')"
+    key_blob="$(printf '%s\n' "$key" | awk '{print $2}')"
+    [ -n "$key_type" ] && [ -n "$key_blob" ] || die "key is not in 'type base64 [comment]' format" 12
+    valid_key_type "$key_type" || die "unsupported key type '$key_type'" 12
+
+    fp_out="$(key_fingerprint "$key")" || die "key failed validation (ssh-keygen could not parse it)" 12
+    bits="$(printf '%s\n' "$fp_out" | awk '{print $1}')"
+    new_fp="$(printf '%s\n' "$fp_out" | awk '{print $2}')"
+
+    require_user_exists "$username"
+    resolved_ssh_paths "$username"
+
+    while IFS= read -r line; do
+        existing_out="$(key_fingerprint "$line")" || continue
+        existing_fp="$(printf '%s\n' "$existing_out" | awk '{print $2}')"
+        if [ "$existing_fp" = "$new_fp" ]; then
+            die "this key is already authorized for '$username' ($new_fp)" 13
+        fi
+    done < <(each_authorized_line "$AUTH_KEYS")
+
+    final_comment="$comment"
+    if [ -z "$final_comment" ]; then
+        final_comment="$(printf '%s\n' "$key" | cut -d' ' -f3- -s)"
+    fi
+    case "$final_comment" in *$'\n'*) die "comment must be a single line" 12 ;; esac
+    new_line="$key_type $key_blob"
+    [ -n "$final_comment" ] && new_line="$new_line $final_comment"
+
+    act mkdir -p "$SSH_DIR"
+    act chmod 0700 "$SSH_DIR"
+    act chown "$username:$username" "$SSH_DIR"
+
+    if is_dryrun; then
+        echo "WOULD-APPEND: $AUTH_KEYS <- $new_fp ($key_type)" >&2
+    else
+        { each_authorized_line "$AUTH_KEYS"; printf '%s\n' "$new_line"; } \
+            | atomic_write "$AUTH_KEYS" 0600
+        chown "$username:$username" "$AUTH_KEYS" || die "chown failed on '$AUTH_KEYS'" 20
+    fi
+
+    printf '{"username":"%s","fingerprint":"%s","type":"%s","bits":%s,"comment":"%s","added":true}\n' \
+        "$username" "$new_fp" "$key_type" "$bits" "$(json_escape "$final_comment")"
+    ;;
+
+  remove-key)
+    require_argc 2 $# "remove-key <username> <fingerprint>"
+    username="$1"; fingerprint="$2"
+    valid_username "$username"
+    valid_fingerprint "$fingerprint"
+    guard_protected "$username"
+    require_user_exists "$username"
+    resolved_ssh_paths "$username"
+
+    [ -f "$AUTH_KEYS" ] || die "user '$username' has no authorized_keys file" 10
+
+    found=0
+    remaining="$(mktemp)"
+    trap 'rm -f "$remaining"' EXIT
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            ''|'#'*) printf '%s\n' "$line" >> "$remaining"; continue ;;
+        esac
+        existing_out="$(key_fingerprint "$line")" || { printf '%s\n' "$line" >> "$remaining"; continue; }
+        existing_fp="$(printf '%s\n' "$existing_out" | awk '{print $2}')"
+        if [ "$existing_fp" = "$fingerprint" ]; then
+            found=1
+            continue
+        fi
+        printf '%s\n' "$line" >> "$remaining"
+    done < "$AUTH_KEYS"
+
+    [ "$found" -eq 1 ] || die "no key with fingerprint '$fingerprint' found for '$username'" 10
+
+    if is_dryrun; then
+        echo "WOULD-WRITE: $AUTH_KEYS (removing $fingerprint)" >&2
+    else
+        atomic_write "$AUTH_KEYS" 0600 < "$remaining"
+        chown "$username:$username" "$AUTH_KEYS" || die "chown failed on '$AUTH_KEYS'" 20
+    fi
+    rm -f "$remaining"
+    trap - EXIT
+
+    printf '{"username":"%s","fingerprint":"%s","removed":true}\n' "$username" "$fingerprint"
+    ;;
+
+  # ── password auth toggle ──────────────────────────────────────────────────────
+
+  get-password-auth)
+    require_argc 1 $# "get-password-auth <username>"
+    username="$1"
+    valid_username "$username"
+    require_user_exists "$username"
+
+    snippet="$HP_SSHD_DROPIN_DIR/60-hostpanel-$username.conf"
+    if [ -f "$snippet" ]; then
+        value="$(awk '$1=="PasswordAuthentication"{print $2; exit}' "$snippet")"
+        case "$value" in
+            yes) printf '{"username":"%s","password_auth":true,"override":true}\n' "$username" ;;
+            no)  printf '{"username":"%s","password_auth":false,"override":true}\n' "$username" ;;
+            *)   printf '{"username":"%s","password_auth":null,"override":false}\n' "$username" ;;
+        esac
+    else
+        printf '{"username":"%s","password_auth":null,"override":false}\n' "$username"
+    fi
+    ;;
+
+  set-password-auth)
+    require_argc 2 $# "set-password-auth <username> <enabled:0|1>"
+    username="$1"; enabled="$2"
+    valid_username "$username"
+    case "$enabled" in 0|1) ;; *) die "enabled must be 0 or 1" 12 ;; esac
+    guard_protected "$username"
+    require_user_exists "$username"
+
+    value="no"
+    [ "$enabled" = "1" ] && value="yes"
+    snippet="$HP_SSHD_DROPIN_DIR/60-hostpanel-$username.conf"
+
+    # Match blocks apply to every directive that follows until the next Match
+    # (or end of file) — and on Ubuntu, /etc/ssh/sshd_config Includes this
+    # directory near the TOP of the file. A snippet that opened "Match User"
+    # and never closed it would silently narrow every directive AFTER this
+    # Include, for EVERY user, to apply only to this one account. `Match all`
+    # is what closes the block; it is not decorative.
+    content="# Managed by HostPanel — do not edit by hand.
+Match User $username
+    PasswordAuthentication $value
+Match all
+"
+    act mkdir -p "$HP_SSHD_DROPIN_DIR"
+    if is_dryrun; then
+        echo "WOULD-WRITE: $snippet (PasswordAuthentication $value)" >&2
+    else
+        printf '%s' "$content" | atomic_write "$snippet" 0644
+    fi
+
+    if ! act sshd -t -f "$HP_SSHD_CONFIG"; then
+        is_dryrun || rm -f "$snippet"
+        die "sshd configuration is invalid after this change; reverted" 20
+    fi
+    act systemctl reload "$HP_SSHD_SERVICE" || die "sshd reload failed" 20
+
+    printf '{"username":"%s","password_auth":%s}\n' \
+        "$username" "$([ "$value" = "yes" ] && echo true || echo false)"
+    ;;
+
+  # ── sessions ───────────────────────────────────────────────────────────────
+
+  sessions)
+    [ $# -le 1 ] || die "expected 0 or 1 argument(s), got $# — usage: sessions [username]" 12
+    filter="${1:-}"
+    if [ -n "$filter" ]; then
+        valid_username "$filter"
+    fi
+
+    who | awk -v filter="$filter" '
+        BEGIN { printf "{\"sessions\":["; n = 0 }
+        {
+            user = $1; tty = $2; date = $3; time = $4;
+            if (filter != "" && user != filter) next
+            from = "";
+            if (match($0, /\([^)]*\)/)) { from = substr($0, RSTART + 1, RLENGTH - 2) }
+            if (n++) printf ","
+            printf "{\"user\":\"%s\",\"tty\":\"%s\",\"login_time\":\"%s %s\",\"from\":\"%s\"}", \
+                   user, tty, date, time, from
+        }
+        END { print "]}" }'
+    ;;
+
+  *)
+    die "unknown verb: $verb" 12
+    ;;
+esac

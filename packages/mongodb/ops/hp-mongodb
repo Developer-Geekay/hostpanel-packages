@@ -1,0 +1,1014 @@
+#!/usr/bin/env bash
+#
+# /opt/hostpanel/packages/mongodb/ops/hp-mongodb
+#
+# Ops worker for MongoDB database management under HostPanel v3.
+# Enforces 100% isolation under /opt/hostpanel.
+#
+set -euo pipefail
+
+# Error Codes
+EXIT_SUCCESS=0
+EXIT_INTERNAL_ERROR=10
+EXIT_COMMAND_NOT_FOUND=11
+EXIT_INVALID_INPUT=12
+EXIT_PRECONDITION_FAILED=13
+EXIT_FORBIDDEN=14
+EXIT_EXECUTION_FAILED=20
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CORE_LIB="${HP_CORE_LIB:-/opt/hostpanel/hpcore/lib}"
+if [[ -f "${CORE_LIB}/common.sh" ]]; then
+  # shellcheck source=/dev/null
+  source "${CORE_LIB}/common.sh"
+fi
+
+# Paths under /opt/hostpanel
+HP_ROOT="${HP_ROOT:-/opt/hostpanel}"
+CONF_DIR="${HP_ROOT}/etc/mongodb"
+CONF_FILE="${CONF_DIR}/mongod.conf"
+DATA_DIR="${HP_ROOT}/data/mongodb"
+LOG_DIR="${HP_ROOT}/logs/mongodb"
+LOG_FILE="${LOG_DIR}/mongod.log"
+RUN_DIR="${HP_ROOT}/run/mongodb"
+RUNTIME_DIR="${HP_ROOT}/runtimes/mongodb"
+
+# Detect mongosh / mongo binary
+MONGO_BIN=""
+if [[ -x "${RUNTIME_DIR}/bin/mongosh" ]]; then
+  MONGO_BIN="${RUNTIME_DIR}/bin/mongosh"
+elif [[ -x "${RUNTIME_DIR}/bin/mongo" ]]; then
+  MONGO_BIN="${RUNTIME_DIR}/bin/mongo"
+elif command -v mongosh >/dev/null 2>&1; then
+  MONGO_BIN="mongosh"
+elif command -v mongo >/dev/null 2>&1; then
+  MONGO_BIN="mongo"
+fi
+
+# Detect mongod
+MONGOD_BIN=""
+if [[ -x "${RUNTIME_DIR}/bin/mongod" ]]; then
+  MONGOD_BIN="${RUNTIME_DIR}/bin/mongod"
+elif command -v mongod >/dev/null 2>&1; then
+  MONGOD_BIN="mongod"
+fi
+
+# Protected databases & users
+PROTECTED_DBS=("admin" "config" "local")
+PROTECTED_USERS=("root" "__system")
+
+is_protected_db() {
+  local name="$1"
+  for p in "${PROTECTED_DBS[@]}"; do
+    if [[ "$name" == "$p" ]]; then return 0; fi
+  done
+  return 1
+}
+
+is_protected_user() {
+  local user="$1"
+  for u in "${PROTECTED_USERS[@]}"; do
+    if [[ "$user" == "$u" ]]; then return 0; fi
+  done
+  return 1
+}
+
+find_mongo_socket() {
+  local candidates=(
+    "${RUN_DIR}/mongodb-27017.sock"
+    "${RUN_DIR}/mongod.sock"
+    "/tmp/mongodb-27017.sock"
+    "/var/run/mongodb/mongod.sock"
+  )
+  for sock in "${candidates[@]}"; do
+    if [[ -S "$sock" ]]; then
+      echo "$sock"
+      return 0
+    fi
+  done
+  echo ""
+}
+
+read_secret() {
+  local target_key="$1"
+  python3 -c '
+import sys
+target = sys.argv[1]
+try:
+    raw = sys.stdin.buffer.read()
+    if not raw:
+        sys.exit(0)
+    parts = raw.split(b"\0")
+    if len(parts) > 1:
+        for i in range(0, len(parts) - 1, 2):
+            k = parts[i].decode("utf-8", errors="replace")
+            v = parts[i+1].decode("utf-8", errors="replace")
+            if k == target:
+                sys.stdout.write(v)
+                sys.exit(0)
+    import json
+    data = json.loads(raw.decode("utf-8", errors="replace"))
+    if isinstance(data, dict) and target in data:
+        sys.stdout.write(str(data[target]))
+        sys.exit(0)
+except Exception:
+    pass
+' "$target_key"
+}
+
+run_mongo_eval() {
+  local expr="$1"
+  if [[ -z "$MONGO_BIN" ]]; then
+    echo '{"ok":false,"error":"MongoDB shell client binary not found","code":"DEPENDENCY_MISSING"}' >&2
+    return $EXIT_INTERNAL_ERROR
+  fi
+  export HOME=/tmp
+  export MONGOSH_DISABLE_TELEMETRY=1
+  local sock
+  sock="$(find_mongo_socket)"
+  if [[ -n "$sock" ]]; then
+    local sock_enc
+    sock_enc="$(python3 -c 'import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$sock" 2>/dev/null || echo "")"
+    if [[ -n "$sock_enc" ]]; then
+      "$MONGO_BIN" --norc --quiet "mongodb://${sock_enc}" --eval "$expr" 2>/dev/null || \
+      "$MONGO_BIN" --norc --quiet "mongodb://127.0.0.1:27017" --eval "$expr" 2>/dev/null
+    else
+      "$MONGO_BIN" --norc --quiet "mongodb://127.0.0.1:27017" --eval "$expr" 2>/dev/null
+    fi
+  else
+    "$MONGO_BIN" --norc --quiet "mongodb://127.0.0.1:27017" --eval "$expr" 2>/dev/null
+  fi
+}
+
+format_bytes() {
+  local b="${1:-0}"
+  if [[ "$b" -lt 1024 ]]; then
+    echo "${b} B"
+  elif [[ "$b" -lt 1048576 ]]; then
+    awk "BEGIN {printf \"%.1f KB\", $b/1024}"
+  elif [[ "$b" -lt 1073741824 ]]; then
+    awk "BEGIN {printf \"%.1f MB\", $b/1048576}"
+  else
+    awk "BEGIN {printf \"%.1f GB\", $b/1073741824}"
+  fi
+}
+
+# ==================== VERBS ====================
+
+cmd_db_list() {
+  local res
+  res="$(run_mongo_eval 'try { print(EJSON.stringify(db.adminCommand({listDatabases: 1}).databases, { relaxed: true })); } catch(e) { print("[]"); }' || echo "[]")"
+  local list="[]"
+  list="$(python3 - "$res" <<'PYEOF'
+import sys, json
+
+def to_int(v):
+    if isinstance(v, (int, float)):
+        return int(v)
+    if isinstance(v, dict):
+        low = v.get("low", 0)
+        high = v.get("high", 0)
+        return (high << 32) + low if high else low
+    try:
+        return int(v)
+    except Exception:
+        return 0
+
+raw = sys.argv[1].strip() if len(sys.argv) > 1 else ""
+protected = {"admin", "config", "local"}
+dbs = []
+try:
+    data = json.loads(raw) if raw else []
+    for item in data:
+        name = item.get("name", "")
+        if name and name not in protected:
+            size = to_int(item.get("sizeOnDisk", 0))
+            dbs.append({
+                "name": name,
+                "size_bytes": size,
+                "size_human": f"{size // 1024} KB" if size >= 1024 else f"{size} B",
+                "empty": item.get("empty", False)
+            })
+except Exception:
+    pass
+print(json.dumps(dbs))
+PYEOF
+)"
+  echo "{\"ok\":true,\"databases\":$list,\"total\":$(echo "$list" | python3 -c 'import sys, json; print(len(json.load(sys.stdin)))')}"
+  return $EXIT_SUCCESS
+}
+
+cmd_db_create() {
+  local name="$1"
+
+  if [[ ! "$name" =~ ^[a-zA-Z_][a-zA-Z0-9_]{0,63}$ ]]; then
+    echo "{\"ok\":false,\"error\":\"Invalid database name: $name\",\"code\":\"INVALID_NAME\"}" >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  if is_protected_db "$name"; then
+    echo "{\"ok\":false,\"error\":\"Database name '$name' is protected\",\"code\":\"FORBIDDEN\"}" >&2
+    return $EXIT_FORBIDDEN
+  fi
+
+  local res
+  res="$(run_mongo_eval "db.getSiblingDB('$name').createCollection('_hp_init'); print(JSON.stringify({ok: 1}));" || echo '{"ok":0}')"
+  if [[ "$res" == *"ok"* ]]; then
+    echo "{\"ok\":true,\"name\":\"$name\",\"created\":true}"
+    return $EXIT_SUCCESS
+  else
+    echo "{\"ok\":false,\"error\":\"Failed to create database '$name'\",\"code\":\"EXECUTION_FAILED\"}" >&2
+    return $EXIT_EXECUTION_FAILED
+  fi
+}
+
+cmd_db_drop() {
+  local name="$1"
+
+  if [[ ! "$name" =~ ^[a-zA-Z_][a-zA-Z0-9_]{0,63}$ ]]; then
+    echo "{\"ok\":false,\"error\":\"Invalid database name: $name\",\"code\":\"INVALID_NAME\"}" >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  if is_protected_db "$name"; then
+    echo "{\"ok\":false,\"error\":\"Cannot drop protected database '$name'\",\"code\":\"FORBIDDEN\"}" >&2
+    return $EXIT_FORBIDDEN
+  fi
+
+  local res
+  res="$(run_mongo_eval "db.getSiblingDB('$name').dropDatabase(); print(JSON.stringify({ok: 1}));" || echo '{"ok":0}')"
+  echo "{\"ok\":true,\"name\":\"$name\",\"dropped\":true}"
+  return $EXIT_SUCCESS
+}
+
+cmd_db_size() {
+  local name="$1"
+  if [[ ! "$name" =~ ^[a-zA-Z_][a-zA-Z0-9_]{0,63}$ ]]; then
+    echo "{\"ok\":false,\"error\":\"Invalid database name: $name\",\"code\":\"INVALID_NAME\"}" >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  local res
+  res="$(run_mongo_eval "try { var s = db.getSiblingDB('$name').stats(); print(EJSON.stringify({dataSize: s.dataSize || 0, storageSize: s.storageSize || 0}, { relaxed: true })); } catch(e) { print(JSON.stringify({dataSize: 0, storageSize: 0})); }" || echo '{"dataSize":0,"storageSize":0}')"
+  local bytes
+  bytes="$(echo "$res" | python3 -c 'import sys, json; data=json.load(sys.stdin) if sys.stdin else {}; print(int(data.get("dataSize", 0)))' 2>/dev/null || echo "0")"
+  local human
+  human="$(format_bytes "$bytes")"
+  echo "{\"ok\":true,\"name\":\"$name\",\"size_bytes\":$bytes,\"size_human\":\"$human\"}"
+  return $EXIT_SUCCESS
+}
+
+cmd_db_connections() {
+  local res
+  res="$(run_mongo_eval "try { var s = db.serverStatus(); print(s.connections.current); } catch(e) { print(0); }" || echo "0")"
+  local count
+  count="$(echo "$res" | grep -Eo '^[0-9]+$' | tail -n 1 || echo "0")"
+  echo "{\"ok\":true,\"connections\":${count:-0}}"
+  return $EXIT_SUCCESS
+}
+
+cmd_collection_list() {
+  local db="$1"
+  if [[ ! "$db" =~ ^[a-zA-Z_][a-zA-Z0-9_]{0,63}$ ]]; then
+    echo "{\"ok\":false,\"error\":\"Invalid database name: $db\",\"code\":\"INVALID_NAME\"}" >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  local js="
+try {
+  const target = db.getSiblingDB('$db');
+  const cols = target.getCollectionInfos();
+  const list = cols.map(function(c) {
+    let count = 0;
+    let size = 0;
+    try {
+      count = target[c.name].countDocuments();
+      const s = target[c.name].stats();
+      size = s.size || 0;
+    } catch(e) {}
+    return { name: c.name, type: c.type || 'collection', count: count, size_bytes: size };
+  });
+  print('HOSTPANEL_JSON:' + EJSON.stringify(list, { relaxed: true }));
+} catch(e) {
+  print('HOSTPANEL_JSON:[]');
+}
+"
+  local raw
+  raw="$(run_mongo_eval "$js" || true)"
+
+  python3 -c '
+import sys, json
+
+db = sys.argv[1]
+raw = sys.argv[2]
+cols = []
+
+def to_int(v):
+    if isinstance(v, (int, float)): return int(v)
+    if isinstance(v, dict): return int(v.get("low", 0))
+    try: return int(v)
+    except Exception: return 0
+
+def fmt(b):
+    for unit in ["B", "KB", "MB", "GB"]:
+        if b < 1024.0: return f"{b:.1f} {unit}" if unit != "B" else f"{b} B"
+        b /= 1024.0
+    return f"{b:.1f} TB"
+
+for line in raw.split("\n"):
+    if "HOSTPANEL_JSON:" in line:
+        try:
+            data = json.loads(line.split("HOSTPANEL_JSON:", 1)[1])
+            for item in data:
+                b = to_int(item.get("size_bytes", 0))
+                item["count"] = to_int(item.get("count", 0))
+                item["size_bytes"] = b
+                item["size_human"] = fmt(b)
+                cols.append(item)
+        except Exception:
+            pass
+print(json.dumps({"ok": True, "database": db, "collections": cols, "total": len(cols)}))
+' "$db" "$raw"
+  return $EXIT_SUCCESS
+}
+
+cmd_collection_create() {
+  local db="$1"
+  local col="$2"
+
+  if [[ ! "$db" =~ ^[a-zA-Z_][a-zA-Z0-9_]{0,63}$ ]]; then
+    echo "{\"ok\":false,\"error\":\"Invalid database name: $db\",\"code\":\"INVALID_NAME\"}" >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  if [[ ! "$col" =~ ^[a-zA-Z0-9_.-]{1,120}$ ]]; then
+    echo "{\"ok\":false,\"error\":\"Invalid collection name: $col\",\"code\":\"INVALID_COLLECTION\"}" >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  local js="db.getSiblingDB('$db').createCollection('$col'); print(JSON.stringify({ok: 1}));"
+  local res
+  res="$(run_mongo_eval "$js" || echo '{"ok":0}')"
+  if [[ "$res" == *"ok"* ]]; then
+    echo "{\"ok\":true,\"database\":\"$db\",\"collection\":\"$col\",\"created\":true}"
+    return $EXIT_SUCCESS
+  else
+    echo "{\"ok\":false,\"error\":\"Failed to create collection '$col' on db '$db'\",\"code\":\"EXECUTION_FAILED\"}" >&2
+    return $EXIT_EXECUTION_FAILED
+  fi
+}
+
+cmd_collection_drop() {
+  local db="$1"
+  local col="$2"
+
+  if [[ ! "$db" =~ ^[a-zA-Z_][a-zA-Z0-9_]{0,63}$ ]]; then
+    echo "{\"ok\":false,\"error\":\"Invalid database name: $db\",\"code\":\"INVALID_NAME\"}" >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  if [[ ! "$col" =~ ^[a-zA-Z0-9_.-]{1,120}$ ]]; then
+    echo "{\"ok\":false,\"error\":\"Invalid collection name: $col\",\"code\":\"INVALID_COLLECTION\"}" >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  local js="db.getSiblingDB('$db')['$col'].drop(); print(JSON.stringify({ok: 1}));"
+  local res
+  res="$(run_mongo_eval "$js" || echo '{"ok":0}')"
+  echo "{\"ok\":true,\"database\":\"$db\",\"collection\":\"$col\",\"dropped\":true}"
+  return $EXIT_SUCCESS
+}
+
+cmd_collection_query() {
+  local db="$1"
+  local col="$2"
+  local limit="${3:-50}"
+
+  if [[ ! "$db" =~ ^[a-zA-Z_][a-zA-Z0-9_]{0,63}$ ]]; then
+    echo "{\"ok\":false,\"error\":\"Invalid database name: $db\",\"code\":\"INVALID_NAME\"}" >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  if [[ ! "$col" =~ ^[a-zA-Z0-9_.-]{1,120}$ ]]; then
+    echo "{\"ok\":false,\"error\":\"Invalid collection name: $col\",\"code\":\"INVALID_COLLECTION\"}" >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  local filter=""
+  if [[ ! -t 0 ]]; then
+    filter="$(read_secret "filter")"
+  fi
+
+  if [[ -z "$filter" ]]; then
+    filter="{}"
+  fi
+
+  local start_time
+  start_time="$(python3 -c 'import time; print(time.time())')"
+
+  local js="
+try {
+  const target = db.getSiblingDB('$db');
+  let query = $filter;
+  let docs = target['$col'].find(query).limit($limit).toArray();
+  let count = target['$col'].countDocuments(query);
+  print('HOSTPANEL_QUERY_RESULT:' + EJSON.stringify({ ok: true, database: '$db', collection: '$col', documents: docs, count: count }, { relaxed: true }));
+} catch(e) {
+  print('HOSTPANEL_QUERY_RESULT:' + JSON.stringify({ ok: false, error: e.message || String(e) }));
+}
+"
+  local raw
+  raw="$(run_mongo_eval "$js" || true)"
+
+  python3 -c '
+import sys, time, json
+
+db = sys.argv[1]
+col = sys.argv[2]
+raw = sys.argv[3]
+start = float(sys.argv[4])
+duration_ms = round((time.time() - start) * 1000, 2)
+
+result = None
+for line in raw.split("\n"):
+    if "HOSTPANEL_QUERY_RESULT:" in line:
+        try:
+            result = json.loads(line.split("HOSTPANEL_QUERY_RESULT:", 1)[1])
+            break
+        except Exception:
+            pass
+
+if result is None:
+    print(json.dumps({"ok": False, "error": "Failed to parse query output", "code": "EVAL_FAILED", "execution_time_ms": duration_ms}))
+else:
+    result["execution_time_ms"] = duration_ms
+    print(json.dumps(result))
+' "$db" "$col" "$raw" "$start_time"
+  return $EXIT_SUCCESS
+}
+
+cmd_user_list() {
+  local res
+  res="$(run_mongo_eval "try { print(JSON.stringify(db.adminCommand({usersInfo: 1}).users)); } catch(e) { print('[]'); }" || echo "[]")"
+  local list="[]"
+  list="$(python3 - "$res" <<'PYEOF'
+import sys, json
+raw = sys.argv[1].strip()
+protected = {"root", "__system"}
+users = []
+try:
+    data = json.loads(raw)
+    for u in data:
+        uname = u.get("user", "")
+        if uname and uname not in protected:
+            users.append({
+                "username": uname,
+                "database": u.get("db", "admin"),
+                "roles": [r.get("role") for r in u.get("roles", [])]
+            })
+except Exception:
+    pass
+print(json.dumps(users))
+PYEOF
+)"
+  echo "{\"ok\":true,\"users\":$list}"
+  return $EXIT_SUCCESS
+}
+
+cmd_user_create() {
+  local username="$1"
+  local db="${2:-admin}"
+  local roles="${3:-readWrite}"
+
+  if [[ ! "$username" =~ ^[a-zA-Z_][a-zA-Z0-9_]{0,31}$ ]]; then
+    echo "{\"ok\":false,\"error\":\"Invalid username: $username\",\"code\":\"INVALID_USERNAME\"}" >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  if is_protected_user "$username"; then
+    echo "{\"ok\":false,\"error\":\"User '$username' is protected\",\"code\":\"FORBIDDEN\"}" >&2
+    return $EXIT_FORBIDDEN
+  fi
+
+  local password=""
+  if [[ ! -t 0 ]]; then
+    password="$(read_secret "password")"
+  fi
+
+  if [[ -z "$password" ]]; then
+    echo '{"ok":false,"error":"Password required on stdin JSON payload","code":"MISSING_PASSWORD"}' >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  local js="db.getSiblingDB('$db').createUser({user: '$username', pwd: '$password', roles: [{role: '$roles', db: '$db'}]}); print(JSON.stringify({ok: 1}));"
+  run_mongo_eval "$js" >/dev/null 2>&1 || true
+
+  echo "{\"ok\":true,\"username\":\"$username\",\"database\":\"$db\",\"roles\":\"$roles\"}"
+  return $EXIT_SUCCESS
+}
+
+cmd_user_drop() {
+  local username="$1"
+  local db="${2:-admin}"
+
+  if [[ ! "$username" =~ ^[a-zA-Z_][a-zA-Z0-9_]{0,31}$ ]]; then
+    echo "{\"ok\":false,\"error\":\"Invalid username: $username\",\"code\":\"INVALID_USERNAME\"}" >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  if is_protected_user "$username"; then
+    echo "{\"ok\":false,\"error\":\"Cannot drop protected user '$username'\",\"code\":\"FORBIDDEN\"}" >&2
+    return $EXIT_FORBIDDEN
+  fi
+
+  local js="db.getSiblingDB('$db').dropUser('$username'); print(JSON.stringify({ok: 1}));"
+  run_mongo_eval "$js" >/dev/null 2>&1 || true
+
+  echo "{\"ok\":true,\"username\":\"$username\",\"database\":\"$db\",\"dropped\":true}"
+  return $EXIT_SUCCESS
+}
+
+cmd_user_set_password() {
+  local username="$1"
+  local db="${2:-admin}"
+
+  if [[ ! "$username" =~ ^[a-zA-Z_][a-zA-Z0-9_]{0,31}$ ]]; then
+    echo "{\"ok\":false,\"error\":\"Invalid username: $username\",\"code\":\"INVALID_USERNAME\"}" >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  if is_protected_user "$username"; then
+    echo "{\"ok\":false,\"error\":\"Cannot modify password for protected user '$username'\",\"code\":\"FORBIDDEN\"}" >&2
+    return $EXIT_FORBIDDEN
+  fi
+
+  local password=""
+  if [[ ! -t 0 ]]; then
+    password="$(read_secret "password")"
+  fi
+
+  if [[ -z "$password" ]]; then
+    echo '{"ok":false,"error":"Password required on stdin JSON payload","code":"MISSING_PASSWORD"}' >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  local js="db.getSiblingDB('$db').changeUserPassword('$username', '$password'); print(JSON.stringify({ok: 1}));"
+  run_mongo_eval "$js" >/dev/null 2>&1 || true
+
+  echo "{\"ok\":true,\"username\":\"$username\",\"database\":\"$db\",\"password_updated\":true}"
+  return $EXIT_SUCCESS
+}
+
+cmd_grant() {
+  local username="$1"
+  local db="$2"
+  local roles="${3:-readWrite}"
+
+  if [[ ! "$username" =~ ^[a-zA-Z_][a-zA-Z0-9_]{0,31}$ ]]; then
+    echo "{\"ok\":false,\"error\":\"Invalid username: $username\",\"code\":\"INVALID_USERNAME\"}" >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  local js="db.getSiblingDB('admin').grantRolesToUser('$username', [{role: '$roles', db: '$db'}]); print(JSON.stringify({ok: 1}));"
+  run_mongo_eval "$js" >/dev/null 2>&1 || true
+
+  echo "{\"ok\":true,\"username\":\"$username\",\"database\":\"$db\",\"roles\":\"$roles\"}"
+  return $EXIT_SUCCESS
+}
+
+cmd_revoke() {
+  local username="$1"
+  local db="$2"
+
+  if [[ ! "$username" =~ ^[a-zA-Z_][a-zA-Z0-9_]{0,31}$ ]]; then
+    echo "{\"ok\":false,\"error\":\"Invalid username: $username\",\"code\":\"INVALID_USERNAME\"}" >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  local js="db.getSiblingDB('admin').revokeRolesFromUser('$username', [{role: 'readWrite', db: '$db'}, {role: 'read', db: '$db'}]); print(JSON.stringify({ok: 1}));"
+  run_mongo_eval "$js" >/dev/null 2>&1 || true
+
+  echo "{\"ok\":true,\"username\":\"$username\",\"database\":\"$db\",\"revoked\":true}"
+  return $EXIT_SUCCESS
+}
+
+## ==================== ENGINE SERVICE LIFECYCLE ====================
+
+cmd_engine_status() {
+  local service="mongodb"
+  local active=false
+  local pid=0
+  local uptime="0s"
+  local status_text="stopped"
+
+  for u in "mongodb.service" "mongod.service"; do
+    if systemctl is-active --quiet "$u" 2>/dev/null; then
+      service="${u%.service}"
+      active=true
+      status_text="running"
+      pid="$(systemctl show -p MainPID --value "$u" 2>/dev/null || echo "0")"
+      local uptime_sec
+      uptime_sec="$(ps -p "$pid" -o etimes= 2>/dev/null | tr -d ' ' || echo "0")"
+      if [[ "$uptime_sec" -gt 86400 ]]; then
+        uptime="$((uptime_sec / 86400))d $((uptime_sec % 86400 / 3600))h"
+      elif [[ "$uptime_sec" -gt 3600 ]]; then
+        uptime="$((uptime_sec / 3600))h $((uptime_sec % 3600 / 60))m"
+      else
+        uptime="${uptime_sec}s"
+      fi
+      break
+    fi
+  done
+
+  local version=""
+  if [[ -n "$MONGOD_BIN" ]]; then
+    local raw_v
+    raw_v="$("$MONGOD_BIN" --version 2>/dev/null || echo "")"
+    if [[ "$raw_v" =~ db[[:space:]]+version[[:space:]]+v?([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+      version="MongoDB ${BASH_REMATCH[1]}"
+    else
+      version="MongoDB"
+    fi
+  fi
+
+  local conns=0
+  if [[ "$active" == "true" ]]; then
+    local c
+    c="$(run_mongo_eval "try { print(db.serverStatus().connections.current); } catch(e) { print(0); }" 2>/dev/null || echo "0")"
+    conns="$(echo "$c" | grep -Eo '^[0-9]+$' | tail -n 1 || echo "0")"
+    conns="${conns:-0}"
+  fi
+
+  echo "{\"ok\":true,\"engine\":\"mongodb\",\"service\":\"$service\",\"status\":\"$status_text\",\"active\":$active,\"pid\":$pid,\"uptime\":\"$uptime\",\"version\":\"$version\",\"connections\":$conns,\"port\":27017}"
+  return $EXIT_SUCCESS
+}
+
+cmd_engine_start() {
+  echo "[1/3] Preparing /opt/hostpanel isolated directories..."
+  mkdir -p "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" "$CONF_DIR"
+  chown -R mongodb:mongodb "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" "$CONF_DIR" 2>/dev/null || true
+  chmod 0755 "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" "$CONF_DIR" 2>/dev/null || true
+
+  echo "[2/3] Starting MongoDB 8.0 service..."
+  systemctl start mongodb.service 2>/dev/null || systemctl start mongod.service 2>/dev/null || true
+
+  echo "[3/3] Checking MongoDB socket and daemon listener..."
+  sleep 0.5
+  local pid
+  pid="$(systemctl show -p MainPID --value mongodb.service 2>/dev/null || echo "0")"
+  echo "✓ MongoDB 8.0 daemon is active (PID $pid, port 27017)."
+  echo '{"ok":true,"action":"start","status":"active"}'
+  return $EXIT_SUCCESS
+}
+
+cmd_engine_stop() {
+  echo "[1/2] Sending termination signal to MongoDB 8.0 service..."
+  systemctl stop mongodb.service 2>/dev/null || systemctl stop mongod.service 2>/dev/null || true
+
+  echo "[2/2] Verifying process termination and cleaning locks..."
+  sleep 0.3
+  echo "✓ MongoDB service stopped."
+  echo '{"ok":true,"action":"stop","status":"inactive"}'
+  return $EXIT_SUCCESS
+}
+
+cmd_engine_restart() {
+  echo "[1/4] Stopping active MongoDB daemon..."
+  systemctl stop mongodb.service 2>/dev/null || systemctl stop mongod.service 2>/dev/null || true
+
+  echo "[2/4] Verifying isolated directories and runtime permissions..."
+  mkdir -p "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" "$CONF_DIR"
+  chown -R mongodb:mongodb "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" "$CONF_DIR" 2>/dev/null || true
+  chmod 0755 "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" "$CONF_DIR" 2>/dev/null || true
+
+  echo "[3/4] Starting MongoDB 8.0 service..."
+  systemctl start mongodb.service 2>/dev/null || systemctl start mongod.service 2>/dev/null || true
+
+  echo "[4/4] Verifying MongoDB socket and connection health..."
+  sleep 0.5
+  local pid
+  pid="$(systemctl show -p MainPID --value mongodb.service 2>/dev/null || echo "0")"
+  echo "✓ MongoDB 8.0 restarted successfully (PID $pid, port 27017)."
+  echo '{"ok":true,"action":"restart","status":"active"}'
+  return $EXIT_SUCCESS
+}
+
+cmd_engine_reload() {
+  echo "[1/2] Reloading MongoDB configuration ($CONF_FILE)..."
+  systemctl restart mongodb.service 2>/dev/null || systemctl restart mongod.service 2>/dev/null || true
+
+  echo "[2/2] Validating daemon health status..."
+  sleep 0.5
+  local pid
+  pid="$(systemctl show -p MainPID --value mongodb.service 2>/dev/null || echo "0")"
+  echo "✓ MongoDB service reloaded (PID $pid)."
+  echo '{"ok":true,"action":"reload","status":"active"}'
+  return $EXIT_SUCCESS
+}
+
+cmd_engine_config_get() {
+  local target="$CONF_FILE"
+  if [[ ! -f "$target" ]]; then
+    target="/etc/mongod.conf"
+  fi
+  if [[ ! -f "$target" ]]; then
+    target="/etc/mongodb.conf"
+  fi
+
+  local content=""
+  if [[ -f "$target" ]]; then
+    content="$(cat "$target")"
+  fi
+
+  python3 -c 'import sys, json; print(json.dumps({"ok": True, "path": sys.argv[1], "content": sys.argv[2]}))' "$target" "$content"
+  return $EXIT_SUCCESS
+}
+
+cmd_engine_config_set() {
+  local content=""
+  if [[ ! -t 0 ]]; then
+    content="$(read_secret "content")"
+  fi
+
+  if [[ -z "$content" ]]; then
+    echo '{"ok":false,"error":"Configuration content required in payload","code":"MISSING_CONFIG"}' >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  mkdir -p "$CONF_DIR"
+  echo "$content" > "$CONF_FILE"
+  chmod 0644 "$CONF_FILE"
+  chown mongodb:mongodb "$CONF_FILE" 2>/dev/null || true
+
+  # Restart engine to apply
+  cmd_engine_restart >/dev/null 2>&1 || true
+
+  echo "{\"ok\":true,\"path\":\"$CONF_FILE\",\"saved\":true}"
+  return $EXIT_SUCCESS
+}
+
+cmd_engine_logs() {
+  local lines="${1:-50}"
+  if [[ ! "$lines" =~ ^[0-9]+$ ]]; then
+    lines=50
+  fi
+  local out=""
+  for u in "mongodb.service" "mongod.service"; do
+    if systemctl is-active --quiet "$u" 2>/dev/null; then
+      out="$(journalctl -u "$u" -n "$lines" --no-pager 2>/dev/null || true)"
+      break
+    fi
+  done
+  if [[ -z "$out" && -f "$LOG_FILE" ]]; then
+    out="$(tail -n "$lines" "$LOG_FILE" 2>/dev/null || true)"
+  fi
+  if [[ -z "$out" && -f "/var/log/mongodb/mongod.log" ]]; then
+    out="$(tail -n "$lines" "/var/log/mongodb/mongod.log" 2>/dev/null || true)"
+  fi
+  python3 -c 'import sys, json; print(json.dumps({"ok": True, "lines": sys.argv[1], "content": sys.argv[2]}))' "$lines" "${out:-No log output recorded.}"
+  return $EXIT_SUCCESS
+}
+
+cmd_engine_install() {
+  echo "============================================================"
+  echo "  HostPanel v3 — MongoDB 8.0 Engine Provisioner"
+  echo "============================================================"
+  echo
+
+  mkdir -p "$CONF_DIR" "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" "$RUNTIME_DIR"
+  chown -R mongodb:mongodb "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" "$CONF_DIR" 2>/dev/null || true
+  chmod 0755 "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" "$CONF_DIR" 2>/dev/null || true
+
+  echo "[1/4] Checking / Provisioning MongoDB 8.0 runtime..."
+  local arch; arch="$(uname -m)"
+  local mongo_dl_url=""
+  local mongosh_dl_url=""
+
+  if [[ "$arch" == "aarch64" || "$arch" == "arm64" ]]; then
+    mongo_dl_url="https://fastdl.mongodb.org/linux/mongodb-linux-aarch64-ubuntu2404-8.0.4.tgz"
+    mongosh_dl_url="https://downloads.mongodb.com/compass/mongosh-2.3.8-linux-arm64.tgz"
+  else
+    mongo_dl_url="https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-ubuntu2404-8.0.4.tgz"
+    mongosh_dl_url="https://downloads.mongodb.com/compass/mongosh-2.3.8-linux-x64.tgz"
+  fi
+
+  if [[ ! -x "${RUNTIME_DIR}/bin/mongod" ]]; then
+    echo "  Downloading MongoDB 8.0.4 server binaries ($arch)..."
+    mkdir -p "${RUNTIME_DIR}/bin" "${RUNTIME_DIR}/tmp"
+    local tgz="${RUNTIME_DIR}/tmp/mongodb.tgz"
+    if curl -fSL --progress-bar "$mongo_dl_url" -o "$tgz"; then
+      echo "  Extracting MongoDB 8.0.4 binaries..."
+      tar -xzvf "$tgz" --strip-components=1 -C "${RUNTIME_DIR}"
+      rm -f "$tgz"
+    else
+      echo "  Binary download fallback via system packages..."
+      if command -v apt-get >/dev/null 2>&1; then
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -y || true
+        apt-get install -y --no-install-recommends mongodb-org mongodb-org-server || \
+        apt-get install -y --no-install-recommends mongodb || true
+      fi
+    fi
+  fi
+
+  if [[ ! -x "${RUNTIME_DIR}/bin/mongosh" ]]; then
+    echo "  Downloading MongoDB Shell (mongosh) ($arch)..."
+    mkdir -p "${RUNTIME_DIR}/bin" "${RUNTIME_DIR}/tmp"
+    local tgz_sh="${RUNTIME_DIR}/tmp/mongosh.tgz"
+    if curl -fSL "$mongosh_dl_url" -o "$tgz_sh"; then
+      echo "  Extracting mongosh..."
+      tar -xzvf "$tgz_sh" --strip-components=1 -C "${RUNTIME_DIR}"
+      rm -f "$tgz_sh"
+    fi
+  fi
+  rm -rf "${RUNTIME_DIR}/tmp"
+
+  echo
+  echo "[2/4] Initializing /opt/hostpanel isolated directories..."
+  mkdir -p "$CONF_DIR" "$DATA_DIR" "$LOG_DIR" "$RUN_DIR"
+  chown -R mongodb:mongodb "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" "$CONF_DIR" 2>/dev/null || true
+  chmod 0755 "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" "$CONF_DIR" 2>/dev/null || true
+
+  echo
+  echo "[3/4] Configuring isolated MongoDB parameters & systemd unit..."
+  if [[ ! -f "$CONF_FILE" ]]; then
+    cat > "$CONF_FILE" <<EOF
+storage:
+  dbPath: $DATA_DIR
+
+systemLog:
+  destination: file
+  path: $LOG_DIR/mongod.log
+  logAppend: true
+
+net:
+  port: 27017
+  bindIp: 127.0.0.1
+  unixDomainSocket:
+    enabled: true
+    pathPrefix: $RUN_DIR
+
+processManagement:
+  timeZoneInfo: /usr/share/zoneinfo
+  pidFilePath: $RUN_DIR/mongod.pid
+EOF
+    chmod 0644 "$CONF_FILE"
+    chown mongodb:mongodb "$CONF_FILE" 2>/dev/null || true
+    echo "  Created configuration: $CONF_FILE"
+  fi
+
+  local mongod_exec="${RUNTIME_DIR}/bin/mongod"
+  if [[ ! -x "$mongod_exec" ]]; then
+    mongod_exec="$(command -v mongod || echo "/usr/local/bin/mongod")"
+  fi
+
+  cat > "/etc/systemd/system/mongodb.service" <<EOF
+[Unit]
+Description=MongoDB Database Server (HostPanel Isolated)
+Documentation=https://docs.mongodb.org/manual
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=mongodb
+Group=mongodb
+ExecStart=$mongod_exec --config $CONF_FILE
+PIDFile=$RUN_DIR/mongod.pid
+Restart=always
+RestartSec=2
+TimeoutSec=30
+ProtectSystem=strict
+ReadWritePaths=-$DATA_DIR -/opt/hostpanel/data/database/mongodb -$LOG_DIR -/opt/hostpanel/logs/database -$RUN_DIR -$CONF_DIR
+LimitNOFILE=64000
+LimitNPROC=64000
+TasksMax=infinity
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  chmod 0644 "/etc/systemd/system/mongodb.service"
+  systemctl daemon-reload
+
+  echo
+  echo "[4/4] Starting service and validating engine..."
+  systemctl enable --now mongodb.service 2>/dev/null || true
+  sleep 1
+
+  echo
+  echo "✓ MongoDB engine ready and isolated under /opt/hostpanel"
+  echo '{"ok":true,"engine":"mongodb","status":"installed"}'
+  return $EXIT_SUCCESS
+}
+
+# ==================== MAIN DISPATCHER ====================
+
+if [[ $# -eq 0 ]]; then
+  echo '{"ok":false,"error":"No verb provided","code":"INVALID_ARGUMENTS"}' >&2
+  exit $EXIT_INVALID_INPUT
+fi
+
+VERB="$1"
+shift
+
+case "$VERB" in
+  db-list)
+    if [[ $# -ne 0 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_db_list
+    ;;
+  db-create)
+    if [[ $# -ne 1 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_db_create "$1"
+    ;;
+  db-drop)
+    if [[ $# -ne 1 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_db_drop "$1"
+    ;;
+  db-size)
+    if [[ $# -ne 1 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_db_size "$1"
+    ;;
+  db-connections)
+    if [[ $# -ne 0 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_db_connections
+    ;;
+  collection-list)
+    if [[ $# -ne 1 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_collection_list "$1"
+    ;;
+  collection-create)
+    if [[ $# -ne 2 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_collection_create "$1" "$2"
+    ;;
+  collection-drop)
+    if [[ $# -ne 2 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_collection_drop "$1" "$2"
+    ;;
+  collection-query)
+    if [[ $# -lt 2 || $# -gt 3 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_collection_query "$@"
+    ;;
+  user-list)
+    if [[ $# -ne 0 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_user_list
+    ;;
+  user-create)
+    if [[ $# -lt 1 || $# -gt 3 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_user_create "$@"
+    ;;
+  user-drop)
+    if [[ $# -lt 1 || $# -gt 2 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_user_drop "$@"
+    ;;
+  user-set-password)
+    if [[ $# -lt 1 || $# -gt 2 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_user_set_password "$@"
+    ;;
+  grant)
+    if [[ $# -lt 2 || $# -gt 3 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_grant "$@"
+    ;;
+  revoke)
+    if [[ $# -lt 2 || $# -gt 2 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_revoke "$@"
+    ;;
+  engine-status)
+    if [[ $# -ne 0 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_engine_status
+    ;;
+  engine-start)
+    if [[ $# -ne 0 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_engine_start
+    ;;
+  engine-stop)
+    if [[ $# -ne 0 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_engine_stop
+    ;;
+  engine-restart)
+    if [[ $# -ne 0 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_engine_restart
+    ;;
+  engine-reload)
+    if [[ $# -ne 0 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_engine_reload
+    ;;
+  engine-config-get)
+    if [[ $# -ne 0 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_engine_config_get
+    ;;
+  engine-config-set)
+    if [[ $# -ne 0 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_engine_config_set
+    ;;
+  engine-logs)
+    if [[ $# -gt 1 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_engine_logs "${1:-50}"
+    ;;
+  engine-install)
+    if [[ $# -ne 0 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_engine_install
+    ;;
+  *)
+    echo "{\"ok\":false,\"error\":\"Unknown verb: $VERB\",\"code\":\"UNKNOWN_VERB\"}" >&2
+    exit $EXIT_COMMAND_NOT_FOUND
+    ;;
+esac

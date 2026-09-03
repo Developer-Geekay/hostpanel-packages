@@ -1,0 +1,2 @@
+# HostPanel File Manager privilege escalation
+hp-filemanager ALL=(root) NOPASSWD: /opt/hostpanel/packages/filemanager/ops/hp-filemanager *

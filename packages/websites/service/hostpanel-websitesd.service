@@ -1,0 +1,18 @@
+[Unit]
+Description=HostPanel Website Manager Package API Daemon
+After=network.target hostpanel-portald.service
+
+[Service]
+Type=simple
+User=hp-websites
+Group=hp-websites
+Environment="PYTHONPATH=/opt/hostpanel/portald:/opt/hostpanel/packages/websites/api"
+Environment="HP_ROOT=/opt/hostpanel"
+Environment="HP_MANIFEST=/opt/hostpanel/packages/websites/manifest.json"
+ExecStart=/opt/hostpanel/venv/bin/uvicorn hostpanel_websitesd.main:create_app --factory --host 127.0.0.1 --port 9103
+Restart=always
+RestartSec=2s
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

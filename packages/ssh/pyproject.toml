@@ -1,0 +1,16 @@
+[project]
+name = "hostpanel-sshd"
+version = "3.0.0"
+requires-python = ">=3.11"
+description = "HostPanel v3 — ssh package API"
+# portald ships the small shared Python surface (portald.sdk); the shared
+# BASH library is hpcore, sourced by ops/ at runtime, not a pip dependency.
+dependencies = ["fastapi", "uvicorn", "hostpanel-portald"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["api"]
+include = ["hostpanel_sshd*"]

@@ -1,0 +1,27 @@
+# SCAFFOLD — installed by provision-package.sh.
+[Unit]
+Description=HostPanel v3 — filemanager package API
+After=network.target
+
+[Service]
+Type=simple
+User=hp-filemanager
+Group=hp-filemanager
+
+# 100% Isolation under /opt/hostpanel
+EnvironmentFile=/opt/hostpanel/etc/filemanager.env
+
+ExecStart=/opt/hostpanel/venv/bin/python -m hostpanel_filemanagerd
+
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=no
+
+ProtectSystem=strict
+ProtectKernelTunables=yes
+MemoryMax=256M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

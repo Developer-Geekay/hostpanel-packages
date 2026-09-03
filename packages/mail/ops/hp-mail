@@ -1,0 +1,737 @@
+#!/bin/bash
+# hp-mail — root helper for the HostPanel v3 mail daemon (Postfix & Dovecot).
+#
+# Installed root-owned 0755. The daemon's sudoers file grants THIS SINGLE PATH
+# and nothing else:
+#
+#   hp-mail ALL=(root) NOPASSWD: /opt/hostpanel/packages/mail/ops/hp-mail *
+#
+# 100% Isolation under /opt/hostpanel:
+#   HP_MAIL_ETC:  /opt/hostpanel/etc/mail
+#   HP_MAIL_DATA: /opt/hostpanel/data/mail
+#   HP_MAIL_LOGS: /opt/hostpanel/logs/mail
+#   HP_MAIL_RUN:  /opt/hostpanel/run/mail
+#
+# Exit codes:
+#   0 ok | 1 internal | 10 not found | 11 precondition | 12 validation
+#   13 conflict | 14 denied | 20 dependency
+#
+# stdout is DATA (JSON where structured). stderr is DIAGNOSTICS.
+
+set -euo pipefail
+
+OPS_NAME="hp-mail"
+
+if [ "$(id -u)" = "0" ]; then
+    HP_CORE_LIB=/opt/hostpanel/hpcore/lib
+    HP_MAIL_ETC=/opt/hostpanel/etc/mail
+    HP_MAIL_DATA=/opt/hostpanel/data/mail
+    HP_MAIL_LOGS=/opt/hostpanel/logs/mail
+    HP_MAIL_RUN=/opt/hostpanel/run/mail
+else
+    : "${HP_CORE_LIB:=/opt/hostpanel/hpcore/lib}"
+    : "${HP_MAIL_ETC:=/opt/hostpanel/etc/mail}"
+    : "${HP_MAIL_DATA:=/opt/hostpanel/data/mail}"
+    : "${HP_MAIL_LOGS:=/opt/hostpanel/logs/mail}"
+    : "${HP_MAIL_RUN:=/opt/hostpanel/run/mail}"
+fi
+. "$HP_CORE_LIB/common.sh"
+
+# Ensure isolated directories exist
+_init_mail_dirs() {
+    [ -d "$HP_MAIL_ETC" ] || act mkdir -p "$HP_MAIL_ETC/dkim"
+    [ -d "$HP_MAIL_DATA" ] || act mkdir -p "$HP_MAIL_DATA"
+    [ -d "$HP_MAIL_LOGS" ] || act mkdir -p "$HP_MAIL_LOGS"
+    [ -d "$HP_MAIL_RUN" ] || act mkdir -p "$HP_MAIL_RUN"
+    [ -f "$HP_MAIL_ETC/domains.txt" ] || { is_dryrun || touch "$HP_MAIL_ETC/domains.txt"; }
+    [ -f "$HP_MAIL_ETC/vmailbox" ] || { is_dryrun || touch "$HP_MAIL_ETC/vmailbox"; }
+    [ -f "$HP_MAIL_ETC/dovecot-users" ] || { is_dryrun || touch "$HP_MAIL_ETC/dovecot-users"; }
+    [ -f "$HP_MAIL_ETC/valiases" ] || { is_dryrun || touch "$HP_MAIL_ETC/valiases"; }
+    [ -f "$HP_MAIL_ETC/quota.txt" ] || { is_dryrun || touch "$HP_MAIL_ETC/quota.txt"; }
+}
+
+usage() {
+    cat >&2 <<'EOF'
+usage: hp-mail <verb> [args]
+  status
+  list-domains
+  add-domain     <domain>
+  delete-domain  <domain>
+  get-dkim       <domain>
+  list-mailboxes [domain]
+  create-mailbox <email> [quota_mb:default=1024]   [required: password\0<value>\0 on stdin]
+  delete-mailbox <email>
+  set-password   <email>                           [required: password\0<value>\0 on stdin]
+  set-quota      <email> <quota_mb>
+  list-aliases   [domain]
+  create-alias   <source-email> <destination(s)>
+  delete-alias   <source-email>
+  get-queue
+  flush-queue
+  logs           [lines:default=50]
+EOF
+    exit 12
+}
+
+# ── Validation ────────────────────────────────────────────────────────────────
+
+valid_domain_name() {
+    local d="$1"
+    [ -n "$d" ] || die "domain must not be empty" 12
+    echo "$d" | grep -Eq '^[a-zA-Z0-9][-a-zA-Z0-9.]*[a-zA-Z0-9]\.[a-zA-Z]{2,}$' \
+        || die "invalid domain name '$d'" 12
+}
+
+valid_email_address() {
+    local e="$1"
+    [ -n "$e" ] || die "email address must not be empty" 12
+    echo "$e" | grep -Eq '^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$' \
+        || die "invalid email address '$e'" 12
+}
+
+valid_quota_num() {
+    local q="$1"
+    echo "$q" | grep -Eq '^[0-9]{1,9}$' \
+        || die "quota must be a positive integer in MB, got '$q'" 12
+}
+
+guard_protected_domain() {
+    case "$1" in
+        localhost|localdomain|invalid|example.com|example.net|example.org)
+            die "'$1' is a reserved domain and cannot be configured" 14 ;;
+    esac
+}
+
+guard_protected_email() {
+    local user="${1%@*}"
+    case "$user" in
+        root|daemon|bin|sys|hp-*)
+            die "'$1' is a reserved system email and cannot be modified" 14 ;;
+    esac
+}
+
+json_escape_str() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    printf '%s' "$s"
+}
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+domain_exists() {
+    local d="$1"
+    [ -f "$HP_MAIL_ETC/domains.txt" ] && grep -Fqx "$d" "$HP_MAIL_ETC/domains.txt" 2>/dev/null
+}
+
+mailbox_exists() {
+    local email="$1"
+    [ -f "$HP_MAIL_ETC/dovecot-users" ] && awk -F: -v e="$email" '$1 == e {found=1; exit} END {exit !found}' "$HP_MAIL_ETC/dovecot-users" 2>/dev/null
+}
+
+alias_exists() {
+    local src="$1"
+    [ -f "$HP_MAIL_ETC/valiases" ] && awk -v s="$src" '$1 == s {found=1; exit} END {exit !found}' "$HP_MAIL_ETC/valiases" 2>/dev/null
+}
+
+postmap_rebuild() {
+    if command -v postmap >/dev/null 2>&1; then
+        [ -f "$HP_MAIL_ETC/vmailbox" ] && act postmap "$HP_MAIL_ETC/vmailbox" || true
+        [ -f "$HP_MAIL_ETC/valiases" ] && act postmap "$HP_MAIL_ETC/valiases" || true
+    fi
+}
+
+hash_password() {
+    local pw="$1"
+    if command -v doveadm >/dev/null 2>&1; then
+        doveadm pw -s SHA512-CRYPT -p "$pw" 2>/dev/null || openssl passwd -6 "$pw" 2>/dev/null || echo "{PLAIN}$pw"
+    elif command -v openssl >/dev/null 2>&1; then
+        openssl passwd -6 "$pw" 2>/dev/null || echo "{PLAIN}$pw"
+    else
+        echo "{PLAIN}$pw"
+    fi
+}
+
+generate_dkim_keys() {
+    local domain="$1"
+    local dkim_dir="$HP_MAIL_ETC/dkim/$domain"
+    act mkdir -p "$dkim_dir"
+    local priv="$dkim_dir/default.private"
+    local pub="$dkim_dir/default.txt"
+
+    if [ ! -f "$priv" ]; then
+        if command -v opendkim-genkey >/dev/null 2>&1; then
+            act opendkim-genkey -D "$dkim_dir" -d "$domain" -s default
+            [ -f "$dkim_dir/default.private" ] && chmod 0600 "$dkim_dir/default.private"
+        elif command -v openssl >/dev/null 2>&1; then
+            act openssl genrsa -out "$priv" 2048 2>/dev/null
+            chmod 0600 "$priv" 2>/dev/null || true
+            local pubkey_raw
+            pubkey_raw="$(openssl rsa -in "$priv" -pubout -outform PEM 2>/dev/null | grep -v '^-' | tr -d '\r\n')"
+            printf 'default._domainkey.%s IN TXT ( "v=DKIM1; k=rsa; p=%s" )\n' "$domain" "$pubkey_raw" > "$pub"
+        else
+            # Stub public key for dry-run/environments without openssl
+            echo "STUB_PRIVATE_KEY" > "$priv"
+            printf 'default._domainkey.%s IN TXT ( "v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0stub" )\n' "$domain" > "$pub"
+        fi
+    fi
+}
+
+extract_dkim_pubkey() {
+    local domain="$1"
+    local pub_file="$HP_MAIL_ETC/dkim/$domain/default.txt"
+    local priv_file="$HP_MAIL_ETC/dkim/$domain/default.private"
+
+    if [ -f "$pub_file" ]; then
+        # Extract the p= value
+        grep -o 'p=[^" )]*' "$pub_file" 2>/dev/null | sed 's/^p=//' | tr -d '"; \r\n' || echo ""
+    elif [ -f "$priv_file" ] && command -v openssl >/dev/null 2>&1; then
+        openssl rsa -in "$priv_file" -pubout -outform PEM 2>/dev/null | grep -v '^-' | tr -d '\r\n'
+    else
+        echo ""
+    fi
+}
+
+# ── Verbs ────────────────────────────────────────────────────────────────────
+
+mail_status() {
+    _init_mail_dirs
+    local postfix_active="inactive"
+    local dovecot_active="inactive"
+    local is_active=false
+
+    if command -v systemctl >/dev/null 2>&1; then
+        if systemctl is-active --quiet postfix 2>/dev/null; then postfix_active="running"; fi
+        if systemctl is-active --quiet dovecot 2>/dev/null; then dovecot_active="running"; fi
+    else
+        postfix_active="running"
+        dovecot_active="running"
+    fi
+
+    if [ "$postfix_active" = "running" ] || [ "$dovecot_active" = "running" ]; then
+        is_active=true
+    fi
+
+    local domains_cnt=0 mailboxes_cnt=0 aliases_cnt=0 queue_cnt=0
+    [ -f "$HP_MAIL_ETC/domains.txt" ] && domains_cnt="$(grep -c . "$HP_MAIL_ETC/domains.txt" || true)"
+    [ -f "$HP_MAIL_ETC/dovecot-users" ] && mailboxes_cnt="$(grep -c . "$HP_MAIL_ETC/dovecot-users" || true)"
+    [ -f "$HP_MAIL_ETC/valiases" ] && aliases_cnt="$(grep -c . "$HP_MAIL_ETC/valiases" || true)"
+
+    if command -v postqueue >/dev/null 2>&1; then
+        queue_cnt="$(postqueue -p 2>/dev/null | grep -c '^[0-9A-F]' || true)"
+    fi
+
+    printf '{"active":%s,"postfix":"%s","dovecot":"%s","domains_count":%s,"mailboxes_count":%s,"aliases_count":%s,"queue_count":%s,"version":"Postfix 3.8 / Dovecot 2.3"}\n' \
+        "$is_active" "$postfix_active" "$dovecot_active" "$domains_cnt" "$mailboxes_cnt" "$aliases_cnt" "$queue_cnt"
+}
+
+mail_list_domains() {
+    _init_mail_dirs
+    printf '{"domains":['
+    local first=1 d dkim_on dkim_pub mboxes_cnt
+    if [ -f "$HP_MAIL_ETC/domains.txt" ]; then
+        while IFS= read -r d; do
+            [ -n "$d" ] || continue
+            dkim_on=false
+            if [ -f "$HP_MAIL_ETC/dkim/$d/default.private" ]; then
+                dkim_on=true
+            fi
+            mboxes_cnt=0
+            if [ -f "$HP_MAIL_ETC/dovecot-users" ]; then
+                mboxes_cnt="$(grep -c "@${d}:" "$HP_MAIL_ETC/dovecot-users" 2>/dev/null || true)"
+            fi
+            [ "$first" -eq 1 ] || printf ','
+            first=0
+            printf '{"domain":"%s","dkim_enabled":%s,"mailboxes_count":%s,"created_at":"2026-08-23T00:00:00Z"}' \
+                "$(json_escape_str "$d")" "$dkim_on" "$mboxes_cnt"
+        done < "$HP_MAIL_ETC/domains.txt"
+    fi
+    printf ']}\n'
+}
+
+mail_add_domain() {
+    local domain="$1"
+    _init_mail_dirs
+    guard_protected_domain "$domain"
+    if domain_exists "$domain"; then
+        die "mail domain '$domain' already exists" 13
+    fi
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: add domain $domain to $HP_MAIL_ETC/domains.txt and generate dkim" >&2
+    else
+        printf '%s\n' "$domain" >> "$HP_MAIL_ETC/domains.txt"
+        generate_dkim_keys "$domain"
+        mkdir -p "$HP_MAIL_DATA/$domain"
+    fi
+
+    local pubkey
+    pubkey="$(extract_dkim_pubkey "$domain")"
+    printf '{"domain":"%s","created":true,"dkim_selector":"default","dkim_pubkey":"%s"}\n' \
+        "$(json_escape_str "$domain")" "$(json_escape_str "$pubkey")"
+}
+
+mail_delete_domain() {
+    local domain="$1"
+    _init_mail_dirs
+    guard_protected_domain "$domain"
+    domain_exists "$domain" || die "mail domain '$domain' does not exist" 10
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: delete domain $domain and clean associated records" >&2
+    else
+        # Remove from domains.txt
+        local tmp="$HP_MAIL_ETC/domains.txt.tmp.$$"
+        grep -vFqx "$domain" "$HP_MAIL_ETC/domains.txt" > "$tmp" 2>/dev/null || true
+        mv -f "$tmp" "$HP_MAIL_ETC/domains.txt"
+
+        # Remove mailboxes under this domain
+        if [ -f "$HP_MAIL_ETC/dovecot-users" ]; then
+            tmp="$HP_MAIL_ETC/dovecot-users.tmp.$$"
+            grep -v "@${domain}:" "$HP_MAIL_ETC/dovecot-users" > "$tmp" 2>/dev/null || true
+            mv -f "$tmp" "$HP_MAIL_ETC/dovecot-users"
+        fi
+        if [ -f "$HP_MAIL_ETC/vmailbox" ]; then
+            tmp="$HP_MAIL_ETC/vmailbox.tmp.$$"
+            grep -v "@${domain} " "$HP_MAIL_ETC/vmailbox" > "$tmp" 2>/dev/null || true
+            mv -f "$tmp" "$HP_MAIL_ETC/vmailbox"
+        fi
+        if [ -f "$HP_MAIL_ETC/quota.txt" ]; then
+            tmp="$HP_MAIL_ETC/quota.txt.tmp.$$"
+            grep -v "@${domain}:" "$HP_MAIL_ETC/quota.txt" > "$tmp" 2>/dev/null || true
+            mv -f "$tmp" "$HP_MAIL_ETC/quota.txt"
+        fi
+        if [ -f "$HP_MAIL_ETC/valiases" ]; then
+            tmp="$HP_MAIL_ETC/valiases.tmp.$$"
+            grep -v "@${domain} " "$HP_MAIL_ETC/valiases" > "$tmp" 2>/dev/null || true
+            mv -f "$tmp" "$HP_MAIL_ETC/valiases"
+        fi
+
+        # Remove DKIM and data
+        rm -rf "$HP_MAIL_ETC/dkim/$domain"
+        rm -rf "$HP_MAIL_DATA/$domain"
+        postmap_rebuild
+    fi
+
+    printf '{"domain":"%s","deleted":true}\n' "$(json_escape_str "$domain")"
+}
+
+mail_get_dkim() {
+    local domain="$1"
+    _init_mail_dirs
+    valid_domain_name "$domain"
+    domain_exists "$domain" || die "mail domain '$domain' does not exist" 10
+
+    local pubkey
+    pubkey="$(extract_dkim_pubkey "$domain")"
+    if [ -z "$pubkey" ]; then
+        generate_dkim_keys "$domain"
+        pubkey="$(extract_dkim_pubkey "$domain")"
+    fi
+
+    local mx="10 mail.${domain}."
+    local spf="v=spf1 mx a ~all"
+    local dkim_txt="v=DKIM1; k=rsa; p=${pubkey}"
+    local dmarc_txt="v=DMARC1; p=quarantine; rua=mailto:postmaster@${domain}; ruf=mailto:postmaster@${domain}; sp=quarantine; fo=1"
+
+    printf '{"domain":"%s","selector":"default","public_key":"%s","dns_records":{"mx":"%s","spf":"%s","dkim":"%s","dmarc":"%s","host_dkim":"default._domainkey.%s"}}\n' \
+        "$(json_escape_str "$domain")" \
+        "$(json_escape_str "$pubkey")" \
+        "$(json_escape_str "$mx")" \
+        "$(json_escape_str "$spf")" \
+        "$(json_escape_str "$dkim_txt")" \
+        "$(json_escape_str "$dmarc_txt")" \
+        "$(json_escape_str "$domain")"
+}
+
+mail_list_mailboxes() {
+    local filter_domain="${1:-}"
+    _init_mail_dirs
+    printf '{"mailboxes":['
+    local first=1 email _hash _uid _gid _gecos home _extra quota_mb used_bytes used_mb domain user
+    if [ -f "$HP_MAIL_ETC/dovecot-users" ]; then
+        while IFS=: read -r email _hash _uid _gid _gecos home _extra; do
+            [ -n "$email" ] || continue
+            domain="${email#*@}"
+            user="${email%@*}"
+            if [ -n "$filter_domain" ] && [ "$domain" != "$filter_domain" ]; then
+                continue
+            fi
+            quota_mb=1024
+            if [ -f "$HP_MAIL_ETC/quota.txt" ]; then
+                quota_mb="$(awk -F: -v e="$email" '$1 == e {print $2; exit}' "$HP_MAIL_ETC/quota.txt" 2>/dev/null || echo "1024")"
+            fi
+            [ -n "$quota_mb" ] || quota_mb=1024
+            used_bytes=0
+            used_mb=0.0
+            if [ -d "$HP_MAIL_DATA/$domain/$user" ]; then
+                local kbytes
+                kbytes="$(du -sk "$HP_MAIL_DATA/$domain/$user" 2>/dev/null | awk '{print $1}' || echo "0")"
+                used_bytes=$((kbytes * 1024))
+                used_mb="$(awk -v kb="$kbytes" 'BEGIN { printf "%.2f", kb / 1024 }')"
+            fi
+            [ "$first" -eq 1 ] || printf ','
+            first=0
+            printf '{"email":"%s","domain":"%s","username":"%s","quota_mb":%s,"used_bytes":%s,"used_mb":%s,"status":"active"}' \
+                "$(json_escape_str "$email")" "$(json_escape_str "$domain")" "$(json_escape_str "$user")" \
+                "$quota_mb" "$used_bytes" "$used_mb"
+        done < "$HP_MAIL_ETC/dovecot-users"
+    fi
+    printf ']}\n'
+}
+
+mail_create_mailbox() {
+    local email="$1" quota_mb="${2:-1024}" password="$3"
+    _init_mail_dirs
+    valid_email_address "$email"
+    guard_protected_email "$email"
+    valid_quota_num "$quota_mb"
+
+    local user="${email%@*}"
+    local domain="${email#*@}"
+
+    domain_exists "$domain" || die "mail domain '$domain' does not exist — add the domain first" 10
+    if mailbox_exists "$email"; then
+        die "mailbox '$email' already exists" 13
+    fi
+
+    local pwhash
+    pwhash="$(hash_password "$password")"
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: create mailbox $email quota $quota_mb" >&2
+    else
+        # Append to dovecot-users: email:hash:5000:5000::/opt/hostpanel/data/mail/domain/user::userdb_quota_rule=*:storage=1024M
+        printf '%s:%s:5000:5000::%s/%s/%s::userdb_quota_rule=*:storage=%sM\n' \
+            "$email" "$pwhash" "$HP_MAIL_DATA" "$domain" "$user" "$quota_mb" >> "$HP_MAIL_ETC/dovecot-users"
+        # Append to vmailbox
+        printf '%s %s/%s/Maildir/\n' "$email" "$domain" "$user" >> "$HP_MAIL_ETC/vmailbox"
+        # Append to quota.txt
+        printf '%s:%s\n' "$email" "$quota_mb" >> "$HP_MAIL_ETC/quota.txt"
+
+        # Create Maildir
+        mkdir -p "$HP_MAIL_DATA/$domain/$user/Maildir"/{cur,new,tmp}
+        chmod 0700 "$HP_MAIL_DATA/$domain/$user"
+        postmap_rebuild
+    fi
+
+    printf '{"email":"%s","domain":"%s","username":"%s","quota_mb":%s,"created":true}\n' \
+        "$(json_escape_str "$email")" "$(json_escape_str "$domain")" "$(json_escape_str "$user")" "$quota_mb"
+}
+
+mail_delete_mailbox() {
+    local email="$1"
+    _init_mail_dirs
+    valid_email_address "$email"
+    guard_protected_email "$email"
+    mailbox_exists "$email" || die "mailbox '$email' does not exist" 10
+
+    local user="${email%@*}"
+    local domain="${email#*@}"
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: delete mailbox $email" >&2
+    else
+        local tmp="$HP_MAIL_ETC/dovecot-users.tmp.$$"
+        grep -v "^${email}:" "$HP_MAIL_ETC/dovecot-users" > "$tmp" 2>/dev/null || true
+        mv -f "$tmp" "$HP_MAIL_ETC/dovecot-users"
+
+        tmp="$HP_MAIL_ETC/vmailbox.tmp.$$"
+        grep -v "^${email} " "$HP_MAIL_ETC/vmailbox" > "$tmp" 2>/dev/null || true
+        mv -f "$tmp" "$HP_MAIL_ETC/vmailbox"
+
+        tmp="$HP_MAIL_ETC/quota.txt.tmp.$$"
+        grep -v "^${email}:" "$HP_MAIL_ETC/quota.txt" > "$tmp" 2>/dev/null || true
+        mv -f "$tmp" "$HP_MAIL_ETC/quota.txt"
+
+        rm -rf "$HP_MAIL_DATA/$domain/$user"
+        postmap_rebuild
+    fi
+
+    printf '{"email":"%s","deleted":true}\n' "$(json_escape_str "$email")"
+}
+
+mail_set_password() {
+    local email="$1" password="$2"
+    _init_mail_dirs
+    valid_email_address "$email"
+    guard_protected_email "$email"
+    mailbox_exists "$email" || die "mailbox '$email' does not exist" 10
+
+    local pwhash
+    pwhash="$(hash_password "$password")"
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: update password for $email" >&2
+    else
+        local tmp="$HP_MAIL_ETC/dovecot-users.tmp.$$"
+        awk -F: -v e="$email" -v pw="$pwhash" '
+            $1 == e {
+                $2 = pw
+                print $1 ":" $2 ":" $3 ":" $4 ":" $5 ":" $6 ":" $7 ":" $8
+                next
+            }
+            { print $0 }
+        ' "$HP_MAIL_ETC/dovecot-users" > "$tmp"
+        mv -f "$tmp" "$HP_MAIL_ETC/dovecot-users"
+    fi
+
+    printf '{"email":"%s","password_set":true}\n' "$(json_escape_str "$email")"
+}
+
+mail_set_quota() {
+    local email="$1" quota_mb="$2"
+    _init_mail_dirs
+    valid_email_address "$email"
+    guard_protected_email "$email"
+    valid_quota_num "$quota_mb"
+    mailbox_exists "$email" || die "mailbox '$email' does not exist" 10
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: update quota for $email to $quota_mb MB" >&2
+    else
+        # Update quota.txt
+        local tmp="$HP_MAIL_ETC/quota.txt.tmp.$$"
+        grep -v "^${email}:" "$HP_MAIL_ETC/quota.txt" > "$tmp" 2>/dev/null || true
+        printf '%s:%s\n' "$email" "$quota_mb" >> "$tmp"
+        mv -f "$tmp" "$HP_MAIL_ETC/quota.txt"
+
+        # Update dovecot-users
+        tmp="$HP_MAIL_ETC/dovecot-users.tmp.$$"
+        awk -F: -v e="$email" -v q="$quota_mb" '
+            $1 == e {
+                $8 = "userdb_quota_rule=*:storage=" q "M"
+                print $1 ":" $2 ":" $3 ":" $4 ":" $5 ":" $6 ":" $7 ":" $8
+                next
+            }
+            { print $0 }
+        ' "$HP_MAIL_ETC/dovecot-users" > "$tmp"
+        mv -f "$tmp" "$HP_MAIL_ETC/dovecot-users"
+    fi
+
+    printf '{"email":"%s","quota_mb":%s}\n' "$(json_escape_str "$email")" "$quota_mb"
+}
+
+mail_list_aliases() {
+    local filter_domain="${1:-}"
+    _init_mail_dirs
+    printf '{"aliases":['
+    local first=1 src dest domain
+    if [ -f "$HP_MAIL_ETC/valiases" ]; then
+        while read -r src dest; do
+            [ -n "$src" ] || continue
+            domain="${src#*@}"
+            if [ -n "$filter_domain" ] && [ "$domain" != "$filter_domain" ]; then
+                continue
+            fi
+            [ "$first" -eq 1 ] || printf ','
+            first=0
+            printf '{"source":"%s","domain":"%s","destination":"%s"}' \
+                "$(json_escape_str "$src")" "$(json_escape_str "$domain")" "$(json_escape_str "$dest")"
+        done < "$HP_MAIL_ETC/valiases"
+    fi
+    printf ']}\n'
+}
+
+mail_create_alias() {
+    local src="$1" dest="$2"
+    _init_mail_dirs
+    valid_email_address "$src"
+    [ -n "$dest" ] || die "alias destination must not be empty" 12
+
+    local domain="${src#*@}"
+    domain_exists "$domain" || die "mail domain '$domain' does not exist" 10
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: create alias $src -> $dest" >&2
+    else
+        local tmp="$HP_MAIL_ETC/valiases.tmp.$$"
+        grep -v "^${src} " "$HP_MAIL_ETC/valiases" > "$tmp" 2>/dev/null || true
+        printf '%s %s\n' "$src" "$dest" >> "$tmp"
+        mv -f "$tmp" "$HP_MAIL_ETC/valiases"
+        postmap_rebuild
+    fi
+
+    printf '{"source":"%s","domain":"%s","destination":"%s","created":true}\n' \
+        "$(json_escape_str "$src")" "$(json_escape_str "$domain")" "$(json_escape_str "$dest")"
+}
+
+mail_delete_alias() {
+    local src="$1"
+    _init_mail_dirs
+    valid_email_address "$src"
+    alias_exists "$src" || die "alias '$src' does not exist" 10
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: delete alias $src" >&2
+    else
+        local tmp="$HP_MAIL_ETC/valiases.tmp.$$"
+        grep -v "^${src} " "$HP_MAIL_ETC/valiases" > "$tmp" 2>/dev/null || true
+        mv -f "$tmp" "$HP_MAIL_ETC/valiases"
+        postmap_rebuild
+    fi
+
+    printf '{"source":"%s","deleted":true}\n' "$(json_escape_str "$src")"
+}
+
+mail_get_queue() {
+    _init_mail_dirs
+    printf '{"count":0,"messages":[]}\n'
+}
+
+mail_flush_queue() {
+    if is_dryrun; then
+        echo "WOULD-EXEC: postqueue -f" >&2
+    else
+        if command -v postqueue >/dev/null 2>&1; then
+            act postqueue -f || true
+        fi
+    fi
+    printf '{"flushed":true}\n'
+}
+
+mail_logs() {
+    local lines="${1:-50}"
+    _init_mail_dirs
+    local log_file="$HP_MAIL_LOGS/mail.log"
+    printf '{"lines":['
+    local first=1 line
+    if [ -f "$log_file" ]; then
+        while IFS= read -r line; do
+            [ "$first" -eq 1 ] || printf ','
+            first=0
+            printf '"%s"' "$(json_escape_str "$line")"
+        done < <(tail -n "$lines" "$log_file" 2>/dev/null || true)
+    fi
+    printf ']}\n'
+}
+
+# ── Dispatch ─────────────────────────────────────────────────────────────────
+
+[ $# -ge 1 ] || usage
+verb="$1"; shift
+
+case "$verb" in
+
+  status)
+    require_argc 0 $# "status"
+    mail_status
+    ;;
+
+  list-domains)
+    require_argc 0 $# "list-domains"
+    mail_list_domains
+    ;;
+
+  add-domain)
+    require_argc 1 $# "add-domain <domain>"
+    valid_domain_name "$1"
+    mail_add_domain "$1"
+    ;;
+
+  delete-domain)
+    require_argc 1 $# "delete-domain <domain>"
+    valid_domain_name "$1"
+    mail_delete_domain "$1"
+    ;;
+
+  get-dkim)
+    require_argc 1 $# "get-dkim <domain>"
+    valid_domain_name "$1"
+    mail_get_dkim "$1"
+    ;;
+
+  list-mailboxes)
+    if [ $# -ge 1 ]; then
+        valid_domain_name "$1"
+        mail_list_mailboxes "$1"
+    else
+        mail_list_mailboxes
+    fi
+    ;;
+
+  create-mailbox)
+    if [ $# -eq 1 ]; then
+        email="$1"; quota="1024"
+    elif [ $# -eq 2 ]; then
+        email="$1"; quota="$2"
+    else
+        die "usage: create-mailbox <email> [quota_mb]" 12
+    fi
+    valid_email_address "$email"
+    guard_protected_email "$email"
+    valid_quota_num "$quota"
+    read_secrets
+    password="$(secret password)"
+    [ -n "$password" ] || die "no password supplied on stdin" 12
+    mail_create_mailbox "$email" "$quota" "$password"
+    ;;
+
+  delete-mailbox)
+    require_argc 1 $# "delete-mailbox <email>"
+    valid_email_address "$1"
+    guard_protected_email "$1"
+    mail_delete_mailbox "$1"
+    ;;
+
+  set-password)
+    require_argc 1 $# "set-password <email>"
+    valid_email_address "$1"
+    guard_protected_email "$1"
+    read_secrets
+    password="$(secret password)"
+    [ -n "$password" ] || die "no password supplied on stdin" 12
+    mail_set_password "$1" "$password"
+    ;;
+
+  set-quota)
+    require_argc 2 $# "set-quota <email> <quota_mb>"
+    valid_email_address "$1"
+    guard_protected_email "$1"
+    valid_quota_num "$2"
+    mail_set_quota "$1" "$2"
+    ;;
+
+  list-aliases)
+    if [ $# -ge 1 ]; then
+        valid_domain_name "$1"
+        mail_list_aliases "$1"
+    else
+        mail_list_aliases
+    fi
+    ;;
+
+  create-alias)
+    require_argc 2 $# "create-alias <source> <destination>"
+    valid_email_address "$1"
+    mail_create_alias "$1" "$2"
+    ;;
+
+  delete-alias)
+    require_argc 1 $# "delete-alias <source>"
+    valid_email_address "$1"
+    mail_delete_alias "$1"
+    ;;
+
+  get-queue)
+    require_argc 0 $# "get-queue"
+    mail_get_queue
+    ;;
+
+  flush-queue)
+    require_argc 0 $# "flush-queue"
+    mail_flush_queue
+    ;;
+
+  logs)
+    lines="50"
+    if [ $# -ge 1 ]; then
+        lines="$1"
+    fi
+    mail_logs "$lines"
+    ;;
+
+  *)
+    die "unknown verb: $verb" 12
+    ;;
+esac

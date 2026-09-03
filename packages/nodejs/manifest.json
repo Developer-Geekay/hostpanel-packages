@@ -1,0 +1,279 @@
+{
+  "manifest_version": 1,
+  "feature": "nodejs",
+  "label": "Node.js",
+  "version": "3.0.0",
+  "requires_core": [
+    3,
+    0,
+    0
+  ],
+  "api": {
+    "module": "hostpanel_nodejsd",
+    "unit": "hostpanel-nodejsd.service",
+    "run_as": "hp-nodejs",
+    "port": 9111
+  },
+  "frontend": {
+    "entry": "frontend/dist/main.js"
+  },
+  "nav": [
+    {
+      "section": "runtime",
+      "section_label": "Web Servers & Runtimes",
+      "section_order": 15,
+      "label": "Node.js",
+      "icon": "terminal",
+      "order": 40
+    }
+  ],
+  "ops": {
+    "script": "/opt/hostpanel/packages/nodejs/ops/hp-nodejs",
+    "sudoers": "hostpanel-nodejsd"
+  },
+  "sandbox": {
+    "read_write_paths": [
+      "/opt/hostpanel/runtimes/node",
+      "/opt/hostpanel/data/apps",
+      "/opt/hostpanel/etc/nodejs",
+      "/opt/hostpanel/logs/nodejs",
+      "/opt/hostpanel/run/nodejs",
+      "/tmp"
+    ],
+    "_comment": "Strict 100% isolation under /opt/hostpanel. Node runtime binaries, application directories, configuration files, logs, and pid/socket runtimes reside entirely under /opt/hostpanel."
+  },
+  "operations": {
+    "nodejs.status": {
+      "verb": "status",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "nodejs.status",
+      "timeout_ms": 10000,
+      "params": {}
+    },
+    "nodejs.list-apps": {
+      "verb": "list-apps",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "nodejs.list_apps",
+      "timeout_ms": 10000,
+      "params": {}
+    },
+    "nodejs.get-app": {
+      "verb": "get-app",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "nodejs.get_app",
+      "timeout_ms": 10000,
+      "params": {
+        "name": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+          "required": true
+        }
+      }
+    },
+    "nodejs.create-app": {
+      "verb": "create-app",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "nodejs.create_app",
+      "timeout_ms": 30000,
+      "params": {
+        "name": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+          "required": true
+        },
+        "directory": {
+          "pattern": "^/[^\\u0000]*$",
+          "required": true
+        },
+        "node_version": {
+          "pattern": "^[0-9]+(\\.[0-9]+(\\.[0-9]+)?)?$",
+          "required": false,
+          "default": "20"
+        },
+        "script": {
+          "pattern": "^[^\\u0000]+$",
+          "required": false,
+          "default": "index.js"
+        },
+        "port": {
+          "pattern": "^[0-9]{1,5}$",
+          "required": false,
+          "default": "0"
+        }
+      }
+    },
+    "nodejs.start-app": {
+      "verb": "start-app",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "nodejs.start_app",
+      "timeout_ms": 20000,
+      "params": {
+        "name": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+          "required": true
+        }
+      }
+    },
+    "nodejs.stop-app": {
+      "verb": "stop-app",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "nodejs.stop_app",
+      "timeout_ms": 20000,
+      "params": {
+        "name": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+          "required": true
+        }
+      }
+    },
+    "nodejs.restart-app": {
+      "verb": "restart-app",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "nodejs.restart_app",
+      "timeout_ms": 20000,
+      "params": {
+        "name": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+          "required": true
+        }
+      }
+    },
+    "nodejs.delete-app": {
+      "verb": "delete-app",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "nodejs.delete_app",
+      "timeout_ms": 20000,
+      "params": {
+        "name": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+          "required": true
+        }
+      }
+    },
+    "nodejs.set-env": {
+      "verb": "set-env",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "nodejs.set_env",
+      "timeout_ms": 15000,
+      "params": {
+        "name": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+          "required": true
+        },
+        "env": {
+          "secret": true,
+          "required": true
+        }
+      }
+    },
+    "nodejs.get-env": {
+      "verb": "get-env",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "nodejs.get_env",
+      "timeout_ms": 10000,
+      "params": {
+        "name": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+          "required": true
+        }
+      }
+    },
+    "nodejs.get-logs": {
+      "verb": "get-logs",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "nodejs.get_logs",
+      "timeout_ms": 10000,
+      "params": {
+        "name": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+          "required": true
+        },
+        "lines": {
+          "pattern": "^[0-9]{1,4}$",
+          "required": false,
+          "default": "100"
+        },
+        "type": {
+          "enum": [
+            "all",
+            "out",
+            "err"
+          ],
+          "required": false,
+          "default": "all"
+        }
+      }
+    },
+    "nodejs.list-runtimes": {
+      "verb": "list-runtimes",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "nodejs.list_runtimes",
+      "timeout_ms": 10000,
+      "params": {}
+    },
+    "nodejs.install-runtime": {
+      "verb": "install-runtime",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "nodejs.install_runtime",
+      "timeout_ms": 180000,
+      "params": {
+        "version": {
+          "pattern": "^[0-9]+(\\.[0-9]+(\\.[0-9]+)?)?$",
+          "required": true
+        }
+      }
+    },
+    "nodejs.remove-runtime": {
+      "verb": "remove-runtime",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "nodejs.remove_runtime",
+      "timeout_ms": 30000,
+      "params": {
+        "version": {
+          "pattern": "^[0-9]+(\\.[0-9]+(\\.[0-9]+)?)?$",
+          "required": true
+        }
+      }
+    },
+    "nodejs.deploy-app": {
+      "verb": "deploy-app",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "nodejs.deploy_app",
+      "timeout_ms": 300000,
+      "params": {
+        "name": {
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+          "required": true
+        },
+        "command": {
+          "enum": [
+            "npm-install",
+            "npm-build",
+            "npm-install-and-build",
+            "custom"
+          ],
+          "required": false,
+          "default": "npm-install"
+        },
+        "custom_cmd": {
+          "pattern": "^[^\\u0000]*$",
+          "required": false,
+          "default": ""
+        }
+      }
+    }
+  }
+}

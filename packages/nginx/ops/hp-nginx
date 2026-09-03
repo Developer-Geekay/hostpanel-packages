@@ -1,0 +1,731 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# 100% Isolation paths under /opt/hostpanel
+CONF_DIR="/opt/hostpanel/etc/nginx"
+VHOSTS_DIR="${CONF_DIR}/vhosts"
+CONF_D_DIR="${CONF_DIR}/conf.d"
+SSL_DIR="${CONF_DIR}/ssl"
+LOG_DIR="/opt/hostpanel/logs/nginx"
+RUN_DIR="/opt/hostpanel/run/nginx"
+CONF_FILE="${CONF_DIR}/nginx.conf"
+PID_FILE="${RUN_DIR}/nginx.pid"
+
+RUNTIME_DIR="/opt/hostpanel/runtimes/nginx"
+NGINX_BIN="${RUNTIME_DIR}/bin/nginx"
+[ ! -x "$NGINX_BIN" ] && NGINX_BIN="/opt/hostpanel/packages/nginx/bin/nginx"
+[ ! -x "$NGINX_BIN" ] && NGINX_BIN="$(which nginx 2>/dev/null || true)"
+[ -z "$NGINX_BIN" ] && [ -x "/usr/sbin/nginx" ] && NGINX_BIN="/usr/sbin/nginx"
+
+EXIT_SUCCESS=0
+EXIT_INVALID_INPUT=12
+EXIT_INTERNAL_ERROR=20
+EXIT_EXECUTION_FAILED=1
+
+die() {
+  local msg="$1"
+  local code="${2:-$EXIT_INTERNAL_ERROR}"
+  echo "{\"ok\":false,\"error\":\"$msg\",\"code\":\"ERROR\"}" >&2
+  exit "$code"
+}
+
+read_secret() {
+  local target_key="$1"
+  python3 -c '
+import sys, json
+target = sys.argv[1]
+try:
+    raw = sys.stdin.buffer.read()
+    if not raw: sys.exit(0)
+    parts = raw.split(b"\0")
+    if len(parts) > 1:
+        for i in range(0, len(parts) - 1, 2):
+            if parts[i].decode("utf-8", errors="replace") == target:
+                sys.stdout.write(parts[i+1].decode("utf-8", errors="replace"))
+                sys.exit(0)
+    data = json.loads(raw.decode("utf-8", errors="replace"))
+    if isinstance(data, dict) and target in data:
+        sys.stdout.write(str(data[target]))
+        sys.exit(0)
+except Exception: pass
+' "$target_key"
+}
+
+cmd_engine_status() {
+  local is_running=false
+  local pid=0
+  local uptime="0s"
+  local version="Nginx"
+  local active_conns=0
+  local workers=0
+  local instances=0
+  local port_str="80"
+  local active_sites=0
+  local total_sites=0
+
+  if [ -n "$NGINX_BIN" ] && [ -x "$NGINX_BIN" ]; then
+    version="$("$NGINX_BIN" -v 2>&1 | sed -n 's/nginx version: //p' || echo "Nginx")"
+  fi
+
+  if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; then
+    is_running=true
+    pid="$(cat "$PID_FILE")"
+    if [ -d "/proc/$pid" ]; then
+      local ticks
+      ticks=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || echo 0)
+      local uptime_sec
+      uptime_sec=$(awk '{print int($1)}' /proc/uptime 2>/dev/null || echo 0)
+      local elapsed=$(( uptime_sec - (ticks / 100) ))
+      [ "$elapsed" -lt 0 ] && elapsed=0
+      uptime="${elapsed}s"
+    fi
+  elif systemctl is-active --quiet nginx 2>/dev/null; then
+    is_running=true
+    pid="$(pgrep -f "nginx: master" 2>/dev/null | head -1 || echo 0)"
+  fi
+
+  if [ "$is_running" = true ]; then
+    local detected_ports
+    detected_ports="$(ss -tlnp 2>/dev/null | grep -E "nginx" | awk '{print $4}' | sed -E 's/.*:([0-9]+)$/\1/' | sort -un | tr '\n' ',' | sed 's/,$//' || true)"
+    if [ -n "$detected_ports" ]; then
+      port_str="$detected_ports"
+    fi
+    workers="$(pgrep -f "nginx: worker" 2>/dev/null | wc -l | tr -d ' ')"
+    workers="${workers:-0}"
+    if [ "$workers" -gt 0 ]; then
+      instances=$(( workers + 1 ))
+    else
+      instances=1
+    fi
+  fi
+
+  if [ -d "$VHOSTS_DIR" ]; then
+    total_sites="$(find "$VHOSTS_DIR" -maxdepth 1 -name "*.conf" 2>/dev/null | wc -l | tr -d ' ')"
+    active_sites="$(find "$VHOSTS_DIR" -maxdepth 1 -name "*.conf" ! -name ".*" 2>/dev/null | wc -l | tr -d ' ')"
+  fi
+  total_sites="${total_sites:-0}"
+  active_sites="${active_sites:-0}"
+  if [ -f "$CONF_D_DIR/default.conf" ]; then
+    total_sites=$(( total_sites + 1 ))
+    active_sites=$(( active_sites + 1 ))
+  fi
+
+  printf '{"ok":true,"engine":"nginx","service":"nginx","status":"%s","active":%s,"pid":%d,"uptime":"%s","version":"%s","port":"%s","ports":"%s","workers":%d,"instances":%d,"active_sites":%d,"total_sites":%d,"active_connections":%d}\n' \
+    "$([ "$is_running" = true ] && echo "running" || echo "stopped")" \
+    "$is_running" \
+    "$pid" \
+    "$uptime" \
+    "$version" \
+    "$port_str" \
+    "$port_str" \
+    "$workers" \
+    "$instances" \
+    "$active_sites" \
+    "$total_sites" \
+    "$active_conns"
+}
+
+cmd_engine_start() {
+  mkdir -p "$LOG_DIR" "$RUN_DIR"
+  if systemctl is-active --quiet apache2 2>/dev/null || pgrep -f "apache2|httpd" >/dev/null 2>&1; then
+    echo '{"ok":false,"error":"Cannot start Nginx: Apache is currently running on port 80/443. Stop Apache first.","code":"PORT_CONFLICT"}' >&2
+    return $EXIT_EXECUTION_FAILED
+  fi
+  if [ -n "$NGINX_BIN" ] && [ -f "$CONF_FILE" ]; then
+    local syn_err
+    if ! syn_err="$("$NGINX_BIN" -p "$CONF_DIR" -c "$CONF_FILE" -t 2>&1)"; then
+      printf '{"ok":false,"error":%s,"code":"SYNTAX_ERROR"}\n' "$(python3 -c "import json, sys; print(json.dumps(sys.argv[1]))" "$syn_err")" >&2
+      return $EXIT_EXECUTION_FAILED
+    fi
+  fi
+  # Ensure systemd unit override has matching PIDFile
+  if [ -d /etc/systemd/system ]; then
+    mkdir -p /etc/systemd/system/nginx.service.d
+    if [ ! -f /etc/systemd/system/nginx.service.d/hostpanel.conf ] || ! grep -q "PIDFile=$PID_FILE" /etc/systemd/system/nginx.service.d/hostpanel.conf 2>/dev/null; then
+      cat <<EOF > /etc/systemd/system/nginx.service.d/hostpanel.conf
+[Service]
+PIDFile=$PID_FILE
+ExecStart=
+ExecStart=$NGINX_BIN -p $CONF_DIR -c $CONF_FILE -g "daemon on;"
+ExecReload=
+ExecReload=$NGINX_BIN -p $CONF_DIR -c $CONF_FILE -s reload
+ExecStop=
+ExecStop=$NGINX_BIN -p $CONF_DIR -c $CONF_FILE -s stop
+EOF
+      systemctl daemon-reload 2>/dev/null || true
+    fi
+  fi
+  if [ -f "/etc/systemd/system/nginx.service" ] || [ -f "/lib/systemd/system/nginx.service" ] || [ -f "/usr/lib/systemd/system/nginx.service" ]; then
+    if ! systemctl start nginx 2>/dev/null; then
+      local err
+      err="$(journalctl -u nginx -n 10 --no-pager 2>/dev/null || echo "systemctl start nginx failed")"
+      printf '{"ok":false,"error":%s,"code":"START_FAILED"}\n' "$(python3 -c "import json, sys; print(json.dumps(sys.argv[1]))" "$err")" >&2
+      return $EXIT_EXECUTION_FAILED
+    fi
+  elif [ -n "$NGINX_BIN" ]; then
+    if ! "$NGINX_BIN" -p "$CONF_DIR" -c "$CONF_FILE" 2>/dev/null; then
+      echo '{"ok":false,"error":"Failed to execute Nginx binary","code":"START_FAILED"}' >&2
+      return $EXIT_EXECUTION_FAILED
+    fi
+  fi
+  sleep 0.2
+  if ! systemctl is-active --quiet nginx 2>/dev/null && ! pgrep -f "nginx:" >/dev/null 2>&1; then
+    echo '{"ok":false,"error":"Nginx process failed to stay active after launch","code":"START_FAILED"}' >&2
+    return $EXIT_EXECUTION_FAILED
+  fi
+  printf '{"ok":true,"action":"start","status":"running"}\n'
+}
+
+cmd_engine_stop() {
+  if [ -f "/etc/systemd/system/nginx.service" ] || [ -f "/lib/systemd/system/nginx.service" ]; then
+    systemctl stop nginx 2>/dev/null || true
+  elif [ -f "$PID_FILE" ]; then
+    kill "$(cat "$PID_FILE")" 2>/dev/null || true
+  fi
+  pkill -f "nginx:" 2>/dev/null || true
+  printf '{"ok":true,"action":"stop","status":"stopped"}\n'
+}
+
+cmd_engine_restart() {
+  cmd_engine_stop >/dev/null 2>&1 || true
+  sleep 0.5
+  cmd_engine_start
+}
+
+cmd_engine_reload() {
+  if [ -n "$NGINX_BIN" ] && [ -f "$CONF_FILE" ]; then
+    "$NGINX_BIN" -p "$CONF_DIR" -c "$CONF_FILE" -s reload 2>/dev/null || systemctl reload nginx 2>/dev/null || true
+  else
+    systemctl reload nginx 2>/dev/null || true
+  fi
+  printf '{"ok":true,"action":"reload","reloaded":true}\n'
+}
+
+cmd_engine_test() {
+  if [ -z "$NGINX_BIN" ]; then
+    echo '{"ok":false,"error":"Nginx binary not installed","code":"NOT_INSTALLED"}' >&2
+    return $EXIT_INTERNAL_ERROR
+  fi
+  local content=""
+  if [[ ! -t 0 ]]; then content="$(read_secret "content")"; fi
+
+  local out
+  if [ -n "$content" ]; then
+    local tmp_file
+    tmp_file="$(mktemp /tmp/nginx_test_XXXXXX.conf)"
+    printf '%s' "$content" > "$tmp_file"
+    if out="$("$NGINX_BIN" -p "$CONF_DIR" -c "$tmp_file" -t 2>&1)"; then
+      rm -f "$tmp_file"
+      printf '{"ok":true,"valid":true,"output":%s}\n' "$(python3 -c "import json, sys; print(json.dumps(sys.argv[1]))" "$out")"
+    else
+      rm -f "$tmp_file"
+      printf '{"ok":false,"valid":false,"error":%s,"code":"SYNTAX_ERROR"}\n' "$(python3 -c "import json, sys; print(json.dumps(sys.argv[1]))" "$out")" >&2
+      return $EXIT_EXECUTION_FAILED
+    fi
+  else
+    if out="$("$NGINX_BIN" -p "$CONF_DIR" -c "$CONF_FILE" -t 2>&1)"; then
+      printf '{"ok":true,"valid":true,"output":%s}\n' "$(python3 -c "import json, sys; print(json.dumps(sys.argv[1]))" "$out")"
+    else
+      printf '{"ok":false,"valid":false,"error":%s,"code":"SYNTAX_ERROR"}\n' "$(python3 -c "import json, sys; print(json.dumps(sys.argv[1]))" "$out")" >&2
+      return $EXIT_EXECUTION_FAILED
+    fi
+  fi
+}
+
+cmd_engine_config_get() {
+  if [ ! -f "$CONF_FILE" ]; then
+    echo "{\"ok\":false,\"error\":\"Configuration not found at $CONF_FILE\",\"code\":\"NOT_FOUND\"}" >&2
+    return $EXIT_INVALID_INPUT
+  fi
+  python3 -c '
+import json, sys
+with open(sys.argv[1], "r", encoding="utf-8", errors="replace") as f:
+    content = f.read()
+print(json.dumps({"ok": True, "path": sys.argv[1], "content": content}))
+' "$CONF_FILE"
+}
+
+cmd_engine_config_set() {
+  local content=""
+  if [[ ! -t 0 ]]; then content="$(read_secret "content")"; fi
+  [ -z "$content" ] && die "content payload required" "$EXIT_INVALID_INPUT"
+
+  local tmp_file
+  tmp_file="$(mktemp /tmp/nginx_test_XXXXXX.conf)"
+  printf '%s' "$content" > "$tmp_file"
+
+  if [ -n "$NGINX_BIN" ]; then
+    if ! "$NGINX_BIN" -p "$CONF_DIR" -t -c "$tmp_file" >/dev/null 2>&1; then
+      local err
+      err="$("$NGINX_BIN" -p "$CONF_DIR" -t -c "$tmp_file" 2>&1 || true)"
+      rm -f "$tmp_file"
+      printf '{"ok":false,"error":%s,"code":"INVALID_SYNTAX"}\n' "$(python3 -c "import json, sys; print(json.dumps(sys.argv[1]))" "$err")" >&2
+      return $EXIT_INVALID_INPUT
+    fi
+  fi
+
+  mkdir -p "$CONF_DIR"
+  if [ -f "$CONF_FILE" ]; then
+    cp "$CONF_FILE" "${CONF_FILE}.bak" 2>/dev/null || true
+  fi
+  cp "$tmp_file" "$CONF_FILE"
+  rm -f "$tmp_file"
+  cmd_engine_reload >/dev/null 2>&1 || true
+  printf '{"ok":true,"updated":true,"path":"%s"}\n' "$CONF_FILE"
+}
+
+cmd_engine_logs() {
+  local lines="${1:-50}"
+  local log_type="${2:-error}"
+  local domain="${3:-}"
+  local target_log="${LOG_DIR}/${log_type}.log"
+  if [ -n "$domain" ] && [ "$domain" != "global" ]; then
+    if [ -f "${LOG_DIR}/${domain}_${log_type}.log" ]; then
+      target_log="${LOG_DIR}/${domain}_${log_type}.log"
+    elif [ -f "${LOG_DIR}/${domain}.${log_type}.log" ]; then
+      target_log="${LOG_DIR}/${domain}.${log_type}.log"
+    fi
+  fi
+
+  if [ ! -f "$target_log" ]; then
+    printf '{"ok":true,"log_type":"%s","domain":"%s","lines":[],"total":0,"path":"%s"}\n' "$log_type" "$domain" "$target_log"
+    return 0
+  fi
+  python3 -c '
+import json, sys
+lines_cnt = int(sys.argv[1])
+log_path = sys.argv[2]
+try:
+    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+        all_l = f.readlines()
+        res = [l.rstrip("\r\n") for l in all_l[-lines_cnt:]]
+        print(json.dumps({"ok": True, "lines": res, "total": len(all_l), "path": log_path}))
+except Exception as e:
+    print(json.dumps({"ok": False, "error": str(e)}))
+' "$lines" "$target_log"
+}
+
+cmd_vhost_list() {
+  mkdir -p "$VHOSTS_DIR" 2>/dev/null || true
+  python3 -c '
+import os, json, sys, re
+vdir = sys.argv[1]
+vhosts = []
+if os.path.isdir(vdir):
+    for f in sorted(os.listdir(vdir)):
+        if f.endswith(".conf"):
+            path = os.path.join(vdir, f)
+            enabled = not f.startswith(".disabled_")
+            domain = f.replace(".disabled_", "").replace(".conf", "")
+            port = 80
+            ssl = False
+            root_dir = "/var/www/html"
+            try:
+                with open(path, "r", errors="ignore") as fp:
+                    content = fp.read()
+                    m_port = re.search(r"listen\s+([0-9]+)", content)
+                    if m_port: port = int(m_port.group(1))
+                    if "ssl" in content or "443" in content: ssl = True
+                    m_root = re.search(r"root\s+([^;]+);", content)
+                    if m_root: root_dir = m_root.group(1).strip()
+            except Exception: pass
+            vhosts.append({
+                "domain": domain,
+                "file": f,
+                "enabled": enabled,
+                "port": port,
+                "ssl": ssl,
+                "root": root_dir
+            })
+print(json.dumps({"ok": True, "vhosts": vhosts}))
+' "$VHOSTS_DIR"
+}
+
+cmd_vhost_get() {
+  local domain="${1:-}"
+  [ -n "$domain" ] && [[ "$domain" =~ ^[a-zA-Z0-9.-]+$ ]] || die "invalid domain" "$EXIT_INVALID_INPUT"
+  local target="${VHOSTS_DIR}/${domain}.conf"
+  [ -f "$target" ] || target="${VHOSTS_DIR}/.disabled_${domain}.conf"
+  [ -f "$target" ] || die "vhost '$domain' not found" "$EXIT_INVALID_INPUT"
+
+  python3 -c '
+import json, sys
+with open(sys.argv[1], "r", encoding="utf-8", errors="replace") as f:
+    print(json.dumps({"ok": True, "domain": sys.argv[2], "content": f.read(), "file": sys.argv[1]}))
+' "$target" "$domain"
+}
+
+cmd_vhost_set() {
+  local domain="${1:-}"
+  [ -n "$domain" ] && [[ "$domain" =~ ^[a-zA-Z0-9.-]+$ ]] || die "invalid domain" "$EXIT_INVALID_INPUT"
+  local content=""
+  if [[ ! -t 0 ]]; then content="$(read_secret "content")"; fi
+  [ -z "$content" ] && die "content payload required" "$EXIT_INVALID_INPUT"
+
+  mkdir -p "$VHOSTS_DIR"
+  local target="${VHOSTS_DIR}/${domain}.conf"
+  local backup=""
+  if [ -f "$target" ]; then
+    backup="$(cat "$target")"
+  fi
+
+  printf '%s' "$content" > "$target"
+
+  # Auto-create document root declared in root directive if under /opt/hostpanel/data/vhosts/
+  local doc_root
+  doc_root="$(python3 -c '
+import sys, re
+try:
+    with open(sys.argv[1], "r", errors="ignore") as f:
+        m = re.search(r"\broot\s+([^;\s]+)", f.read())
+        if m: print(m.group(1).strip())
+except Exception: pass
+' "$target")"
+  if [ -n "$doc_root" ] && [[ "$doc_root" == /opt/hostpanel/data/vhosts/* ]]; then
+    mkdir -p "$doc_root"
+    chmod 755 "$doc_root" 2>/dev/null || true
+    if [ ! -f "$doc_root/index.html" ] && [ ! -f "$doc_root/index.php" ]; then
+      cat << 'HTML' > "$doc_root/index.html"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Welcome to HostPanel</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+    .card { background: #1e293b; padding: 2.5rem; border-radius: 1rem; border: 1px solid #334155; max-width: 480px; text-align: center; box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5); }
+    h1 { font-size: 1.75rem; margin-top: 0; color: #38bdf8; }
+    p { color: #94a3b8; line-height: 1.6; }
+    .badge { display: inline-block; background: #0369a1; color: #e0f2fe; padding: 0.25rem 0.75rem; border-radius: 9999px; font-size: 0.875rem; font-weight: 600; margin-bottom: 1rem; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="badge">HostPanel v3</div>
+    <h1>Website Ready!</h1>
+    <p>Your virtual host is successfully configured on Nginx. Upload your website files to this document root to get started.</p>
+  </div>
+</body>
+</html>
+HTML
+      chmod 644 "$doc_root/index.html" 2>/dev/null || true
+    fi
+  fi
+
+  if [ -n "$NGINX_BIN" ]; then
+    if ! "$NGINX_BIN" -p "$CONF_DIR" -c "$CONF_FILE" -t >/dev/null 2>&1; then
+      local err
+      err="$("$NGINX_BIN" -p "$CONF_DIR" -c "$CONF_FILE" -t 2>&1 || true)"
+      if [ -n "$backup" ]; then
+        printf '%s' "$backup" > "$target"
+      else
+        rm -f "$target"
+      fi
+      printf '{"ok":false,"error":%s,"code":"INVALID_SYNTAX"}\n' "$(python3 -c "import json, sys; print(json.dumps(sys.argv[1]))" "$err")" >&2
+      return $EXIT_INVALID_INPUT
+    fi
+  fi
+  cmd_engine_reload >/dev/null 2>&1 || true
+  printf '{"ok":true,"domain":"%s","saved":true}\n' "$domain"
+}
+
+cmd_vhost_delete() {
+  local domain="${1:-}"
+  [ -n "$domain" ] && [[ "$domain" =~ ^[a-zA-Z0-9.-]+$ ]] || die "invalid domain" "$EXIT_INVALID_INPUT"
+  rm -f "${VHOSTS_DIR}/${domain}.conf" "${VHOSTS_DIR}/.disabled_${domain}.conf"
+  cmd_engine_reload >/dev/null 2>&1 || true
+  printf '{"ok":true,"domain":"%s","deleted":true}\n' "$domain"
+}
+
+cmd_vhost_enable() {
+  local domain="${1:-}"
+  [ -n "$domain" ] && [[ "$domain" =~ ^[a-zA-Z0-9.-]+$ ]] || die "invalid domain" "$EXIT_INVALID_INPUT"
+  local dis="${VHOSTS_DIR}/.disabled_${domain}.conf"
+  local en="${VHOSTS_DIR}/${domain}.conf"
+  [ -f "$dis" ] && mv "$dis" "$en"
+  cmd_engine_reload >/dev/null 2>&1 || true
+  printf '{"ok":true,"domain":"%s","enabled":true}\n' "$domain"
+}
+
+cmd_vhost_disable() {
+  local domain="${1:-}"
+  [ -n "$domain" ] && [[ "$domain" =~ ^[a-zA-Z0-9.-]+$ ]] || die "invalid domain" "$EXIT_INVALID_INPUT"
+  local dis="${VHOSTS_DIR}/.disabled_${domain}.conf"
+  local en="${VHOSTS_DIR}/${domain}.conf"
+  [ -f "$en" ] && mv "$en" "$dis"
+  cmd_engine_reload >/dev/null 2>&1 || true
+  printf '{"ok":true,"domain":"%s","enabled":false}\n' "$domain"
+}
+
+cmd_module_list() {
+  local bin="${NGINX_BIN:-nginx}"
+  python3 -c '
+import subprocess, json, sys
+modules = []
+seen = set()
+bin_path = sys.argv[1]
+try:
+    out = subprocess.check_output([bin_path, "-V"], stderr=subprocess.STDOUT).decode("utf-8", errors="ignore")
+    for part in out.split():
+        if part.startswith("--with-"):
+            raw = part[7:]
+            if any(raw.startswith(p) for p in ["cc-opt", "ld-opt", "pcre", "zlib", "openssl"]): continue
+            is_dynamic = "=dynamic" in raw
+            name = raw.split("=")[0]
+            if not name.endswith("_module") and (name.startswith("http_") or name.startswith("mail_") or name.startswith("stream_")):
+                name += "_module"
+            if name not in seen:
+                seen.add(name)
+                modules.append({"name": name, "builtin": not is_dynamic})
+        elif part.startswith("--add-module=") or part.startswith("--add-dynamic-module="):
+            name = part.split("=")[-1].split("/")[-1]
+            if name not in seen:
+                seen.add(name)
+                modules.append({"name": name, "builtin": not part.startswith("--add-dynamic-")})
+except Exception: pass
+print(json.dumps({"ok": True, "modules": modules}))
+' "$bin"
+}
+
+cmd_engine_install() {
+  echo "============================================================"
+  echo "  HostPanel v3 — Nginx Web Server Engine Provisioner"
+  echo "============================================================"
+  echo ""
+  echo "[1/4] Checking / Provisioning standalone Nginx runtime..."
+  local arch
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64|amd64) arch="x86_64" ;;
+    aarch64|arm64) arch="aarch64" ;;
+    *) arch="x86_64" ;;
+  esac
+
+  mkdir -p "${RUNTIME_DIR}/bin"
+
+  if [ ! -x "$NGINX_BIN" ] || [ "$NGINX_BIN" = "/usr/sbin/nginx" ]; then
+    echo "  Fetching pre-vetted standalone Nginx binary ($arch) from hostpanel-binaries..."
+    local dl_url="https://raw.githubusercontent.com/Developer-Geekay/hostpanel-binaries/main/webserver/Nginx/${arch}/nginx"
+    if ! curl -fsSL --connect-timeout 20 --retry 3 --retry-delay 2 "$dl_url" -o "${RUNTIME_DIR}/bin/nginx"; then
+      die "failed to download standalone nginx binary from $dl_url" "$EXIT_INTERNAL_ERROR"
+    fi
+    chmod 0755 "${RUNTIME_DIR}/bin/nginx"
+    NGINX_BIN="${RUNTIME_DIR}/bin/nginx"
+  fi
+
+  [ -x "$NGINX_BIN" ] || die "failed to install standalone nginx executable" "$EXIT_INTERNAL_ERROR"
+  echo "  ✓ Nginx executable ready: $NGINX_BIN"
+
+  echo "[2/4] Initializing /opt/hostpanel isolated directories..."
+  mkdir -p "$CONF_DIR" "$VHOSTS_DIR" "$CONF_D_DIR" "$SSL_DIR" "$LOG_DIR" "$RUN_DIR" "/opt/hostpanel/data/vhosts"
+  mkdir -p "${RUN_DIR}/body" "${RUN_DIR}/proxy" "${RUN_DIR}/fastcgi" "${RUN_DIR}/uwsgi" "${RUN_DIR}/scgi"
+  touch "${LOG_DIR}/access.log" "${LOG_DIR}/error.log"
+
+  local pkg_cfg_dir="/opt/hostpanel/packages/nginx/config"
+  [ ! -d "$pkg_cfg_dir" ] && [ -d "/srv/hostpanel-v3/packages/nginx/config" ] && pkg_cfg_dir="/srv/hostpanel-v3/packages/nginx/config"
+
+  # Copy standard mime.types and fastcgi_params if present
+  if [ -f "/etc/nginx/mime.types" ] && [ ! -f "${CONF_DIR}/mime.types" ]; then
+    cp "/etc/nginx/mime.types" "${CONF_DIR}/mime.types" 2>/dev/null || true
+  fi
+  if [ ! -f "${CONF_DIR}/fastcgi_params" ]; then
+    if [ -d "$pkg_cfg_dir" ] && [ -f "$pkg_cfg_dir/fastcgi_params" ]; then
+      cp -f "$pkg_cfg_dir/fastcgi_params" "${CONF_DIR}/fastcgi_params" 2>/dev/null || true
+    elif [ -f "/etc/nginx/fastcgi_params" ]; then
+      cp "/etc/nginx/fastcgi_params" "${CONF_DIR}/fastcgi_params" 2>/dev/null || true
+    fi
+  fi
+
+  echo "[3/4] Configuring isolated Nginx parameters & systemd integration..."
+  if [ ! -f "$CONF_FILE" ]; then
+    if [ -d "$pkg_cfg_dir" ] && [ -f "$pkg_cfg_dir/nginx.conf" ]; then
+      cp -f "$pkg_cfg_dir/nginx.conf" "$CONF_FILE"
+    else
+      cat <<'EOF' > "$CONF_FILE"
+user www-data;
+worker_processes auto;
+pid /opt/hostpanel/run/nginx/nginx.pid;
+error_log /opt/hostpanel/logs/nginx/error.log warn;
+
+events {
+    worker_connections 1024;
+    multi_accept on;
+}
+
+http {
+    include /opt/hostpanel/etc/nginx/mime.types;
+    default_type application/octet-stream;
+
+    log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                    '$status $body_bytes_sent "$http_referer" '
+                    '"$http_user_agent" "$http_x_forwarded_for"';
+
+    access_log /opt/hostpanel/logs/nginx/access.log main;
+
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 65;
+    types_hash_max_size 2048;
+    server_names_hash_bucket_size 128;
+    client_max_body_size 128M;
+    server_tokens off;
+
+    # Isolated Temp Paths
+    client_body_temp_path /opt/hostpanel/run/nginx/body;
+    proxy_temp_path       /opt/hostpanel/run/nginx/proxy;
+    fastcgi_temp_path     /opt/hostpanel/run/nginx/fastcgi;
+    uwsgi_temp_path       /opt/hostpanel/run/nginx/uwsgi;
+    scgi_temp_path        /opt/hostpanel/run/nginx/scgi;
+
+    # Gzip Settings
+    gzip on;
+    gzip_disable "msie6";
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_comp_level 6;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+
+    # Virtual Hosts configuration
+    include /opt/hostpanel/etc/nginx/conf.d/*.conf;
+    include /opt/hostpanel/etc/nginx/vhosts/*.conf;
+}
+EOF
+    fi
+  fi
+
+  # Ensure default server block exists so Nginx binds to port 80 immediately
+  if [ ! -f "$CONF_D_DIR/default.conf" ] && [ ! -f "$VHOSTS_DIR/default.conf" ]; then
+    mkdir -p "$CONF_D_DIR" "/opt/hostpanel/data/vhosts/default"
+    cat <<'EOF' > "$CONF_D_DIR/default.conf"
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+    root /opt/hostpanel/data/vhosts/default;
+    index index.html index.htm;
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+
+    access_log /opt/hostpanel/logs/nginx/access.log main;
+    error_log  /opt/hostpanel/logs/nginx/error.log warn;
+}
+EOF
+    if [ ! -f "/opt/hostpanel/data/vhosts/default/index.html" ]; then
+      cat <<'EOF' > "/opt/hostpanel/data/vhosts/default/index.html"
+<!DOCTYPE html>
+<html>
+<head><title>HostPanel Nginx</title></head>
+<body><h1>HostPanel Nginx Web Server</h1><p>Isolated engine operating under /opt/hostpanel.</p></body>
+</html>
+EOF
+    fi
+  fi
+
+  cat <<EOF > /etc/systemd/system/nginx.service
+[Unit]
+Description=HostPanel Standalone Nginx Web Server
+After=network.target remote-fs.target nss-lookup.target
+
+[Service]
+Type=forking
+PIDFile=$PID_FILE
+ExecStartPre=$NGINX_BIN -p $CONF_DIR -c $CONF_FILE -t -q -g "daemon on; master_process on;"
+ExecStart=$NGINX_BIN -p $CONF_DIR -c $CONF_FILE -g "daemon on; master_process on;"
+ExecReload=$NGINX_BIN -p $CONF_DIR -c $CONF_FILE -s reload
+ExecStop=$NGINX_BIN -p $CONF_DIR -c $CONF_FILE -s stop
+KillMode=mixed
+TimeoutStopSec=5
+PrivateTmp=true
+ReadWritePaths=$LOG_DIR $RUN_DIR $CONF_DIR /opt/hostpanel/data/vhosts
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload 2>/dev/null || true
+
+  echo "[4/4] Starting service and validating engine..."
+  cmd_engine_start >/dev/null 2>&1 || true
+  sleep 0.5
+
+  echo ""
+  echo "============================================================"
+  echo "  Nginx Engine Provisioning & Network Topology"
+  echo "============================================================"
+  echo "  Active Engine Listen Ports:"
+  echo "    ✓ HTTP Listen Port:    80 (public edge web server)"
+  echo "    ✓ HTTPS Listen Port:   443 (public edge SSL server)"
+  echo "    ✓ Backend Proxy Flow:  Nginx (80/443) -> Apache (8088)"
+  echo "  Applied Filesystem Isolation (/opt/hostpanel):"
+  echo "    ✓ Standalone Binary:   $NGINX_BIN"
+  echo "    ✓ Main Config:         $CONF_FILE"
+  echo "    ✓ Virtual Hosts:       $VHOSTS_DIR"
+  echo "    ✓ Conf Inclusions:     $CONF_D_DIR"
+  echo "    ✓ FastCGI Parameters:  $CONF_DIR/fastcgi_params"
+  echo "    ✓ Error & Access Logs: $LOG_DIR"
+  echo "    ✓ Runtime PID / Temp:  $RUN_DIR"
+  echo "============================================================"
+  echo ""
+  echo "✓ Nginx web server engine ready and isolated under /opt/hostpanel"
+  printf '{"ok":true,"engine":"nginx","status":"installed"}\n'
+}
+
+cmd_engine_uninstall() {
+  local mode="${1:-keep}"
+  echo "  ✓ Stopping Nginx Web Server..."
+  systemctl stop nginx 2>/dev/null || true
+  systemctl disable nginx 2>/dev/null || true
+  pkill -f "nginx:" 2>/dev/null || true
+  killall -9 nginx 2>/dev/null || true
+
+  echo "  ✓ Removing systemd service units & drop-ins..."
+  rm -rf /etc/systemd/system/nginx.service /etc/systemd/system/nginx.service.d 2>/dev/null || true
+  systemctl daemon-reload 2>/dev/null || true
+
+  echo "  ✓ Cleaning runtime PID, temp, and standalone binary runtime..."
+  rm -rf "$RUN_DIR" "${RUNTIME_DIR}" 2>/dev/null || true
+
+  if [ "$mode" = "purge" ] || [ "$mode" = "backup_and_purge" ]; then
+    echo "  ✓ Purging Nginx configuration and log directories..."
+    rm -rf "$CONF_DIR" "$LOG_DIR" 2>/dev/null || true
+  fi
+
+  printf '{"ok":true,"engine":"nginx","status":"uninstalled","mode":"%s"}\n' "$mode"
+}
+
+# Dispatch
+VERB="${1:-}"
+shift || true
+
+case "$VERB" in
+  engine-status) cmd_engine_status "$@" ;;
+  engine-start) cmd_engine_start "$@" ;;
+  engine-stop) cmd_engine_stop "$@" ;;
+  engine-restart) cmd_engine_restart "$@" ;;
+  engine-reload) cmd_engine_reload "$@" ;;
+  engine-test) cmd_engine_test "$@" ;;
+  engine-config-get) cmd_engine_config_get "$@" ;;
+  engine-config-set) cmd_engine_config_set "$@" ;;
+  engine-logs) cmd_engine_logs "$@" ;;
+  engine-install) cmd_engine_install "$@" ;;
+  engine-uninstall) cmd_engine_uninstall "$@" ;;
+  vhost-list) cmd_vhost_list "$@" ;;
+  vhost-get) cmd_vhost_get "$@" ;;
+  vhost-set) cmd_vhost_set "$@" ;;
+  vhost-delete) cmd_vhost_delete "$@" ;;
+  vhost-enable) cmd_vhost_enable "$@" ;;
+  vhost-disable) cmd_vhost_disable "$@" ;;
+  module-list) cmd_module_list "$@" ;;
+  *)
+    if [ -z "$VERB" ]; then
+      echo '{"ok":false,"error":"No verb specified","code":"MISSING_VERB"}' >&2
+      exit $EXIT_INVALID_INPUT
+    else
+      echo "{\"ok\":false,\"error\":\"Unknown verb: $VERB\",\"code\":\"UNKNOWN_VERB\"}" >&2
+      exit 11
+    fi
+    ;;
+esac

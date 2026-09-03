@@ -1,0 +1,214 @@
+{
+  "manifest_version": 1,
+  "feature": "ssl",
+  "label": "SSL / TLS Certificates",
+  "version": "3.0.0",
+  "requires_core": [
+    3,
+    0,
+    0
+  ],
+  "api": {
+    "module": "hostpanel_ssld",
+    "unit": "hostpanel-ssld.service",
+    "run_as": "hp-ssl"
+  },
+  "frontend": {
+    "entry": "frontend/dist/main.js"
+  },
+  "nav": [
+    {
+      "section": "hosting",
+      "section_label": "Hosting",
+      "section_order": 10,
+      "label": "SSL Certificates",
+      "icon": "shield",
+      "order": 30
+    }
+  ],
+  "ops": {
+    "script": "/opt/hostpanel/packages/ssl/ops/hp-ssl",
+    "sudoers": "hostpanel-ssld"
+  },
+  "sandbox": {
+    "read_write_paths": [
+      "/opt/hostpanel/etc/ssl",
+      "/opt/hostpanel/data/ssl",
+      "/opt/hostpanel/data/acme",
+      "/opt/hostpanel/logs/ssl",
+      "/opt/hostpanel/run/ssl",
+      "/opt/hostpanel/run",
+      "/tmp"
+    ]
+  },
+  "operations": {
+    "engine.status": {
+      "verb": "engine-status",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "ssl.engine.status",
+      "timeout_ms": 10000
+    },
+    "engine.logs": {
+      "verb": "engine-logs",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "ssl.engine.logs",
+      "timeout_ms": 5000,
+      "params": {
+        "lines": {
+          "type": "integer"
+        },
+        "log_type": {
+          "enum": [
+            "acme",
+            "renewal",
+            "ssl"
+          ]
+        }
+      }
+    },
+    "ssl.list": {
+      "verb": "list",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "ssl.cert.list",
+      "timeout_ms": 10000
+    },
+    "ssl.get": {
+      "verb": "get",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "ssl.cert.read",
+      "timeout_ms": 5000,
+      "params": {
+        "domain": {
+          "pattern": "^[a-zA-Z0-9][-a-zA-Z0-9.]*[a-zA-Z0-9]$",
+          "required": true
+        }
+      }
+    },
+    "ssl.get-config": {
+      "verb": "get",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "ssl.cert.read",
+      "timeout_ms": 5000,
+      "params": {
+        "domain": {
+          "pattern": "^[a-zA-Z0-9][-a-zA-Z0-9.]*[a-zA-Z0-9]$",
+          "required": true
+        }
+      }
+    },
+    "ssl.issue-letsencrypt": {
+      "verb": "issue-letsencrypt",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "ssl.cert.issue_letsencrypt",
+      "timeout_ms": 180000,
+      "params": {
+        "domain": {
+          "pattern": "^[a-zA-Z0-9][-a-zA-Z0-9.]*[a-zA-Z0-9]$",
+          "required": true
+        },
+        "email": {
+          "pattern": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$",
+          "required": false
+        },
+        "challenge_type": {
+          "enum": [
+            "http-01",
+            "dns-01"
+          ],
+          "default": "http-01"
+        },
+        "staging": {
+          "enum": [
+            "0",
+            "1"
+          ],
+          "default": "0"
+        },
+        "agree_tos": {
+          "enum": [
+            "0",
+            "1"
+          ],
+          "default": "1"
+        }
+      }
+    },
+    "ssl.upload-custom": {
+      "verb": "upload-custom",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "ssl.cert.upload_custom",
+      "timeout_ms": 15000,
+      "params": {
+        "domain": {
+          "pattern": "^[a-zA-Z0-9][-a-zA-Z0-9.]*[a-zA-Z0-9]$",
+          "required": true
+        },
+        "cert_pem": {
+          "secret": true,
+          "required": true
+        },
+        "key_pem": {
+          "secret": true,
+          "required": true
+        },
+        "ca_bundle": {
+          "secret": true,
+          "required": false
+        }
+      }
+    },
+    "ssl.renew": {
+      "verb": "renew",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "ssl.cert.renew",
+      "timeout_ms": 180000,
+      "params": {
+        "domain": {
+          "pattern": "^[a-zA-Z0-9][-a-zA-Z0-9.]*[a-zA-Z0-9]$",
+          "required": false
+        }
+      }
+    },
+    "ssl.delete": {
+      "verb": "delete",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "ssl.cert.delete",
+      "timeout_ms": 15000,
+      "params": {
+        "domain": {
+          "pattern": "^[a-zA-Z0-9][-a-zA-Z0-9.]*[a-zA-Z0-9]$",
+          "required": true
+        }
+      }
+    },
+    "ssl.force-https": {
+      "verb": "force-https",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "ssl.cert.force_https",
+      "timeout_ms": 10000,
+      "params": {
+        "domain": {
+          "pattern": "^[a-zA-Z0-9][-a-zA-Z0-9.]*[a-zA-Z0-9]$",
+          "required": true
+        },
+        "enabled": {
+          "enum": [
+            "0",
+            "1"
+          ],
+          "default": "1"
+        }
+      }
+    }
+  }
+}

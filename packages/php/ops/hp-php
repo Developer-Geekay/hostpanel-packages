@@ -1,0 +1,1348 @@
+#!/bin/bash
+# hp-php — root helper for the HostPanel v3 php daemon.
+#
+# Installed root-owned 0755. The daemon's sudoers file grants THIS SINGLE PATH
+# and nothing else, so `hp-php` (the daemon account) can never write to
+# /opt/hostpanel/etc/php/*/fpm/pool.d or restart a php-fpm unit directly — only
+# through the validation below.
+#
+#   hp-php ALL=(root) NOPASSWD: /opt/hostpanel/packages/php/ops/hp-php *
+#
+# Verbs:
+#   engine-status, engine-install, engine-uninstall, engine-action
+#   version-list, version-install, version-uninstall, version-set-default
+#   extension-list, extension-toggle, extension-install, extension-install-pecl, extension-install-so, extension-uninstall
+#   config-get, config-set, directives-get, directives-set, logs-get
+#   list-pools, get-pool, create-pool, delete-pool, set-pool-version, set-pool-limits, restart-fpm
+#
+# Exit:  0 ok | 1 internal | 10 not found | 11 precondition | 12 validation
+#        13 conflict | 14 denied | 20 dependency
+#
+# stdout is DATA (JSON where structured). stderr is DIAGNOSTICS.
+#
+# 100% Isolation under /opt/hostpanel:
+# - Runtimes & Binaries: /opt/hostpanel/runtimes/php/<version>/ (bin, sbin, lib/modules)
+# - Configurations:     /opt/hostpanel/etc/php/<version>/ (fpm, cli, conf.d, pool.d, mods-available)
+# - Runtime Sockets:    /opt/hostpanel/run/php/php<version>-fpm.sock
+# - Logs:               /opt/hostpanel/logs/php/php<version>-fpm.log
+
+set -euo pipefail
+
+# OPS_NAME is consumed by die()/warn() in common.sh
+# shellcheck disable=SC2034
+OPS_NAME="hp-php"
+
+# Shared validators live in hpcore
+if [ "$(id -u)" = "0" ]; then
+    HP_CORE_LIB=/opt/hostpanel/hpcore/lib
+else
+    : "${HP_CORE_LIB:=/opt/hostpanel/hpcore/lib}"
+    if [ ! -f "$HP_CORE_LIB/common.sh" ]; then
+        HP_CORE_LIB="$(cd "$(dirname "$0")/../../../hpcore/lib" 2>/dev/null && pwd || echo "/opt/hostpanel/hpcore/lib")"
+    fi
+fi
+
+# shellcheck disable=SC1091
+. "$HP_CORE_LIB/common.sh"
+
+# 100% Isolation Root Paths
+HP_ROOT="${HP_ROOT:-/opt/hostpanel}"
+HP_PHP_RUNTIMES_ROOT="${HP_PHP_RUNTIMES_ROOT:-$HP_ROOT/runtimes/php}"
+HP_PHP_ETC_ROOT="${HP_PHP_ETC_ROOT:-$HP_ROOT/etc/php}"
+HP_PHP_RUN_ROOT="${HP_PHP_RUN_ROOT:-$HP_ROOT/run/php}"
+HP_PHP_LOG_ROOT="${HP_PHP_LOG_ROOT:-$HP_ROOT/logs/php}"
+
+# Reserved pool
+RESERVED_POOL="www"
+
+# Known PHP versions (Standard Single Runtime)
+SUPPORTED_VERSIONS=("8.4")
+
+# Known catalog of extensions with categories and install methods
+CATALOG_EXTENSIONS=(
+    "bcmath:Web & Core:Precision mathematics library:builtin"
+    "bz2:Web & Core:Bzip2 data compression:builtin"
+    "calendar:Web & Core:Calendar conversion routines:builtin"
+    "ctype:Web & Core:Character type checking:builtin"
+    "curl:Web & Core:cURL HTTP/HTTPS client:builtin"
+    "dom:Web & Core:Document Object Model parser:builtin"
+    "exif:Web & Core:Read and write image metadata:builtin"
+    "fileinfo:Web & Core:File type identification:builtin"
+    "gd:Web & Core:Image creation and manipulation:builtin"
+    "iconv:Web & Core:Character set conversion:builtin"
+    "intl:Web & Core:Internationalization functions (ICU):builtin"
+    "mbstring:Web & Core:Multibyte string support for UTF-8:builtin"
+    "openssl:Web & Core:OpenSSL cryptography:builtin"
+    "phar:Web & Core:PHP Archive archives:builtin"
+    "posix:Web & Core:POSIX system call bindings:builtin"
+    "readline:Web & Core:Readline CLI editing:builtin"
+    "session:Web & Core:HTTP Session management:builtin"
+    "simplexml:Web & Core:SimpleXML parser:builtin"
+    "soap:Web & Core:SOAP protocol client and server:builtin"
+    "sockets:Web & Core:Low-level network sockets:builtin"
+    "tokenizer:Web & Core:PHP source tokenizer:builtin"
+    "xml:Web & Core:XML parsing and generation:builtin"
+    "zip:Web & Core:Zip archive compression:builtin"
+    "zlib:Web & Core:Zlib compression:builtin"
+    "mysqli:Database:MySQL Improved driver:builtin"
+    "pdo:Database:PHP Data Objects abstraction:builtin"
+    "pdo_mysql:Database:MySQL driver for PDO:builtin"
+    "pdo_pgsql:Database:PostgreSQL driver for PDO:builtin"
+    "pdo_sqlite:Database:SQLite driver for PDO:builtin"
+    "pgsql:Database:PostgreSQL database driver:builtin"
+    "sqlite3:Database:SQLite 3 database driver:builtin"
+    "redis:Database:High-performance in-memory Redis client:pecl"
+    "mongodb:Database:MongoDB official driver:pecl"
+    "memcached:Database:Memcached distributed cache client:pecl"
+    "opcache:Performance:Zend OPcache bytecode cache:builtin"
+    "apcu:Performance:APC User Cache memory cache:pecl"
+    "swoole:Performance:High-performance async coroutine framework:pecl"
+    "xdebug:Performance:Debugging and profiling tool:pecl"
+    "imagick:Web & Core:ImageMagick image processing:pecl"
+    "ioncube:Proprietary Loaders:IonCube Loader for encoded PHP files:direct_so"
+    "sourceguardian:Proprietary Loaders:SourceGuardian runtime loader:direct_so"
+)
+
+usage() {
+    cat >&2 <<'EOF'
+usage: hp-php <verb> [args]
+  engine-status
+  engine-install
+  engine-uninstall
+  engine-action         <start|stop|restart|reload> [version]
+  version-list
+  version-install       <version>
+  version-uninstall     <version>
+  version-set-default   <version>
+  extension-list        [version]
+  extension-toggle      <version> <extension> <enabled>
+  extension-install     <version> <extension>
+  extension-install-pecl <version> <extension>
+  extension-install-so  <version> <extension> <so_content_b64> [is_zend]
+  extension-uninstall   <version> <extension>
+  config-get            <version> [target:fpm|cli]
+  config-set            <version> <content_b64> [target:fpm|cli]
+  directives-get        <version>
+  directives-set        <version> [upload_max] [post_max] [memory] [max_exec] [max_input_time] [max_input_vars] [timezone] [display_errors] [opcache]
+  logs-get              [version] [log_type:error|slow] [lines]
+  list-pools            [version]
+  get-pool              <pool>
+  create-pool           <pool> <version> <memory-limit> <max-execution-time>
+  delete-pool           <pool>
+  set-pool-version      <pool> <new-version>
+  set-pool-limits       <pool> <memory-limit> <max-execution-time>
+  restart-fpm           [version]
+EOF
+    exit 12
+}
+
+valid_pool_name() {
+    local p="$1"
+    [ -n "$p" ] || die "pool name must not be empty" 12
+    echo "$p" | grep -Eq '^[a-z][a-z0-9_-]{0,63}$' \
+        || die "invalid pool name '$p' (want ^[a-z][a-z0-9_-]{0,63}\$)" 12
+}
+
+valid_php_version() {
+    local v="$1"
+    echo "$v" | grep -Eq '^[0-9]+\.[0-9]+$' \
+        || die "invalid PHP version '$v' (want <major>.<minor>, e.g. 8.3)" 12
+}
+
+valid_memory_limit() {
+    echo "$1" | grep -Eq '^[0-9]{1,6}[KMG]$' \
+        || die "invalid memory limit '$1' (want digits followed by K, M or G, e.g. 256M)" 12
+}
+
+valid_exec_time() {
+    echo "$1" | grep -Eq '^[0-9]{1,5}$' \
+        || die "invalid max execution time '$1' (want an integer number of seconds)" 12
+}
+
+valid_extension_name() {
+    local ext="$1"
+    [ -n "$ext" ] || die "extension name must not be empty" 12
+    echo "$ext" | grep -Eq '^[a-z0-9_.-]{1,64}$' \
+        || die "invalid extension name '$ext' (want ^[a-z0-9_.-]{1,64}\$)" 12
+}
+
+guard_reserved_pool() {
+    [ "$1" != "$RESERVED_POOL" ] \
+        || die "'$1' is the distribution default pool and cannot be deleted through the panel" 14
+}
+
+installed_versions() {
+    local v list=()
+    for v in "${SUPPORTED_VERSIONS[@]}"; do
+        if [ -x "$HP_PHP_RUNTIMES_ROOT/$v/bin/php" ] && [ -x "$HP_PHP_RUNTIMES_ROOT/$v/sbin/php-fpm" ]; then
+            list+=("$v")
+        fi
+    done
+    printf '%s\n' "${list[@]}" | sort -V -r
+}
+
+version_installed() {
+    local v="$1"
+    [ -x "$HP_PHP_RUNTIMES_ROOT/$v/bin/php" ] && [ -x "$HP_PHP_RUNTIMES_ROOT/$v/sbin/php-fpm" ]
+}
+
+require_version_installed() {
+    version_installed "$1" || die "PHP $1 is not installed" 10
+}
+
+fpm_unit() {
+    local v="$1"
+    printf 'hostpanel-php%s-fpm.service' "$v"
+}
+
+fpm_active() {
+    local v="$1" unit
+    unit="$(fpm_unit "$v")"
+    if systemctl is-active --quiet "$unit" 2>/dev/null; then
+        echo "active"
+    elif systemctl is-failed --quiet "$unit" 2>/dev/null; then
+        echo "failed"
+    else
+        echo "inactive"
+    fi
+}
+
+pool_socket() {
+    local pool="$1" version="$2"
+    if [ "$pool" = "$RESERVED_POOL" ] || [ "$pool" = "default" ]; then
+        printf '%s/php%s-fpm.sock' "$HP_PHP_RUN_ROOT" "$version"
+    else
+        printf '%s/php%s-fpm-%s.sock' "$HP_PHP_RUN_ROOT" "$version" "$pool"
+    fi
+}
+
+pool_conf_path() {
+    local pool="$1" version="$2" pooldir
+    pooldir="$HP_PHP_ETC_ROOT/$version/fpm/pool.d"
+    mkdir -p "$pooldir" 2>/dev/null || true
+    echo "$pooldir/$pool.conf"
+}
+
+find_pool_version() {
+    local pool="$1" v conf
+    for v in $(installed_versions); do
+        conf="$HP_PHP_ETC_ROOT/$v/fpm/pool.d/$pool.conf"
+        if [ -f "$conf" ]; then
+            printf '%s' "$v"
+            return 0
+        fi
+    done
+    return 1
+}
+
+sync_isolated_runtime() {
+    local v="$1"
+    local etc_dir="$HP_PHP_ETC_ROOT/$v"
+    mkdir -p "$HP_PHP_RUN_ROOT" "$HP_PHP_LOG_ROOT" 2>/dev/null || true
+    mkdir -p "$etc_dir/fpm/pool.d" "$etc_dir/fpm/conf.d" "$etc_dir/cli" "$etc_dir/mods-available" 2>/dev/null || true
+    chown -R www-data:www-data "$HP_PHP_RUN_ROOT" "$HP_PHP_LOG_ROOT" 2>/dev/null || true
+    chmod 755 "$HP_PHP_RUN_ROOT" "$HP_PHP_LOG_ROOT" 2>/dev/null || true
+}
+
+render_pool() {
+    local pool="$1" version="$2" memory_limit="$3" max_exec="$4"
+    cat <<EOF
+; Managed by HostPanel — do not edit by hand. Regenerated on every change.
+[$pool]
+user = www-data
+group = www-data
+listen = $(pool_socket "$pool" "$version")
+listen.owner = www-data
+listen.group = www-data
+listen.mode = 0660
+pm = dynamic
+pm.max_children = 5
+pm.start_servers = 2
+pm.min_spare_servers = 1
+pm.max_spare_servers = 3
+php_admin_value[memory_limit] = ${memory_limit}
+php_admin_value[max_execution_time] = ${max_exec}
+EOF
+}
+
+pool_json() {
+    local pool="$1" version="$2" conf="$3" mem exec_t
+    mem="$(grep '^php_admin_value\[memory_limit\]' "$conf" 2>/dev/null | awk '{print $NF}' || echo "128M")"
+    exec_t="$(grep '^php_admin_value\[max_execution_time\]' "$conf" 2>/dev/null | awk '{print $NF}' || echo "30")"
+    printf '{"pool":"%s","version":"%s","memory_limit":"%s","max_execution_time":%d,"socket":"%s"}' \
+        "$pool" "$version" "$mem" "$exec_t" "$(pool_socket "$pool" "$version")"
+}
+
+get_php_patch_version() {
+    local v="${1:-8.4}"
+    case "$v" in
+        8.4) echo "8.4.4" ;;
+        *) echo "8.4.4" ;;
+    esac
+}
+
+ensure_isolated_configs() {
+    local v="$1"
+    local etc_dir="$HP_PHP_ETC_ROOT/$v"
+    local run_dir="$HP_PHP_RUN_ROOT"
+    local log_dir="$HP_PHP_LOG_ROOT"
+
+    mkdir -p "$etc_dir/fpm/pool.d" "$etc_dir/fpm/conf.d" "$etc_dir/cli" "$etc_dir/mods-available" "$run_dir" "$log_dir" 2>/dev/null || true
+
+    # Default php.ini
+    if [ ! -f "$etc_dir/php.ini" ]; then
+        cat <<EOF > "$etc_dir/php.ini"
+[PHP]
+engine = On
+short_open_tag = Off
+precision = 14
+output_buffering = 4096
+zlib.output_compression = Off
+implicit_flush = Off
+serialize_precision = -1
+zend.enable_gc = On
+expose_php = Off
+max_execution_time = 120
+max_input_time = 60
+max_input_vars = 1000
+memory_limit = 256M
+error_reporting = E_ALL & ~E_DEPRECATED & ~E_STRICT
+display_errors = Off
+display_startup_errors = Off
+log_errors = On
+log_errors_max_len = 1024
+ignore_repeated_errors = Off
+ignore_repeated_source = Off
+report_memleaks = On
+error_log = $log_dir/php${v}-error.log
+variables_order = "GPCS"
+request_order = "GP"
+register_argc_argv = Off
+auto_globals_jit = On
+post_max_size = 64M
+default_mimetype = "text/html"
+default_charset = "UTF-8"
+file_uploads = On
+upload_max_filesize = 64M
+max_file_uploads = 20
+allow_url_fopen = On
+allow_url_include = Off
+default_socket_timeout = 60
+date.timezone = UTC
+
+[opcache]
+opcache.enable = 1
+opcache.enable_cli = 0
+opcache.memory_consumption = 128
+opcache.interned_strings_buffer = 8
+opcache.max_accelerated_files = 10000
+opcache.revalidate_freq = 2
+opcache.save_comments = 1
+EOF
+    fi
+
+    # Create target-specific symlinks if not separate files
+    [ -f "$etc_dir/fpm/php.ini" ] || cp -f "$etc_dir/php.ini" "$etc_dir/fpm/php.ini" 2>/dev/null || true
+    [ -f "$etc_dir/cli/php.ini" ] || cp -f "$etc_dir/php.ini" "$etc_dir/cli/php.ini" 2>/dev/null || true
+
+    # Default php-fpm.conf
+    if [ ! -f "$etc_dir/fpm/php-fpm.conf" ]; then
+        cat <<EOF > "$etc_dir/fpm/php-fpm.conf"
+[global]
+pid = $run_dir/php${v}-fpm.pid
+error_log = $log_dir/php${v}-fpm.log
+log_level = notice
+daemonize = no
+include = $etc_dir/fpm/pool.d/*.conf
+EOF
+    fi
+
+    # Default www.conf pool
+    if [ ! -f "$etc_dir/fpm/pool.d/www.conf" ]; then
+        cat <<EOF > "$etc_dir/fpm/pool.d/www.conf"
+[www]
+user = hp-php
+group = hp-php
+listen = $run_dir/php${v}-fpm.sock
+listen.owner = www-data
+listen.group = www-data
+listen.mode = 0660
+pm = dynamic
+pm.max_children = 5
+pm.start_servers = 2
+pm.min_spare_servers = 1
+pm.max_spare_servers = 3
+php_admin_value[memory_limit] = 128M
+php_admin_value[max_execution_time] = 30
+EOF
+    fi
+}
+
+install_fpm_service() {
+    local v="$1"
+    local runtime_dir="$HP_PHP_RUNTIMES_ROOT/$v"
+    local fpm_bin="$runtime_dir/sbin/php-fpm"
+    [ -x "$fpm_bin" ] || fpm_bin="/usr/sbin/php-fpm$v"
+    [ -x "$fpm_bin" ] || fpm_bin="$(command -v "php-fpm$v" 2>/dev/null || echo "")"
+    [ -x "$fpm_bin" ] || fpm_bin="$(command -v php-fpm 2>/dev/null || echo "")"
+
+    local unit_file="/etc/systemd/system/hostpanel-php${v}-fpm.service"
+    local fpm_conf="$HP_PHP_ETC_ROOT/$v/fpm/php-fpm.conf"
+    [ -f "$fpm_conf" ] || fpm_conf="/etc/php/$v/fpm/php-fpm.conf"
+
+    if [ -x "$fpm_bin" ]; then
+        cat <<EOF > "$unit_file"
+[Unit]
+Description=The PHP $v FastCGI Process Manager (HostPanel Isolated)
+Documentation=man:php-fpm(8)
+After=network.target
+
+[Service]
+Type=simple
+PIDFile=$HP_PHP_RUN_ROOT/php${v}-fpm.pid
+ExecStart=$fpm_bin --fpm-config $fpm_conf --nodaemonize
+ExecReload=/bin/kill -USR2 \$MAINPID
+Restart=always
+RestartSec=2
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        chmod 0644 "$unit_file"
+        systemctl daemon-reload 2>/dev/null || true
+        systemctl enable "hostpanel-php${v}-fpm.service" 2>/dev/null || true
+        systemctl restart "hostpanel-php${v}-fpm.service" 2>/dev/null || true
+    fi
+}
+
+install_php_runtime() {
+    local version="$1"
+    local patch_ver
+    patch_ver="$(get_php_patch_version "$version")"
+    local runtime_dir="$HP_PHP_RUNTIMES_ROOT/$version"
+    local etc_dir="$HP_PHP_ETC_ROOT/$version"
+    local run_dir="$HP_PHP_RUN_ROOT"
+    local log_dir="$HP_PHP_LOG_ROOT"
+    local arch
+    arch="$(uname -m)"
+    local arch_tag="x86_64"
+    case "$arch" in
+        x86_64) arch_tag="x86_64" ;;
+        aarch64|arm64) arch_tag="aarch64" ;;
+        *) arch_tag="x86_64" ;;
+    esac
+
+    mkdir -p "$runtime_dir/bin" "$runtime_dir/sbin" "$runtime_dir/lib/modules" "$etc_dir/fpm/pool.d" "$etc_dir/fpm/conf.d" "$etc_dir/cli" "$etc_dir/mods-available" "$run_dir" "$log_dir" 2>/dev/null || true
+
+    local installed_ok=false
+
+    # ── Strategy 1: Pre-compiled HostPanel Portable PHP Binary Tarball (Tier 1) ──
+    echo "  [1/4] Checking for pre-compiled portable PHP $version ($arch_tag) binary tarball..." >&2
+    local portable_url="https://github.com/hostpanel/php-runtimes/releases/download/v${patch_ver}/php-${patch_ver}-linux-${arch_tag}.tar.gz"
+    local cache_tar="/opt/hostpanel/runtimes/cache/php-${patch_ver}-linux-${arch_tag}.tar.gz"
+    local repo_tar="/srv/hostpanel-v3/packages/php/runtimes/php-${patch_ver}-linux-${arch_tag}.tar.gz"
+    local pkg_tar="/opt/hostpanel/packages/php/runtimes/php-${patch_ver}-linux-${arch_tag}.tar.gz"
+    local tmp_tar="/tmp/php-${version}-${arch_tag}.tar.gz"
+
+    if [ -f "$cache_tar" ]; then
+        echo "  [+] Extracting cached portable PHP $version runtime from $cache_tar..." >&2
+        tar -xzf "$cache_tar" -C "$runtime_dir" 2>&1
+        if [ -x "$runtime_dir/bin/php" ] && [ -x "$runtime_dir/sbin/php-fpm" ]; then
+            installed_ok=true
+            echo "  ✓ Portable PHP $version runtime unpacked successfully from cache (<2s)." >&2
+        fi
+    elif [ -f "$repo_tar" ]; then
+        echo "  [+] Extracting local portable PHP $version runtime from $repo_tar..." >&2
+        tar -xzf "$repo_tar" -C "$runtime_dir" 2>&1
+        if [ -x "$runtime_dir/bin/php" ] && [ -x "$runtime_dir/sbin/php-fpm" ]; then
+            installed_ok=true
+            echo "  ✓ Portable PHP $version runtime unpacked successfully from local package (<2s)." >&2
+        fi
+    elif [ -f "$pkg_tar" ]; then
+        echo "  [+] Extracting bundled portable PHP $version runtime from $pkg_tar..." >&2
+        tar -xzf "$pkg_tar" -C "$runtime_dir" 2>&1
+        if [ -x "$runtime_dir/bin/php" ] && [ -x "$runtime_dir/sbin/php-fpm" ]; then
+            installed_ok=true
+            echo "  ✓ Portable PHP $version runtime unpacked successfully from bundle (<2s)." >&2
+        fi
+    elif curl -sSLf --connect-timeout 5 --max-time 60 "$portable_url" -o "$tmp_tar" 2>/dev/null; then
+        echo "  [+] Extracting portable PHP $version runtime into $runtime_dir..." >&2
+        tar -xzf "$tmp_tar" -C "$runtime_dir" --strip-components=1 2>/dev/null || tar -xzf "$tmp_tar" -C "$runtime_dir"
+        rm -f "$tmp_tar"
+        if [ -x "$runtime_dir/bin/php" ] && [ -x "$runtime_dir/sbin/php-fpm" ]; then
+            installed_ok=true
+            echo "  ✓ Pre-compiled portable PHP $version runtime unpacked successfully." >&2
+        fi
+    fi
+
+    # ── Enforce Zero-Compilation Standalone Runtime Guarantee ──
+    if [ "$installed_ok" != "true" ]; then
+        die "Pre-compiled portable PHP $version archive (php-${patch_ver}-linux-${arch_tag}.tar.gz) not found in cache or package repository. HostPanel runtimes must be provisioned via standalone pre-compiled archives without compilation on the host." 20
+    fi
+
+    # ── 3. Configure default isolated php.ini and php-fpm.conf ──
+    echo "  [3/4] Initializing isolated configuration in $etc_dir..." >&2
+    ensure_isolated_configs "$version"
+
+    # ── 4. Install dedicated systemd service for hostpanel-php$version-fpm ──
+    echo "  [4/4] Activating HostPanel PHP $version FPM service daemon..." >&2
+    install_fpm_service "$version"
+
+    echo "  ✓ PHP $version isolated runtime ready." >&2
+}
+
+# ── Main Entrypoint ───────────────────────────────────────────────────────────
+
+[ $# -ge 1 ] || usage
+verb="$1"
+shift
+
+case "$verb" in
+  # ── engine lifecycle ────────────────────────────────────────────────────────
+  engine-status)
+    require_argc 0 $# "engine-status"
+    installed_arr=($(installed_versions))
+    has_installed=false
+    has_active=false
+    [ ${#installed_arr[@]} -gt 0 ] && has_installed=true
+
+    ver_json=""
+    first=1
+    for v in "${installed_arr[@]}"; do
+        sync_isolated_runtime "$v"
+        st="$(fpm_active "$v")"
+        [ "$st" = "active" ] && has_active=true
+
+        pool_count=0
+        if [ -d "$HP_PHP_ETC_ROOT/$v/fpm/pool.d" ]; then
+            pool_count=$(find "$HP_PHP_ETC_ROOT/$v/fpm/pool.d" -maxdepth 1 -name "*.conf" 2>/dev/null | wc -l)
+        fi
+
+        [ "$first" = "1" ] && first=0 || ver_json="${ver_json},"
+        ver_json="${ver_json}$(printf '{"version":"%s","active":"%s","status":"%s","path":"%s/runtimes/php/%s/bin/php","socket":"%s","pool_count":%d}' \
+            "$v" "$st" "$st" "$HP_ROOT" "$v" "$(pool_socket "www" "$v")" "$pool_count")"
+    done
+
+    printf '{"installed":%s,"active":%s,"versions":[%s],"default_version":"8.4"}\n' "$has_installed" "$has_active" "$ver_json"
+    ;;
+
+  engine-install)
+    require_argc 0 $# "engine-install"
+    echo "============================================================" >&2
+    echo "  HostPanel v3 — PHP Runtime Provisioner (Standalone)" >&2
+    echo "============================================================" >&2
+    if is_dryrun; then
+        echo "WOULD-EXEC: install standalone PHP 8.4 runtime under /opt/hostpanel" >&2
+        printf '{"status":"installed","version":"8.4","isolated":true}\n'
+        exit 0
+    fi
+
+    target_ver="8.4"
+    install_php_runtime "$target_ver"
+    printf '{"status":"installed","version":"%s","active":true,"socket":"%s"}\n' "$target_ver" "$(pool_socket "www" "$target_ver")"
+    ;;
+
+  engine-uninstall)
+    require_argc 0 $# "engine-uninstall"
+    echo "==> Stopping all PHP-FPM service daemons..." >&2
+    if is_dryrun; then
+        echo "WOULD-EXEC: stop all php-fpm services and clean sockets" >&2
+        printf '{"status":"uninstalled"}\n'
+        exit 0
+    fi
+
+    for v in "${SUPPORTED_VERSIONS[@]}"; do
+        if systemctl is-active "$(fpm_unit "$v")" >/dev/null 2>&1; then
+            echo "  stopping PHP $v FPM..." >&2
+            systemctl stop "$(fpm_unit "$v")" 2>/dev/null || true
+            systemctl disable "$(fpm_unit "$v")" 2>/dev/null || true
+        fi
+    done
+    rm -rf "$HP_PHP_RUN_ROOT"/*.sock "$HP_PHP_RUN_ROOT"/*.pid 2>/dev/null || true
+    echo "  ✓ All PHP engine daemons stopped and cleaned." >&2
+    printf '{"status":"uninstalled"}\n'
+    ;;
+
+  engine-action)
+    require_argc 1 $# "engine-action <start|stop|restart|reload> [version]"
+    action="$1"
+    target_ver="${2:-all}"
+
+    case "$action" in
+        start|stop|restart|reload) ;;
+        *) die "invalid action '$action' (want start|stop|restart|reload)" 12 ;;
+    esac
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: systemctl $action php$target_ver-fpm" >&2
+        printf '{"action":"%s","version":"%s","ok":true}\n' "$action" "$target_ver"
+        exit 0
+    fi
+
+    if [ "$target_ver" != "all" ]; then
+        valid_php_version "$target_ver"
+        require_version_installed "$target_ver"
+        echo "==> Executing $action on PHP $target_ver FPM daemon..." >&2
+        systemctl "$action" "$(fpm_unit "$target_ver")" || die "failed to $action PHP $target_ver FPM" 20
+        echo "  ✓ PHP $target_ver FPM $action completed." >&2
+    else
+        for v in $(installed_versions); do
+            echo "==> Executing $action on PHP $v FPM daemon..." >&2
+            systemctl "$action" "$(fpm_unit "$v")" 2>/dev/null || true
+        done
+        echo "  ✓ Action $action completed for all active PHP versions." >&2
+    fi
+    printf '{"action":"%s","version":"%s","ok":true}\n' "$action" "$target_ver"
+    ;;
+
+  # ── multi-version runtimes ──────────────────────────────────────────────────
+  version-list)
+    require_argc 0 $# "version-list"
+    printf '{"versions":['
+    first=1
+    for v in "${SUPPORTED_VERSIONS[@]}"; do
+        inst=$(version_installed "$v" && echo true || echo false)
+        st="inactive"
+        if [ "$inst" = "true" ]; then
+            sync_isolated_runtime "$v"
+            st="$(fpm_active "$v")"
+        fi
+        bin_path="$HP_PHP_RUNTIMES_ROOT/$v/bin/php"
+        [ -x "$bin_path" ] || bin_path=""
+
+        [ "$first" = "1" ] && first=0 || printf ','
+        printf '{"version":"%s","installed":%s,"active":"%s","status":"%s","bin_path":"%s","socket":"%s"}' \
+            "$v" "$inst" "$st" "$st" "$bin_path" "$(pool_socket "www" "$v")"
+    done
+    printf ']}\n'
+    ;;
+
+  version-install)
+    require_argc 1 $# "version-install <version>"
+    version="$1"
+    valid_php_version "$version"
+
+    echo "============================================================" >&2
+    echo "  HostPanel v3 — Installing PHP $version Isolated Runtime" >&2
+    echo "============================================================" >&2
+    if is_dryrun; then
+        echo "WOULD-EXEC: install PHP $version isolated runtime under $HP_PHP_RUNTIMES_ROOT/$version" >&2
+        printf '{"version":"%s","installed":true}\n' "$version"
+        exit 0
+    fi
+
+    install_php_runtime "$version"
+    printf '{"version":"%s","installed":true,"active":true,"socket":"%s"}\n' "$version" "$(pool_socket "www" "$version")"
+    ;;
+
+  version-uninstall)
+    require_argc 1 $# "version-uninstall <version>"
+    version="$1"
+    valid_php_version "$version"
+
+    echo "============================================================" >&2
+    echo "  HostPanel v3 — Uninstalling PHP $version Runtime" >&2
+    echo "============================================================" >&2
+    if is_dryrun; then
+        echo "WOULD-EXEC: stop service and remove /opt/hostpanel/runtimes/php/$version" >&2
+        printf '{"version":"%s","uninstalled":true}\n' "$version"
+        exit 0
+    fi
+
+    echo "  [1/3] Stopping and disabling HostPanel PHP $version FPM service..." >&2
+    systemctl stop "$(fpm_unit "$version")" 2>/dev/null || true
+    systemctl disable "$(fpm_unit "$version")" 2>/dev/null || true
+    rm -f "/etc/systemd/system/hostpanel-php${version}-fpm.service" 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
+
+    echo "  [2/3] Removing isolated runtime & configuration directories..." >&2
+    rm -rf "$HP_PHP_RUNTIMES_ROOT/$version" "$HP_PHP_ETC_ROOT/$version" "$HP_PHP_RUN_ROOT/php${version}-fpm*.sock" "$HP_PHP_RUN_ROOT/php${version}-fpm*.pid" 2>/dev/null || true
+
+    echo "  [3/3] Cleaning runtime sockets and logs..." >&2
+    rm -f "$HP_PHP_LOG_ROOT/php${version}-*.log" 2>/dev/null || true
+
+    echo "  ✓ PHP $version uninstalled successfully." >&2
+    printf '{"version":"%s","uninstalled":true}\n' "$version"
+    ;;
+
+  version-set-default)
+    require_argc 1 $# "version-set-default <version>"
+    version="$1"
+    valid_php_version "$version"
+    require_version_installed "$version"
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: update-alternatives --set php /usr/bin/php$version" >&2
+        printf '{"version":"%s","default":true}\n' "$version"
+        exit 0
+    fi
+
+    if command -v update-alternatives >/dev/null 2>&1; then
+        update-alternatives --set php "/usr/bin/php$version" 2>/dev/null || true
+    fi
+    mkdir -p "$HP_ROOT/bin" 2>/dev/null || true
+    ln -sf "$HP_PHP_RUNTIMES_ROOT/$version/bin/php" "$HP_ROOT/bin/php" 2>/dev/null || true
+
+    echo "  ✓ PHP $version is now the default CLI binary ($HP_ROOT/bin/php)." >&2
+    printf '{"version":"%s","default":true}\n' "$version"
+    ;;
+
+  # ── extensions / modules ────────────────────────────────────────────────────
+  extension-list)
+    [ $# -le 1 ] || die "expected 0 or 1 argument(s), got $#" 12
+    filter="${1:-}"
+    if [ -n "$filter" ]; then
+        valid_php_version "$filter"
+        require_version_installed "$filter"
+    fi
+
+    printf '{"extensions":['
+    first=1
+    for v in $(installed_versions); do
+        [ -z "$filter" ] || [ "$v" = "$filter" ] || continue
+        conf_dir="$HP_PHP_ETC_ROOT/$v/fpm/conf.d"
+        mods_dir="$HP_PHP_ETC_ROOT/$v/mods-available"
+        lib_dir="$HP_PHP_RUNTIMES_ROOT/$v/lib/modules"
+
+        for item in "${CATALOG_EXTENSIONS[@]}"; do
+            IFS=":" read -r ext_name ext_cat ext_desc ext_method <<< "$item"
+            
+            is_installed=false
+            is_enabled=false
+            is_builtin=false
+            [ "$ext_method" = "builtin" ] && is_builtin=true
+
+            # Check if .so exists or module is loaded
+            if [ -f "$lib_dir/${ext_name}.so" ] || [ -f "/usr/lib/php/"*"/${ext_name}.so" ] || [ "$is_builtin" = "true" ]; then
+                is_installed=true
+            fi
+
+            # Check if enabled in conf.d
+            if [ -d "$conf_dir" ] && ls "$conf_dir"/*"${ext_name}.ini" >/dev/null 2>&1; then
+                is_enabled=true
+                is_installed=true
+            elif [ -d "/etc/php/$v/fpm/conf.d" ] && ls "/etc/php/$v/fpm/conf.d"/*"${ext_name}.ini" >/dev/null 2>&1; then
+                is_enabled=true
+                is_installed=true
+            fi
+
+            [ "$first" = "1" ] && first=0 || printf ','
+            printf '{"version":"%s","name":"%s","category":"%s","description":"%s","installed":%s,"enabled":%s,"builtin":%s,"method":"%s"}' \
+                "$v" "$ext_name" "$ext_cat" "$ext_desc" "$is_installed" "$is_enabled" "$is_builtin" "$ext_method"
+        done
+    done
+    printf ']}\n'
+    ;;
+
+  extension-toggle)
+    require_argc 3 $# "extension-toggle <version> <extension> <enabled>"
+    version="$1"; extension="$2"; req_enabled="$3"
+    valid_php_version "$version"
+    valid_extension_name "$extension"
+    require_version_installed "$version"
+
+    case "$req_enabled" in
+        true|1|enable|enabled) target_state=true ;;
+        false|0|disable|disabled) target_state=false ;;
+        *) die "invalid enabled flag '$req_enabled' (want true|false|1|0)" 12 ;;
+    esac
+
+    conf_dir="$HP_PHP_ETC_ROOT/$version/fpm/conf.d"
+    mods_dir="$HP_PHP_ETC_ROOT/$version/mods-available"
+    sys_conf_dir="/etc/php/$version/fpm/conf.d"
+
+    if [ "$target_state" = "true" ]; then
+        if is_dryrun; then
+            echo "WOULD-EXEC: enable extension $extension for PHP $version" >&2
+        else
+            mkdir -p "$conf_dir" "$sys_conf_dir" 2>/dev/null || true
+            target_ini="$conf_dir/20-${extension}.ini"
+            sys_ini="$sys_conf_dir/20-${extension}.ini"
+            if [ -f "$mods_dir/${extension}.ini" ]; then
+                ln -sf "$mods_dir/${extension}.ini" "$target_ini" 2>/dev/null || true
+                ln -sf "$mods_dir/${extension}.ini" "$sys_ini" 2>/dev/null || true
+            else
+                echo "extension=${extension}.so" > "$target_ini"
+                echo "extension=${extension}.so" > "$sys_ini" 2>/dev/null || true
+            fi
+        fi
+    else
+        if is_dryrun; then
+            echo "WOULD-EXEC: disable extension $extension for PHP $version" >&2
+        else
+            rm -f "$conf_dir"/*"${extension}.ini" "$sys_conf_dir"/*"${extension}.ini" 2>/dev/null || true
+        fi
+    fi
+
+    act systemctl reload "$(fpm_unit "$version")" 2>/dev/null || true
+    echo "  ✓ Extension '$extension' (PHP $version) state set to $target_state." >&2
+    printf '{"version":"%s","extension":"%s","enabled":%s}\n' "$version" "$extension" "$target_state"
+    ;;
+
+  extension-install)
+    require_argc 2 $# "extension-install <version> <extension>"
+    version="$1"; extension="$2"
+    valid_php_version "$version"
+    valid_extension_name "$extension"
+    require_version_installed "$version"
+
+    echo "============================================================" >&2
+    echo "  HostPanel v3 — Installing Extension '$extension' for PHP $version" >&2
+    echo "============================================================" >&2
+    if is_dryrun; then
+        echo "WOULD-EXEC: build and install $extension for PHP $version" >&2
+        printf '{"version":"%s","extension":"%s","installed":true}\n' "$version" "$extension"
+        exit 0
+    fi
+
+    # Attempt to compile via PECL / phpize with isolated runtime
+    local runtime_dir="$HP_PHP_RUNTIMES_ROOT/$version"
+    local pecl_bin="$runtime_dir/bin/pecl"
+    local phpize_bin="$runtime_dir/bin/phpize"
+    local phpconfig_bin="$runtime_dir/bin/php-config"
+    [ -x "$phpize_bin" ] || phpize_bin="$(command -v "phpize$version" 2>/dev/null || command -v phpize 2>/dev/null || echo "")"
+    [ -x "$phpconfig_bin" ] || phpconfig_bin="$(command -v "php-config$version" 2>/dev/null || command -v php-config 2>/dev/null || echo "")"
+
+    echo "  [1/3] Downloading extension '$extension' source package..." >&2
+    local tmp_pecl="/tmp/ext-build-${version}-${extension}"
+    rm -rf "$tmp_pecl" && mkdir -p "$tmp_pecl"
+
+    (
+        cd "$tmp_pecl"
+        if [ -x "$pecl_bin" ]; then
+            "$pecl_bin" download "$extension" 2>/dev/null || true
+        fi
+        if ! ls "$tmp_pecl"/*.tgz >/dev/null 2>&1; then
+            curl -sSLf --connect-timeout 10 --max-time 120 "https://pecl.php.net/get/${extension}" -o "${extension}.tgz" 2>/dev/null || true
+        fi
+        if ls "$tmp_pecl"/*.tgz >/dev/null 2>&1; then
+            tar -xzf *.tgz --strip-components=1
+            echo "  [2/3] Compiling '$extension' using PHP $version headers..." >&2
+            if [ -x "$phpize_bin" ]; then
+                "$phpize_bin"
+            fi
+            if [ -x "$phpconfig_bin" ]; then
+                ./configure --with-php-config="$phpconfig_bin"
+            else
+                ./configure
+            fi
+            make -j"$(nproc 2>/dev/null || echo 2)"
+            make install
+        else
+            echo "  [!] Could not fetch PECL package for '$extension', trying apt as fallback..." >&2
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -o Acquire::Check-Valid-Until=false install -y --no-install-recommends "php${version}-${extension}" || die "failed to install extension '$extension'" 1
+        fi
+    )
+    rm -rf "$tmp_pecl"
+
+    echo "  [3/3] Activating configuration in conf.d and reloading FPM..." >&2
+    ini_path="$HP_PHP_ETC_ROOT/$version/mods-available/${extension}.ini"
+    mkdir -p "$HP_PHP_ETC_ROOT/$version/mods-available" "$HP_PHP_ETC_ROOT/$version/fpm/conf.d" 2>/dev/null || true
+    echo "extension=${extension}.so" > "$ini_path"
+    ln -sf "$ini_path" "$HP_PHP_ETC_ROOT/$version/fpm/conf.d/20-${extension}.ini" 2>/dev/null || true
+
+    sync_isolated_runtime "$version"
+    act systemctl reload "$(fpm_unit "$version")" 2>/dev/null || true
+
+    echo "  ✓ Extension '$extension' installed and isolated successfully." >&2
+    printf '{"version":"%s","extension":"%s","installed":true,"enabled":true}\n' "$version" "$extension"
+    ;;
+
+  extension-install-pecl)
+    require_argc 2 $# "extension-install-pecl <version> <extension>"
+    version="$1"; extension="$2"
+    valid_php_version "$version"
+    valid_extension_name "$extension"
+    require_version_installed "$version"
+
+    echo "============================================================" >&2
+    echo "  HostPanel v3 — Compiling PECL Extension '$extension' for PHP $version" >&2
+    echo "============================================================" >&2
+    if is_dryrun; then
+        echo "WOULD-EXEC: pecl -d php_suffix=$version install $extension" >&2
+        printf '{"version":"%s","extension":"%s","installed":true}\n' "$version" "$extension"
+        exit 0
+    fi
+
+    local runtime_dir="$HP_PHP_RUNTIMES_ROOT/$version"
+    local pecl_bin="$runtime_dir/bin/pecl"
+    local phpize_bin="$runtime_dir/bin/phpize"
+    local phpconfig_bin="$runtime_dir/bin/php-config"
+    [ -x "$phpize_bin" ] || phpize_bin="$(command -v "phpize$version" 2>/dev/null || command -v phpize 2>/dev/null || echo "")"
+    [ -x "$phpconfig_bin" ] || phpconfig_bin="$(command -v "php-config$version" 2>/dev/null || command -v php-config 2>/dev/null || echo "")"
+
+    echo "  [1/4] Ensuring build tools and prerequisites are available..." >&2
+    if ! command -v make >/dev/null 2>&1 || ! command -v gcc >/dev/null 2>&1; then
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get -o Acquire::Check-Valid-Until=false install -y --no-install-recommends build-essential autoconf || true
+    fi
+
+    echo "  [2/4] Downloading PECL extension '$extension' source package..." >&2
+    local tmp_pecl="/tmp/pecl-${version}-${extension}"
+    rm -rf "$tmp_pecl" && mkdir -p "$tmp_pecl"
+
+    (
+        cd "$tmp_pecl"
+        if [ -x "$pecl_bin" ]; then
+            "$pecl_bin" download "$extension" 2>/dev/null || true
+        fi
+        if ! ls "$tmp_pecl"/*.tgz >/dev/null 2>&1; then
+            curl -sSLf --connect-timeout 10 --max-time 120 "https://pecl.php.net/get/${extension}" -o "${extension}.tgz" 2>/dev/null || die "failed to download PECL extension '$extension'" 20
+        fi
+        tar -xzf *.tgz --strip-components=1
+
+        echo "  [3/4] Compiling '$extension' against PHP $version phpize & php-config..." >&2
+        if [ -x "$phpize_bin" ]; then
+            "$phpize_bin"
+        else
+            phpize
+        fi
+
+        if [ -x "$phpconfig_bin" ]; then
+            ./configure --with-php-config="$phpconfig_bin"
+        else
+            ./configure
+        fi
+
+        make -j"$(nproc 2>/dev/null || echo 2)"
+        make install
+    )
+    rm -rf "$tmp_pecl"
+
+    echo "  [4/4] Activating module in $HP_PHP_ETC_ROOT/$version/fpm/conf.d and reloading FPM..." >&2
+    ini_path="$HP_PHP_ETC_ROOT/$version/mods-available/${extension}.ini"
+    mkdir -p "$HP_PHP_ETC_ROOT/$version/mods-available" "$HP_PHP_ETC_ROOT/$version/fpm/conf.d" 2>/dev/null || true
+    echo "extension=${extension}.so" > "$ini_path"
+    ln -sf "$ini_path" "$HP_PHP_ETC_ROOT/$version/fpm/conf.d/20-${extension}.ini" 2>/dev/null || true
+
+    sync_isolated_runtime "$version"
+    act systemctl reload "$(fpm_unit "$version")" 2>/dev/null || true
+
+    echo "  ✓ PECL Extension '$extension' compiled and activated successfully." >&2
+    printf '{"version":"%s","extension":"%s","installed":true,"method":"pecl"}\n' "$version" "$extension"
+    ;;
+
+  extension-install-so)
+    [ $# -ge 3 ] && [ $# -le 4 ] || die "expected 3 or 4 argument(s), got $# — usage: extension-install-so <version> <extension> <so_content_b64> [is_zend]" 12
+    version="$1"; extension="$2"; so_b64="$3"; is_zend="${4:-false}"
+    valid_php_version "$version"
+    valid_extension_name "$extension"
+    require_version_installed "$version"
+
+    echo "============================================================" >&2
+    echo "  HostPanel v3 — Installing Direct Binary Module '$extension' (PHP $version)" >&2
+    echo "============================================================" >&2
+
+    dest_so="$HP_PHP_RUNTIMES_ROOT/$version/lib/modules/${extension}.so"
+    if is_dryrun; then
+        echo "WOULD-WRITE: $dest_so (binary extension)" >&2
+        printf '{"version":"%s","extension":"%s","installed":true}\n' "$version" "$extension"
+        exit 0
+    fi
+
+    echo "  [1/2] Writing module binary to $dest_so..." >&2
+    mkdir -p "$HP_PHP_RUNTIMES_ROOT/$version/lib/modules" 2>/dev/null || true
+    echo "$so_b64" | base64 -d > "$dest_so" || die "failed to decode and write binary to $dest_so" 1
+    chmod 0755 "$dest_so"
+
+    echo "  [2/2] Registering configuration in conf.d and reloading FPM..." >&2
+    ini_path="$HP_PHP_ETC_ROOT/$version/mods-available/${extension}.ini"
+    mkdir -p "$HP_PHP_ETC_ROOT/$version/mods-available" "$HP_PHP_ETC_ROOT/$version/fpm/conf.d" 2>/dev/null || true
+    if [ "$is_zend" = "true" ] || [ "$is_zend" = "1" ]; then
+        echo "zend_extension=$dest_so" > "$ini_path"
+    else
+        echo "extension=$dest_so" > "$ini_path"
+    fi
+    ln -sf "$ini_path" "$HP_PHP_ETC_ROOT/$version/fpm/conf.d/00-${extension}.ini" 2>/dev/null || true
+
+    act systemctl reload "$(fpm_unit "$version")" 2>/dev/null || true
+    echo "  ✓ Binary module '$extension' activated successfully." >&2
+    printf '{"version":"%s","extension":"%s","installed":true,"path":"%s"}\n' "$version" "$extension" "$dest_so"
+    ;;
+
+  extension-uninstall)
+    require_argc 2 $# "extension-uninstall <version> <extension>"
+    version="$1"; extension="$2"
+    valid_php_version "$version"
+    valid_extension_name "$extension"
+
+    echo "============================================================" >&2
+    echo "  HostPanel v3 — Uninstalling Extension '$extension' (PHP $version)" >&2
+    echo "============================================================" >&2
+    if is_dryrun; then
+        echo "WOULD-EXEC: remove extension $extension for PHP $version" >&2
+        printf '{"version":"%s","extension":"%s","uninstalled":true}\n' "$version" "$extension"
+        exit 0
+    fi
+
+    echo "  [1/3] Removing configuration files..." >&2
+    rm -f "$HP_PHP_ETC_ROOT/$version/fpm/conf.d"/*"${extension}.ini" "/etc/php/$version/fpm/conf.d"/*"${extension}.ini" 2>/dev/null || true
+    rm -f "$HP_PHP_ETC_ROOT/$version/mods-available/${extension}.ini" 2>/dev/null || true
+
+    echo "  [2/3] Removing module binary from isolated directory..." >&2
+    rm -f "$HP_PHP_RUNTIMES_ROOT/$version/lib/modules/${extension}.so" 2>/dev/null || true
+
+    echo "  [3/3] Removing apt package if installed via apt..." >&2
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get remove -y "php${version}-${extension}" 2>&1 || true
+
+    act systemctl reload "$(fpm_unit "$version")" 2>/dev/null || true
+    echo "  ✓ Extension '$extension' uninstalled successfully." >&2
+    printf '{"version":"%s","extension":"%s","uninstalled":true}\n' "$version" "$extension"
+    ;;
+
+  # ── configuration & php.ini ─────────────────────────────────────────────────
+  config-get)
+    [ $# -ge 1 ] && [ $# -le 2 ] || die "expected 1 or 2 argument(s), got $# — usage: config-get <version> [target:fpm|cli]" 12
+    version="$1"; target="${2:-fpm}"
+    valid_php_version "$version"
+    require_version_installed "$version"
+
+    ini_file="$HP_PHP_ETC_ROOT/$version/$target/php.ini"
+    if [ ! -f "$ini_file" ]; then
+        ini_file="$HP_PHP_ETC_ROOT/$version/php.ini"
+    fi
+    if [ ! -f "$ini_file" ]; then
+        ini_file="/etc/php/$version/$target/php.ini"
+    fi
+    if [ ! -f "$ini_file" ]; then
+        ini_file="/etc/php/$version/php.ini"
+    fi
+    [ -f "$ini_file" ] || die "php.ini for PHP $version ($target) not found" 10
+
+    content="$(cat "$ini_file")"
+    content_b64="$(printf '%s' "$content" | base64 | tr -d '\n')"
+    printf '{"version":"%s","target":"%s","path":"%s","content_b64":"%s"}\n' \
+        "$version" "$target" "$ini_file" "$content_b64"
+    ;;
+
+  config-set)
+    [ $# -ge 2 ] && [ $# -le 3 ] || die "expected 2 or 3 argument(s), got $# — usage: config-set <version> <content_b64> [target:fpm|cli]" 12
+    version="$1"; content_b64="$2"; target="${3:-fpm}"
+    valid_php_version "$version"
+    require_version_installed "$version"
+
+    dest_ini="$HP_PHP_ETC_ROOT/$version/$target/php.ini"
+    [ -f "$dest_ini" ] || dest_ini="$HP_PHP_ETC_ROOT/$version/php.ini"
+    sys_ini="/etc/php/$version/$target/php.ini"
+
+    if is_dryrun; then
+        echo "WOULD-WRITE: $dest_ini" >&2
+        printf '{"version":"%s","saved":true}\n' "$version"
+        exit 0
+    fi
+
+    mkdir -p "$(dirname "$dest_ini")" 2>/dev/null || true
+    echo "$content_b64" | base64 -d | atomic_write "$dest_ini" 0644
+    if [ -f "$HP_PHP_ETC_ROOT/$version/php.ini" ] && [ "$dest_ini" != "$HP_PHP_ETC_ROOT/$version/php.ini" ]; then
+        echo "$content_b64" | base64 -d | atomic_write "$HP_PHP_ETC_ROOT/$version/php.ini" 0644 2>/dev/null || true
+    fi
+    if [ -f "$sys_ini" ]; then
+        echo "$content_b64" | base64 -d | atomic_write "$sys_ini" 0644
+    fi
+
+    act systemctl reload "$(fpm_unit "$version")" 2>/dev/null || true
+    printf '{"version":"%s","target":"%s","saved":true}\n' "$version" "$target"
+    ;;
+
+  directives-get)
+    require_argc 1 $# "directives-get <version>"
+    version="$1"
+    valid_php_version "$version"
+    require_version_installed "$version"
+
+    ini_file="$HP_PHP_ETC_ROOT/$version/fpm/php.ini"
+    if [ ! -f "$ini_file" ]; then
+        ini_file="$HP_PHP_ETC_ROOT/$version/php.ini"
+    fi
+    if [ ! -f "$ini_file" ]; then
+        ini_file="/etc/php/$version/fpm/php.ini"
+    fi
+    [ -f "$ini_file" ] || die "php.ini not found for PHP $version" 10
+
+    get_val() {
+        grep -E "^[[:space:]]*$1[[:space:]]*=" "$ini_file" 2>/dev/null | head -n 1 | awk -F '=' '{print $2}' | tr -d ' "\t\r' || echo "$2"
+    }
+
+    upload_max="$(get_val "upload_max_filesize" "64M")"
+    post_max="$(get_val "post_max_size" "64M")"
+    mem_limit="$(get_val "memory_limit" "256M")"
+    max_exec="$(get_val "max_execution_time" "120")"
+    max_input_time="$(get_val "max_input_time" "60")"
+    max_input_vars="$(get_val "max_input_vars" "1000")"
+    tz="$(get_val "date.timezone" "UTC")"
+    disp_err="$(get_val "display_errors" "Off")"
+    op_enable="$(get_val "opcache.enable" "1")"
+
+    printf '{"version":"%s","upload_max_filesize":"%s","post_max_size":"%s","memory_limit":"%s","max_execution_time":%s,"max_input_time":%s,"max_input_vars":%s,"timezone":"%s","display_errors":"%s","opcache_enable":"%s"}\n' \
+        "$version" "${upload_max:-64M}" "${post_max:-64M}" "${mem_limit:-256M}" "${max_exec:-120}" "${max_input_time:-60}" "${max_input_vars:-1000}" "${tz:-UTC}" "${disp_err:-Off}" "${op_enable:-1}"
+    ;;
+
+  directives-set)
+    require_argc 1 $# "directives-set <version> [upload_max] [post_max] [memory] [max_exec] [max_input_time] [max_input_vars] [timezone] [display_errors] [opcache]"
+    version="$1"; shift
+    valid_php_version "$version"
+    require_version_installed "$version"
+
+    ini_file="$HP_PHP_ETC_ROOT/$version/fpm/php.ini"
+    if [ ! -f "$ini_file" ]; then
+        ini_file="$HP_PHP_ETC_ROOT/$version/php.ini"
+    fi
+    if [ ! -f "$ini_file" ]; then
+        ini_file="/etc/php/$version/fpm/php.ini"
+    fi
+    [ -f "$ini_file" ] || die "php.ini not found" 10
+
+    set_val() {
+        local key="$1" val="$2"
+        [ -n "$val" ] || return 0
+        if grep -q "^[[:space:]]*$key[[:space:]]*=" "$ini_file"; then
+            sed -i -E "s|^[[:space:]]*$key[[:space:]]*=.*|$key = $val|g" "$ini_file"
+        elif grep -q "^[[:space:]]*;[[:space:]]*$key[[:space:]]*=" "$ini_file"; then
+            sed -i -E "s|^[[:space:]]*;[[:space:]]*$key[[:space:]]*=.*|$key = $val|g" "$ini_file"
+        else
+            echo "$key = $val" >> "$ini_file"
+        fi
+    }
+
+    upload_max="${1:-}"; post_max="${2:-}"; mem_limit="${3:-}"; max_exec="${4:-}"; max_input_t="${5:-}"; max_input_v="${6:-}"; tz="${7:-}"; disp_err="${8:-}"; op_enable="${9:-}"
+
+    if is_dryrun; then
+        echo "WOULD-UPDATE: $ini_file with directives" >&2
+        printf '{"version":"%s","updated":true}\n' "$version"
+        exit 0
+    fi
+
+    set_val "upload_max_filesize" "$upload_max"
+    set_val "post_max_size" "$post_max"
+    set_val "memory_limit" "$mem_limit"
+    set_val "max_execution_time" "$max_exec"
+    set_val "max_input_time" "$max_input_t"
+    set_val "max_input_vars" "$max_input_v"
+    set_val "date.timezone" "$tz"
+    set_val "display_errors" "$disp_err"
+    set_val "opcache.enable" "$op_enable"
+
+    # Also sync to /etc/php if different
+    if [ "$ini_file" != "/etc/php/$version/fpm/php.ini" ] && [ -f "/etc/php/$version/fpm/php.ini" ]; then
+        cp "$ini_file" "/etc/php/$version/fpm/php.ini" 2>/dev/null || true
+    fi
+
+    act systemctl reload "$(fpm_unit "$version")" 2>/dev/null || true
+    printf '{"version":"%s","updated":true}\n' "$version"
+    ;;
+
+  # ── live logs ───────────────────────────────────────────────────────────────
+  logs-get)
+    [ $# -le 3 ] || die "expected 0 to 3 arguments" 12
+    version="${1:-}"
+    log_type="${2:-error}"
+    lines_count="${3:-50}"
+
+    [ -n "$version" ] || version="$(installed_versions | head -n 1 || echo "8.4")"
+    lines_count=$(( lines_count > 500 ? 500 : (lines_count < 1 ? 50 : lines_count) ))
+
+    log_path="$HP_PHP_LOG_ROOT/php${version}-fpm.log"
+    [ -f "$log_path" ] || log_path="/var/log/php${version}-fpm.log"
+
+    python3 - "$version" "$log_type" "$log_path" "$lines_count" "$(fpm_unit "$version")" <<'PYEOF'
+import json, sys, os, subprocess
+
+version, log_type, log_path, lines_str, unit = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+lines_count = int(lines_str)
+lines = []
+
+if os.path.isfile(log_path):
+    try:
+        with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
+            all_lines = f.read().splitlines()
+            lines = all_lines[-lines_count:]
+    except Exception:
+        pass
+else:
+    try:
+        res = subprocess.run(
+            ["journalctl", "-u", unit, "-n", str(lines_count), "--no-pager", "--output=cat"],
+            capture_output=True, text=True, timeout=3
+        )
+        if res.returncode == 0:
+            lines = res.stdout.splitlines()
+    except Exception:
+        pass
+
+print(json.dumps({
+    "version": version,
+    "type": log_type,
+    "path": log_path,
+    "lines": lines
+}))
+PYEOF
+    ;;
+
+  # ── pools ───────────────────────────────────────────────────────────────────
+  list-pools)
+    [ $# -le 1 ] || die "expected 0 or 1 argument(s), got $#" 12
+    filter="${1:-}"
+    if [ -n "$filter" ]; then
+        valid_php_version "$filter"
+        require_version_installed "$filter"
+    fi
+
+    printf '{"pools":['
+    first=1
+    for v in $(installed_versions); do
+        [ -z "$filter" ] || [ "$v" = "$filter" ] || continue
+        pooldir="$HP_PHP_ETC_ROOT/$v/fpm/pool.d"
+        [ -d "$pooldir" ] || continue
+        for conf in "$pooldir"/*.conf; do
+            [ -f "$conf" ] || continue
+            pool="$(basename "$conf" .conf)"
+            [ "$first" = "1" ] && first=0 || printf ','
+            pool_json "$pool" "$v" "$conf"
+        done
+    done
+    printf ']}\n'
+    ;;
+
+  get-pool)
+    require_argc 1 $# "get-pool <pool>"
+    pool="$1"
+    valid_pool_name "$pool"
+    version="$(find_pool_version "$pool")" || die "pool '$pool' not found" 10
+    conf="$(pool_conf_path "$pool" "$version")"
+    pool_json "$pool" "$version" "$conf"
+    printf '\n'
+    ;;
+
+  create-pool)
+    require_argc 4 $# "create-pool <pool> <version> <memory-limit> <max-execution-time>"
+    pool="$1"; version="$2"; memory_limit="$3"; max_exec="$4"
+    valid_pool_name "$pool"
+    valid_php_version "$version"
+    valid_memory_limit "$memory_limit"
+    valid_exec_time "$max_exec"
+    guard_reserved_pool "$pool"
+    require_version_installed "$version"
+
+    if find_pool_version "$pool" >/dev/null 2>&1; then
+        die "pool '$pool' already exists" 13
+    fi
+
+    conf="$(pool_conf_path "$pool" "$version")"
+    if is_dryrun; then
+        echo "WOULD-WRITE: $conf" >&2
+    else
+        render_pool "$pool" "$version" "$memory_limit" "$max_exec" | atomic_write "$conf" 0644
+    fi
+
+    act systemctl reload "$(fpm_unit "$version")" 2>/dev/null || true
+    if is_dryrun; then
+        printf '{"pool":"%s","version":"%s","memory_limit":"%s","max_execution_time":%s,"socket":"%s"}\n' \
+            "$pool" "$version" "$memory_limit" "$max_exec" "$(pool_socket "$pool" "$version")"
+    else
+        pool_json "$pool" "$version" "$conf"
+        printf '\n'
+    fi
+    ;;
+
+  delete-pool)
+    require_argc 1 $# "delete-pool <pool>"
+    pool="$1"
+    valid_pool_name "$pool"
+    guard_reserved_pool "$pool"
+    version="$(find_pool_version "$pool")" || die "pool '$pool' not found" 10
+
+    conf="$(pool_conf_path "$pool" "$version")"
+    if is_dryrun; then
+        echo "WOULD-REMOVE: $conf" >&2
+    else
+        rm -f "$conf"
+    fi
+    rm -f "$(pool_socket "$pool" "$version")" 2>/dev/null || true
+    act systemctl reload "$(fpm_unit "$version")" 2>/dev/null || true
+    printf '{"pool":"%s","deleted":true}\n' "$pool"
+    ;;
+
+  set-pool-version)
+    require_argc 2 $# "set-pool-version <pool> <new-version>"
+    pool="$1"; new_version="$2"
+    valid_pool_name "$pool"
+    valid_php_version "$new_version"
+    guard_reserved_pool "$pool"
+    require_version_installed "$new_version"
+
+    old_version="$(find_pool_version "$pool")" || die "pool '$pool' not found" 10
+    [ "$old_version" != "$new_version" ] || die "pool '$pool' is already running PHP $new_version" 13
+
+    old_conf="$(pool_conf_path "$pool" "$old_version")"
+    new_conf="$(pool_conf_path "$pool" "$new_version")"
+    memory_limit="$(grep '^php_admin_value\[memory_limit\]' "$old_conf" 2>/dev/null | awk '{print $NF}' || echo "128M")"
+    max_exec="$(grep '^php_admin_value\[max_execution_time\]' "$old_conf" 2>/dev/null | awk '{print $NF}' || echo "30")"
+
+    if is_dryrun; then
+        echo "WOULD-MOVE: $old_conf -> $new_conf" >&2
+    else
+        render_pool "$pool" "$new_version" "$memory_limit" "$max_exec" | atomic_write "$new_conf" 0644
+        rm -f "$old_conf"
+    fi
+
+    rm -f "$(pool_socket "$pool" "$old_version")" 2>/dev/null || true
+    act systemctl reload "$(fpm_unit "$old_version")" 2>/dev/null || true
+    act systemctl reload "$(fpm_unit "$new_version")" 2>/dev/null || true
+
+    if is_dryrun; then
+        printf '{"pool":"%s","version":"%s","moved":true}\n' "$pool" "$new_version"
+    else
+        pool_json "$pool" "$new_version" "$new_conf"
+        printf '\n'
+    fi
+    ;;
+
+  set-pool-limits)
+    require_argc 3 $# "set-pool-limits <pool> <memory-limit> <max-execution-time>"
+    pool="$1"; memory_limit="$2"; max_exec="$3"
+    valid_pool_name "$pool"
+    valid_memory_limit "$memory_limit"
+    valid_exec_time "$max_exec"
+    guard_reserved_pool "$pool"
+    version="$(find_pool_version "$pool")" || die "pool '$pool' not found" 10
+
+    conf="$(pool_conf_path "$pool" "$version")"
+    if is_dryrun; then
+        echo "WOULD-WRITE: $conf (mem=$memory_limit, exec=$max_exec)" >&2
+    else
+        render_pool "$pool" "$version" "$memory_limit" "$max_exec" | atomic_write "$conf" 0644
+    fi
+    act systemctl reload "$(fpm_unit "$version")" 2>/dev/null || true
+
+    if is_dryrun; then
+        printf '{"pool":"%s","version":"%s","memory_limit":"%s","max_execution_time":%s,"socket":"%s"}\n' \
+            "$pool" "$version" "$memory_limit" "$max_exec" "$(pool_socket "$pool" "$version")"
+    else
+        pool_json "$pool" "$version" "$conf"
+        printf '\n'
+    fi
+    ;;
+
+  restart-fpm)
+    [ $# -le 1 ] || die "expected 0 or 1 argument(s)" 12
+    version="${1:-all}"
+    if [ "$version" != "all" ] && [ -n "$version" ]; then
+        valid_php_version "$version"
+        require_version_installed "$version"
+        act systemctl restart "$(fpm_unit "$version")" 2>/dev/null || true
+        printf '{"version":"%s","restarted":true}\n' "$version"
+    else
+        for v in $(installed_versions); do
+            act systemctl restart "$(fpm_unit "$v")" 2>/dev/null || true
+        done
+        printf '{"version":"all","restarted":true}\n'
+    fi
+    ;;
+
+  *)
+    die "unknown verb: $verb" 12
+    ;;
+esac

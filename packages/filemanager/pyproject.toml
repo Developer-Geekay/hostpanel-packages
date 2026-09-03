@@ -1,0 +1,14 @@
+[project]
+name = "hostpanel-filemanagerd"
+version = "3.0.0"
+requires-python = ">=3.11"
+description = "HostPanel v3 — filemanager package API"
+dependencies = ["fastapi", "uvicorn", "hostpanel-portald", "python-multipart"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["api"]
+include = ["hostpanel_filemanagerd*"]

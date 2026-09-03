@@ -1,0 +1,22 @@
+[Unit]
+Description=HostPanel SSL and ACME package API
+After=network.target
+
+[Service]
+Type=simple
+User=hp-ssl
+Group=hp-ssl
+EnvironmentFile=-/opt/hostpanel/etc/ssl.env
+ExecStart=/opt/hostpanel/venv/bin/python -m hostpanel_ssld
+Restart=on-failure
+RestartSec=5s
+
+# Isolation sandbox
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/hostpanel/etc/ssl /opt/hostpanel/data/ssl /opt/hostpanel/data/acme /opt/hostpanel/logs/ssl /opt/hostpanel/run/ssl /opt/hostpanel/run /tmp
+PrivateTmp=true
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target

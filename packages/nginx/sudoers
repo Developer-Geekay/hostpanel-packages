@@ -1,0 +1,1 @@
+hp-nginx ALL=(root) NOPASSWD: /opt/hostpanel/packages/nginx/ops/hp-nginx *

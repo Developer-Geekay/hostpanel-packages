@@ -1,0 +1,207 @@
+#!/bin/bash
+# hp-users — root helper for the HostPanel v3 users daemon.
+#
+# Installed root-owned 0755. The daemon's sudoers file grants THIS SINGLE PATH
+# and nothing else, so `hp-users` (the daemon account) can never invoke useradd,
+# userdel, usermod or chpasswd directly — only through the validation below.
+#
+#   hp-users ALL=(root) NOPASSWD: /opt/hostpanel/daemons/users/ops/hp-users *
+#
+# Modelled on the v2 hp-nodejs-deploy helper, which established this shape.
+#
+# Verbs: list get create delete set-password lock unlock chown-home
+# Exit:  0 ok | 1 internal | 10 not found | 11 precondition | 12 validation
+#        13 conflict | 14 denied | 20 dependency
+#
+# stdout is DATA (JSON where structured). stderr is DIAGNOSTICS.
+
+set -euo pipefail
+
+# OPS_NAME is consumed by die()/warn() in common.sh, which shellcheck
+# cannot see because the source path is a variable.
+# shellcheck disable=SC2034
+OPS_NAME="hp-users"
+# shellcheck source=lib/common.sh
+# Shared validators live in hpcore, not in this package: every package's ops
+# script sources the same file, so the validate-then-act rules cannot drift
+# between features. HP_CORE_LIB lets the test suite point at the repo copy;
+# in production it defaults to the installed path.
+# Pinned when root: sudo always invokes this as root, so the environment cannot
+# redirect a privileged script at an attacker-controlled copy of the validators.
+# Overridable only unprivileged, which is how the test suite runs.
+if [ "$(id -u)" = "0" ]; then
+    HP_CORE_LIB=/opt/hostpanel/hpcore/lib
+else
+    : "${HP_CORE_LIB:=/opt/hostpanel/hpcore/lib}"
+fi
+# The library path is resolved at runtime from HP_CORE_LIB, so no static
+# path is correct in every context and shellcheck cannot follow it.
+# shellcheck disable=SC1091
+. "$HP_CORE_LIB/common.sh"
+
+# Roots are overridable ONLY when not running as root, so the negative-test
+# suite can point them at a scratch directory on a developer machine. As root —
+# which is how sudo always invokes this — they are pinned to their real values
+# and the environment is ignored entirely.
+#
+# This does not rely on sudo's env_reset stripping the variable. Relying on that
+# would make an environment-controlled root inside a sudo-reachable root script
+# safe only by accident; pinning makes it safe by construction.
+if [ "$(id -u)" = "0" ]; then
+    HP_HOME_ROOT=/home
+    HP_MIN_UID=1000
+else
+    : "${HP_HOME_ROOT:=/home}"
+    : "${HP_MIN_UID:=1000}"
+fi
+
+usage() {
+    cat >&2 <<'EOF'
+usage: hp-users <verb> [args]
+  list
+  get           <username>
+  create        <username> <shell>      [optional: password\\0<value>\\0 on stdin]
+  delete        <username> <remove-home:0|1>
+  set-password  <username>              [required: password\\0<value>\\0 on stdin]
+  lock          <username>
+  unlock        <username>
+  chown-home    <username> <path>
+EOF
+    exit 12
+}
+
+[ $# -ge 1 ] || usage
+verb="$1"; shift
+
+case "$verb" in
+
+  list)
+    require_argc 0 $# "list"
+    passwd_db | sort -t: -k1,1 | awk -F: -v min="$HP_MIN_UID" '
+        BEGIN { printf "{\"users\":["; n = 0 }
+        $3 >= min && $1 != "nobody" && $1 != "ubuntu" {
+            status = ($7 == "/bin/false" || $7 == "/usr/sbin/nologin") ? "suspended" : "active"
+            if (n++) printf ","
+            printf "{\"username\":\"%s\",\"uid\":%d,\"home\":\"%s\",\"shell\":\"%s\",\"status\":\"%s\"}", $1, $3, $6, $7, status
+        }
+        END { print "]}" }'
+    ;;
+
+  get)
+    require_argc 1 $# "get <username>"
+    valid_username "$1"
+    require_user_exists "$1"
+    user_json "$1"
+    ;;
+
+  create)
+    require_argc 2 $# "create <username> <shell>"
+    username="$1"; shell="$2"
+    valid_username "$username"
+    valid_shell "$shell"
+    # Refuse a name that WOULD be protected, before it exists. Checking only
+    # after creation would let 'root' through when it is somehow absent.
+    case "$username" in
+        root|daemon|bin|sys|nobody|ubuntu|"$HP_PANEL_USER"|hp-*)
+            die "'$username' is a reserved account name" 14 ;;
+    esac
+    require_user_absent "$username"
+
+    read_secrets
+    password="$(secret password)"
+
+    act useradd -m -s "$shell" "$username" || die "useradd failed for '$username'" 20
+
+    if [ -n "$password" ]; then
+        if is_dryrun; then
+            echo "WOULD-EXEC: chpasswd <<< '$username:<redacted>'" >&2
+        else
+            # Password on stdin. It must never appear in argv.
+            printf '%s:%s\n' "$username" "$password" | chpasswd \
+                || die "user '$username' was created but the password could not be set" 20
+        fi
+    fi
+
+    if is_dryrun; then
+        printf '{"username":"%s","created":true}\n' "$username"
+    else
+        user_json "$username"
+    fi
+    ;;
+
+  delete)
+    require_argc 2 $# "delete <username> <remove-home:0|1>"
+    username="$1"; remove_home="$2"
+    valid_username "$username"
+    case "$remove_home" in 0|1) ;; *) die "remove-home must be 0 or 1" 12 ;; esac
+    guard_protected "$username"
+    require_user_exists "$username"
+
+    if [ "$remove_home" = "1" ]; then
+        act userdel -r "$username" || die "userdel failed for '$username'" 20
+    else
+        act userdel "$username" || die "userdel failed for '$username'" 20
+    fi
+    printf '{"username":"%s","deleted":true,"home_removed":%s}\n' \
+        "$username" "$([ "$remove_home" = "1" ] && echo true || echo false)"
+    ;;
+
+  set-password)
+    require_argc 1 $# "set-password <username>"
+    username="$1"
+    # Argument shape first, preconditions second. Checking existence before the
+    # secret is present would report 'user not found' for a malformed call,
+    # which sends the caller looking in the wrong place.
+    valid_username "$username"
+    guard_protected "$username"
+    read_secrets
+    password="$(secret password)"
+    [ -n "$password" ] || die "no password supplied on stdin" 12
+    require_user_exists "$username"
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: chpasswd <<< '$username:<redacted>'" >&2
+    else
+        printf '%s:%s\n' "$username" "$password" | chpasswd \
+            || die "chpasswd failed for '$username'" 20
+    fi
+    printf '{"username":"%s","password_set":true}\n' "$username"
+    ;;
+
+  lock)
+    require_argc 1 $# "lock <username>"
+    valid_username "$1"
+    guard_protected "$1"
+    require_user_exists "$1"
+    act usermod -L -s /usr/sbin/nologin "$1" || die "usermod failed for '$1'" 20
+    printf '{"username":"%s","locked":true}\n' "$1"
+    ;;
+
+  unlock)
+    require_argc 1 $# "unlock <username>"
+    valid_username "$1"
+    guard_protected "$1"
+    require_user_exists "$1"
+    act usermod -U -s /bin/bash "$1" || die "usermod failed for '$1'" 20
+    printf '{"username":"%s","locked":false}\n' "$1"
+    ;;
+
+  chown-home)
+    require_argc 2 $# "chown-home <username> <path>"
+    username="$1"; raw_path="$2"
+    valid_username "$username"
+    guard_protected "$username"
+    # Path shape BEFORE existence: a traversal attempt must report VALIDATION,
+    # not NOT_FOUND, or the rejection reason is hidden behind an unrelated error.
+    # The full sequence: absolute -> no '..' -> prefix -> realpath -> re-check.
+    # The re-check is what defeats a symlink planted inside the home root.
+    resolved="$(resolve_and_recheck "$raw_path" "$HP_HOME_ROOT")"
+    require_user_exists "$username"
+    act chown -R "$username:$username" "$resolved" || die "chown failed on '$resolved'" 20
+    printf '{"username":"%s","path":"%s","owned":true}\n' "$username" "$resolved"
+    ;;
+
+  *)
+    die "unknown verb: $verb" 12
+    ;;
+esac

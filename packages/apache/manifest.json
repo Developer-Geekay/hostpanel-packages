@@ -1,0 +1,240 @@
+{
+  "manifest_version": 1,
+  "feature": "apache",
+  "label": "Apache HTTP Server",
+  "version": "3.0.0",
+  "requires_core": [
+    3,
+    0,
+    0
+  ],
+  "api": {
+    "module": "hostpanel_apached",
+    "unit": "hostpanel-apached.service",
+    "run_as": "hp-apache"
+  },
+  "frontend": {
+    "entry": "frontend/dist/main.js"
+  },
+  "nav": [
+    {
+      "section": "runtime",
+      "section_label": "Web Servers & Runtimes",
+      "section_order": 15,
+      "label": "Apache",
+      "icon": "apache",
+      "order": 20
+    }
+  ],
+  "ops": {
+    "script": "/opt/hostpanel/packages/apache/ops/hp-apache",
+    "sudoers": "hostpanel-apached"
+  },
+  "sandbox": {
+    "read_write_paths": [
+      "/opt/hostpanel/etc/apache",
+      "/opt/hostpanel/data/vhosts",
+      "/opt/hostpanel/logs/apache",
+      "/opt/hostpanel/run",
+      "/tmp"
+    ]
+  },
+  "operations": {
+    "engine.status": {
+      "verb": "engine-status",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "apache.engine.status",
+      "timeout_ms": 10000
+    },
+    "engine.start": {
+      "verb": "engine-start",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "apache.engine.start",
+      "timeout_ms": 15000
+    },
+    "engine.stop": {
+      "verb": "engine-stop",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "apache.engine.stop",
+      "timeout_ms": 15000
+    },
+    "engine.restart": {
+      "verb": "engine-restart",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "apache.engine.restart",
+      "timeout_ms": 15000
+    },
+    "engine.reload": {
+      "verb": "engine-reload",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "apache.engine.reload",
+      "timeout_ms": 15000
+    },
+    "engine.test_config": {
+      "verb": "engine-test",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "apache.engine.test",
+      "timeout_ms": 10000,
+      "params": {
+        "content": {
+          "type": "string",
+          "secret": true
+        }
+      }
+    },
+    "engine.config_get": {
+      "verb": "engine-config-get",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "apache.engine.config.read",
+      "timeout_ms": 5000
+    },
+    "engine.config_set": {
+      "verb": "engine-config-set",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "apache.engine.config.write",
+      "timeout_ms": 15000,
+      "params": {
+        "content": {
+          "type": "string",
+          "secret": true
+        }
+      }
+    },
+    "engine.logs": {
+      "verb": "engine-logs",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "apache.engine.logs",
+      "timeout_ms": 5000,
+      "params": {
+        "lines": {
+          "type": "integer"
+        },
+        "log_type": {
+          "enum": ["error", "access"]
+        },
+        "domain": {
+          "type": "string",
+          "default": ""
+        }
+      }
+    },
+    "engine.install": {
+      "verb": "engine-install",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "apache.engine.install",
+      "timeout_ms": 180000
+    },
+    "vhost.list": {
+      "verb": "vhost-list",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "apache.vhost.list",
+      "timeout_ms": 5000
+    },
+    "vhost.get": {
+      "verb": "vhost-get",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "apache.vhost.read",
+      "timeout_ms": 5000,
+      "params": {
+        "domain": {
+          "type": "string"
+        }
+      }
+    },
+    "vhost.set": {
+      "verb": "vhost-set",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "apache.vhost.write",
+      "timeout_ms": 15000,
+      "params": {
+        "domain": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string",
+          "secret": true
+        }
+      }
+    },
+    "vhost.delete": {
+      "verb": "vhost-delete",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "apache.vhost.delete",
+      "timeout_ms": 15000,
+      "params": {
+        "domain": {
+          "type": "string"
+        }
+      }
+    },
+    "vhost.enable": {
+      "verb": "vhost-enable",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "apache.vhost.enable",
+      "timeout_ms": 10000,
+      "params": {
+        "domain": {
+          "type": "string"
+        }
+      }
+    },
+    "vhost.disable": {
+      "verb": "vhost-disable",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "apache.vhost.disable",
+      "timeout_ms": 10000,
+      "params": {
+        "domain": {
+          "type": "string"
+        }
+      }
+    },
+    "module.list": {
+      "verb": "module-list",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "apache.module.list",
+      "timeout_ms": 5000
+    },
+    "module.enable": {
+      "verb": "module-enable",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "apache.module.enable",
+      "timeout_ms": 15000,
+      "params": {
+        "module": {
+          "type": "string"
+        }
+      }
+    },
+    "module.disable": {
+      "verb": "module-disable",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "apache.module.disable",
+      "timeout_ms": 15000,
+      "params": {
+        "module": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

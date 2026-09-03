@@ -1,0 +1,8 @@
+# HostPanel v3 — mail feature service.
+#
+# ONE grant, ONE script path. hp-mail cannot invoke postfix, dovecot, or postmap
+# directly; only through this script, which validates every argument before acting.
+#
+# Installed 0440 root:root by provision-service.sh, after visudo -c -f.
+
+hp-mail ALL=(root) NOPASSWD: /opt/hostpanel/packages/mail/ops/hp-mail *

@@ -1,0 +1,29 @@
+[Unit]
+Description=HostPanel v3 — mail feature service
+After=network.target
+
+[Service]
+Type=simple
+User=hp-mail
+Group=hp-mail
+
+# Port and token. The token file is root-owned 0640 root:hp-mail, so the service
+# can read its own credential and nothing else on the box can.
+EnvironmentFile=/etc/hostpanel/mail.env
+
+# Loopback ONLY on port 9113. Binding 0.0.0.0 would expose privileged operations to the network.
+ExecStart=/opt/hostpanel/venv/bin/python -m hostpanel_maild
+
+Restart=on-failure
+RestartSec=5
+
+# sudo is setuid, and invoking it is this service's entire purpose.
+NoNewPrivileges=no
+
+ProtectSystem=strict
+ProtectKernelTunables=yes
+MemoryMax=256M
+TasksMax=128
+
+[Install]
+WantedBy=multi-user.target

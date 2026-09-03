@@ -1,0 +1,211 @@
+{
+  "manifest_version": 1,
+  "feature": "wireguard",
+  "label": "WireGuard VPN",
+  "version": "3.0.0",
+  "requires_core": [
+    3,
+    0,
+    0
+  ],
+  "api": {
+    "module": "hostpanel_wireguardd",
+    "unit": "hostpanel-wireguardd.service",
+    "run_as": "hp-wireguard"
+  },
+  "frontend": {
+    "entry": "frontend/dist/main.js"
+  },
+  "nav": [
+    {
+      "section": "network",
+      "section_label": "Network & Access",
+      "section_order": 30,
+      "label": "WireGuard VPN",
+      "icon": "vpn_key",
+      "order": 20
+    }
+  ],
+  "ops": {
+    "script": "/opt/hostpanel/packages/wireguard/ops/hp-wireguard",
+    "sudoers": "hostpanel-wireguardd"
+  },
+  "sandbox": {
+    "read_write_paths": [
+      "/opt/hostpanel/etc/wireguard",
+      "/opt/hostpanel/run/wireguard",
+      "/opt/hostpanel/logs/wireguard",
+      "/opt/hostpanel/runtimes/wireguard",
+      "/tmp"
+    ],
+    "_comment": "WireGuard configuration, keys, runtime sockets and logs live exclusively under /opt/hostpanel. 100% isolation enforced. runtimes/wireguard is where engine-install places the bundled wg and wg-quick — the unit runs ProtectSystem=strict and sudo'd children inherit that namespace, so without this path declared the install fails as root with a read-only filesystem error.",
+    "protect_kernel_modules": false,
+    "_comment_protect_kernel_modules": "WireGuard's data plane IS a kernel module. ProtectKernelModules=yes — the default for every other package — blocks modprobe, and a sudo'd child inherits the unit's namespace, so the ops script cannot load it either. The interface then never comes up while every file on disk looks correct. This is the same kind of deliberate, documented exception as NoNewPrivileges=no: narrowed to the one package whose engine lives in the kernel."
+  },
+  "operations": {
+    "wireguard.engine-status": {
+      "verb": "engine-status",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "wireguard.engine_status",
+      "timeout_ms": 10000,
+      "params": {}
+    },
+    "wireguard.engine-install": {
+      "verb": "engine-install",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "wireguard.engine_install",
+      "timeout_ms": 60000,
+      "params": {},
+      "_comment": "Installs the wg/wg-quick pair bundled in this package (155 KB) to runtimes/wireguard/bin and loads the kernel module. Nothing is downloaded or compiled."
+    },
+    "wireguard.engine-uninstall": {
+      "verb": "engine-uninstall",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "wireguard.engine_uninstall",
+      "timeout_ms": 30000,
+      "params": {},
+      "_comment": "Removes runtimes/wireguard only. Configuration, server keys and peers in etc/wireguard survive, so a reinstall keeps every peer."
+    },
+    "wireguard.server-status": {
+      "verb": "server-status",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "wireguard.server_status",
+      "timeout_ms": 10000,
+      "params": {}
+    },
+    "wireguard.server-start": {
+      "verb": "server-start",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "wireguard.server_start",
+      "timeout_ms": 15000,
+      "params": {}
+    },
+    "wireguard.server-stop": {
+      "verb": "server-stop",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "wireguard.server_stop",
+      "timeout_ms": 15000,
+      "params": {}
+    },
+    "wireguard.server-restart": {
+      "verb": "server-restart",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "wireguard.server_restart",
+      "timeout_ms": 15000,
+      "params": {}
+    },
+    "wireguard.server-toggle": {
+      "verb": "server-toggle",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "wireguard.server_toggle",
+      "timeout_ms": 15000,
+      "params": {
+        "enabled": {
+          "enum": [
+            "0",
+            "1"
+          ],
+          "required": true
+        }
+      }
+    },
+    "wireguard.server-config": {
+      "verb": "server-config",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "wireguard.server_config",
+      "timeout_ms": 10000,
+      "params": {}
+    },
+    "wireguard.server-logs": {
+      "verb": "server-logs",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "wireguard.server_logs",
+      "timeout_ms": 10000,
+      "params": {}
+    },
+    "wireguard.list-peers": {
+      "verb": "list-peers",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "wireguard.list_peers",
+      "timeout_ms": 10000,
+      "params": {}
+    },
+    "wireguard.create-peer": {
+      "verb": "create-peer",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "wireguard.create_peer",
+      "timeout_ms": 15000,
+      "params": {
+        "name": {
+          "pattern": "^[a-zA-Z0-9_-]{1,32}$",
+          "required": true
+        },
+        "ip": {
+          "pattern": "^10\\.8\\.0\\.(?:[2-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|254)$",
+          "required": false
+        },
+        "allowed_ips": {
+          "required": false
+        },
+        "dns": {
+          "required": false
+        },
+        "preshared_key": {
+          "secret": true,
+          "required": false
+        }
+      }
+    },
+    "wireguard.delete-peer": {
+      "verb": "delete-peer",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "wireguard.delete_peer",
+      "timeout_ms": 15000,
+      "params": {
+        "id": {
+          "pattern": "^[a-zA-Z0-9_-]{1,64}$",
+          "required": true
+        }
+      }
+    },
+    "wireguard.get-peer-config": {
+      "verb": "get-peer-config",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "wireguard.get_peer_config",
+      "timeout_ms": 10000,
+      "params": {
+        "id": {
+          "pattern": "^[a-zA-Z0-9_-]{1,64}$",
+          "required": true
+        }
+      }
+    },
+    "wireguard.get-peer-qr": {
+      "verb": "get-peer-qr",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "wireguard.get_peer_qr",
+      "timeout_ms": 10000,
+      "params": {
+        "id": {
+          "pattern": "^[a-zA-Z0-9_-]{1,64}$",
+          "required": true
+        }
+      }
+    }
+  }
+}

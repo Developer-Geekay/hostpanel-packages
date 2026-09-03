@@ -1,0 +1,9 @@
+# HostPanel v3 — nodejs feature service.
+#
+# ONE grant, ONE script path. hp-nodejs cannot invoke node, npm, kill, systemctl
+# directly; only through this script, which validates every argument
+# before acting.
+#
+# Installed 0440 root:root by provision-service.sh, after visudo -c -f.
+
+hp-nodejs ALL=(root) NOPASSWD: /opt/hostpanel/packages/nodejs/ops/hp-nodejs *

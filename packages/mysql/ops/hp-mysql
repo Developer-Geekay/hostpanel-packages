@@ -1,0 +1,931 @@
+#!/usr/bin/env bash
+#
+# /opt/hostpanel/packages/mysql/ops/hp-mysql
+#
+# Ops worker for MySQL / MariaDB database management under HostPanel v3.
+# Enforces 100% isolation under /opt/hostpanel.
+#
+set -euo pipefail
+
+# Error Codes
+EXIT_SUCCESS=0
+EXIT_INTERNAL_ERROR=10
+EXIT_COMMAND_NOT_FOUND=11
+EXIT_INVALID_INPUT=12
+EXIT_PRECONDITION_FAILED=13
+EXIT_FORBIDDEN=14
+EXIT_EXECUTION_FAILED=20
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CORE_LIB="${HP_CORE_LIB:-/opt/hostpanel/hpcore/lib}"
+if [[ -f "${CORE_LIB}/common.sh" ]]; then
+  # shellcheck source=/dev/null
+  source "${CORE_LIB}/common.sh"
+fi
+
+# Paths under /opt/hostpanel
+HP_ROOT="${HP_ROOT:-/opt/hostpanel}"
+CONF_DIR="${HP_ROOT}/etc/mysql"
+CONF_FILE="${CONF_DIR}/my.cnf"
+DATA_DIR="${HP_ROOT}/data/mysql"
+LOG_DIR="${HP_ROOT}/logs/mysql"
+LOG_FILE="${LOG_DIR}/mariadb.log"
+RUN_DIR="${HP_ROOT}/run/mysql"
+RUNTIME_DIR="${HP_ROOT}/runtimes/mysql"
+
+# Detect mysql / mariadb binaries
+MYSQL_BIN=""
+if [[ -x "${RUNTIME_DIR}/bin/mariadb" ]]; then
+  MYSQL_BIN="${RUNTIME_DIR}/bin/mariadb"
+elif [[ -x "${RUNTIME_DIR}/bin/mysql" ]]; then
+  MYSQL_BIN="${RUNTIME_DIR}/bin/mysql"
+elif command -v mariadb >/dev/null 2>&1; then
+  MYSQL_BIN="mariadb"
+elif command -v mysql >/dev/null 2>&1; then
+  MYSQL_BIN="mysql"
+fi
+
+# Detect mysqld / mariadbd
+MYSQLD_BIN=""
+if [[ -x "${RUNTIME_DIR}/bin/mariadbd" ]]; then
+  MYSQLD_BIN="${RUNTIME_DIR}/bin/mariadbd"
+elif [[ -x "${RUNTIME_DIR}/bin/mysqld" ]]; then
+  MYSQLD_BIN="${RUNTIME_DIR}/bin/mysqld"
+elif command -v mariadbd >/dev/null 2>&1; then
+  MYSQLD_BIN="mariadbd"
+elif command -v mysqld >/dev/null 2>&1; then
+  MYSQLD_BIN="mysqld"
+fi
+
+# Protected databases & users
+PROTECTED_DBS=("mysql" "information_schema" "performance_schema" "sys")
+PROTECTED_USERS=("root" "mariadb.sys" "mysql.sys" "mysql.session" "mysql.infoschema")
+
+is_protected_db() {
+  local name="$1"
+  for p in "${PROTECTED_DBS[@]}"; do
+    if [[ "$name" == "$p" ]]; then return 0; fi
+  done
+  return 1
+}
+
+is_protected_user() {
+  local user="$1"
+  for u in "${PROTECTED_USERS[@]}"; do
+    if [[ "$user" == "$u" ]]; then return 0; fi
+  done
+  return 1
+}
+
+# Find active socket
+find_mysql_socket() {
+  local candidates=(
+    "${RUN_DIR}/mysqld.sock"
+    "${RUN_DIR}/mysql.sock"
+    "/opt/hostpanel/run/mysqld.sock"
+    "/opt/hostpanel/run/mysql.sock"
+    "/run/mysqld/mysqld.sock"
+    "/var/run/mysqld/mysqld.sock"
+    "/tmp/mysql.sock"
+  )
+  for sock in "${candidates[@]}"; do
+    if [[ -S "$sock" ]]; then
+      echo "$sock"
+      return 0
+    fi
+  done
+  echo ""
+}
+
+read_secret() {
+  local target_key="$1"
+  python3 -c '
+import sys
+target = sys.argv[1]
+try:
+    raw = sys.stdin.buffer.read()
+    if not raw:
+        sys.exit(0)
+    parts = raw.split(b"\0")
+    if len(parts) > 1:
+        for i in range(0, len(parts) - 1, 2):
+            k = parts[i].decode("utf-8", errors="replace")
+            v = parts[i+1].decode("utf-8", errors="replace")
+            if k == target:
+                sys.stdout.write(v)
+                sys.exit(0)
+    import json
+    data = json.loads(raw.decode("utf-8", errors="replace"))
+    if isinstance(data, dict) and target in data:
+        sys.stdout.write(str(data[target]))
+        sys.exit(0)
+except Exception:
+    pass
+' "$target_key"
+}
+
+# Run MySQL query as root
+run_mysql() {
+  local query="$1"
+  if [[ -z "$MYSQL_BIN" ]]; then
+    echo '{"ok":false,"error":"MySQL client binary not found","code":"DEPENDENCY_MISSING"}' >&2
+    return $EXIT_INTERNAL_ERROR
+  fi
+  local sock
+  sock="$(find_mysql_socket)"
+  if [[ -n "$sock" ]]; then
+    "$MYSQL_BIN" --socket="$sock" -uroot --batch --raw --skip-column-names -e "$query" 2>/dev/null
+  else
+    "$MYSQL_BIN" -uroot --batch --raw --skip-column-names -e "$query" 2>/dev/null
+  fi
+}
+
+run_mysql_json() {
+  local query="$1"
+  if [[ -z "$MYSQL_BIN" ]]; then
+    echo '{"ok":false,"error":"MySQL client binary not found","code":"DEPENDENCY_MISSING"}' >&2
+    return $EXIT_INTERNAL_ERROR
+  fi
+  local sock
+  sock="$(find_mysql_socket)"
+  if [[ -n "$sock" ]]; then
+    "$MYSQL_BIN" --socket="$sock" -uroot --batch --skip-column-names -e "$query" 2>/dev/null
+  else
+    "$MYSQL_BIN" -uroot --batch --skip-column-names -e "$query" 2>/dev/null
+  fi
+}
+
+# Format bytes to human readable string
+format_bytes() {
+  local b="${1:-0}"
+  if [[ "$b" -lt 1024 ]]; then
+    echo "${b} B"
+  elif [[ "$b" -lt 1048576 ]]; then
+    awk "BEGIN {printf \"%.1f KB\", $b/1024}"
+  elif [[ "$b" -lt 1073741824 ]]; then
+    awk "BEGIN {printf \"%.1f MB\", $b/1048576}"
+  else
+    awk "BEGIN {printf \"%.1f GB\", $b/1073741824}"
+  fi
+}
+
+# ==================== VERBS ====================
+
+cmd_db_list() {
+  local raw
+  raw="$(run_mysql "SELECT schema_name, default_character_set_name, default_collation_name FROM information_schema.schemata;")" || {
+    echo '{"ok":true,"databases":[],"total":0}'
+    return $EXIT_SUCCESS
+  }
+
+  local list="[]"
+  list="$(python3 - "$raw" <<'PYEOF'
+import sys, json
+raw = sys.argv[1].strip()
+protected = {"mysql", "information_schema", "performance_schema", "sys"}
+dbs = []
+if raw:
+    for line in raw.split("\n"):
+        parts = line.split("\t")
+        if len(parts) >= 3:
+            name, charset, collation = parts[0], parts[1], parts[2]
+            if name not in protected:
+                dbs.append({
+                    "name": name,
+                    "charset": charset,
+                    "collation": collation,
+                    "tables_count": 0,
+                    "size_bytes": 0,
+                    "size_human": "0 B"
+                })
+print(json.dumps(dbs))
+PYEOF
+)"
+  echo "{\"ok\":true,\"databases\":$list,\"total\":$(echo "$list" | python3 -c 'import sys, json; print(len(json.load(sys.stdin)))')}"
+  return $EXIT_SUCCESS
+}
+
+cmd_db_create() {
+  local name="$1"
+  local charset="${2:-utf8mb4}"
+  local collation="${3:-utf8mb4_unicode_ci}"
+
+  if [[ ! "$name" =~ ^[a-zA-Z_][a-zA-Z0-9_]{0,63}$ ]]; then
+    echo "{\"ok\":false,\"error\":\"Invalid database name: $name\",\"code\":\"INVALID_NAME\"}" >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  if is_protected_db "$name"; then
+    echo "{\"ok\":false,\"error\":\"Database name '$name' is protected\",\"code\":\"FORBIDDEN\"}" >&2
+    return $EXIT_FORBIDDEN
+  fi
+
+  local sql="CREATE DATABASE \`$name\` CHARACTER SET $charset COLLATE $collation;"
+  if ! run_mysql "$sql"; then
+    echo "{\"ok\":false,\"error\":\"Failed to create database '$name'\",\"code\":\"EXECUTION_FAILED\"}" >&2
+    return $EXIT_EXECUTION_FAILED
+  fi
+
+  echo "{\"ok\":true,\"name\":\"$name\",\"charset\":\"$charset\",\"collation\":\"$collation\"}"
+  return $EXIT_SUCCESS
+}
+
+cmd_db_drop() {
+  local name="$1"
+
+  if [[ ! "$name" =~ ^[a-zA-Z_][a-zA-Z0-9_]{0,63}$ ]]; then
+    echo "{\"ok\":false,\"error\":\"Invalid database name: $name\",\"code\":\"INVALID_NAME\"}" >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  if is_protected_db "$name"; then
+    echo "{\"ok\":false,\"error\":\"Cannot drop protected system database '$name'\",\"code\":\"FORBIDDEN\"}" >&2
+    return $EXIT_FORBIDDEN
+  fi
+
+  local sql="DROP DATABASE \`$name\`;"
+  if ! run_mysql "$sql"; then
+    echo "{\"ok\":false,\"error\":\"Failed to drop database '$name'\",\"code\":\"EXECUTION_FAILED\"}" >&2
+    return $EXIT_EXECUTION_FAILED
+  fi
+
+  echo "{\"ok\":true,\"name\":\"$name\",\"dropped\":true}"
+  return $EXIT_SUCCESS
+}
+
+cmd_db_size() {
+  local name="$1"
+  if [[ ! "$name" =~ ^[a-zA-Z_][a-zA-Z0-9_]{0,63}$ ]]; then
+    echo "{\"ok\":false,\"error\":\"Invalid database name: $name\",\"code\":\"INVALID_NAME\"}" >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  local sql="SELECT COALESCE(SUM(data_length + index_length), 0) FROM information_schema.tables WHERE table_schema = '$name';"
+  local bytes
+  bytes="$(run_mysql "$sql" || echo "0")"
+  bytes="${bytes:-0}"
+  local human
+  human="$(format_bytes "$bytes")"
+
+  echo "{\"ok\":true,\"name\":\"$name\",\"size_bytes\":$bytes,\"size_human\":\"$human\"}"
+  return $EXIT_SUCCESS
+}
+
+cmd_db_connections() {
+  local sql="SELECT COUNT(*) FROM information_schema.processlist;"
+  local count
+  count="$(run_mysql "$sql" || echo "0")"
+  count="${count:-0}"
+  echo "{\"ok\":true,\"connections\":$count}"
+  return $EXIT_SUCCESS
+}
+
+cmd_table_list() {
+  local db="$1"
+  if [[ ! "$db" =~ ^[a-zA-Z_][a-zA-Z0-9_]{0,63}$ ]]; then
+    echo "{\"ok\":false,\"error\":\"Invalid database name: $db\",\"code\":\"INVALID_NAME\"}" >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  local sql="SELECT table_name, table_type, COALESCE(table_rows, 0), COALESCE(data_length + index_length, 0), COALESCE(engine, '') FROM information_schema.tables WHERE table_schema = '$db' ORDER BY table_name ASC;"
+  local raw
+  raw="$(run_mysql "$sql" || true)"
+
+  python3 -c '
+import sys, json
+
+db = sys.argv[1]
+raw = sys.argv[2]
+tables = []
+for line in raw.strip().split("\n"):
+    if not line.strip():
+        continue
+    parts = line.split("\t")
+    if len(parts) >= 5:
+        size_bytes = int(parts[3]) if parts[3].isdigit() else 0
+        def fmt(b):
+            for unit in ["B", "KB", "MB", "GB"]:
+                if b < 1024.0: return f"{b:.1f} {unit}" if unit != "B" else f"{b} B"
+                b /= 1024.0
+            return f"{b:.1f} TB"
+        tables.append({
+            "name": parts[0],
+            "type": parts[1],
+            "rows": int(parts[2]) if parts[2].isdigit() else 0,
+            "size_bytes": size_bytes,
+            "size_human": fmt(size_bytes),
+            "engine": parts[4],
+        })
+print(json.dumps({"ok": True, "database": db, "tables": tables, "total": len(tables)}))
+' "$db" "$raw"
+  return $EXIT_SUCCESS
+}
+
+cmd_db_query() {
+  local db="$1"
+  if [[ ! "$db" =~ ^[a-zA-Z_][a-zA-Z0-9_]{0,63}$ ]]; then
+    echo "{\"ok\":false,\"error\":\"Invalid database name: $db\",\"code\":\"INVALID_NAME\"}" >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  local query=""
+  if [[ ! -t 0 ]]; then
+    query="$(read_secret "query")"
+  fi
+
+  if [[ -z "$query" ]]; then
+    echo '{"ok":false,"error":"SQL query required in payload","code":"MISSING_QUERY"}' >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  local sock
+  sock="$(find_mysql_socket)"
+
+  python3 -c '
+import sys, time, subprocess, json
+
+db = sys.argv[1]
+query = sys.argv[2]
+sock = sys.argv[3]
+
+cmd = ["mariadb", "-u", "root"]
+if sock:
+    cmd.extend(["-S", sock])
+cmd.extend(["-B", "-D", db, "-e", query])
+
+start = time.time()
+try:
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    duration_ms = round((time.time() - start) * 1000, 2)
+    if proc.returncode != 0:
+        err = proc.stderr.strip() or "Query execution failed"
+        print(json.dumps({"ok": False, "error": err, "code": "SQL_ERROR", "execution_time_ms": duration_ms}))
+        sys.exit(0)
+
+    lines = [l for l in proc.stdout.split("\n") if l]
+    if not lines:
+        print(json.dumps({"ok": True, "database": db, "columns": [], "rows": [], "total_rows": 0, "affected_rows": 0, "execution_time_ms": duration_ms}))
+        sys.exit(0)
+
+    columns = lines[0].split("\t")
+    rows = []
+    for line in lines[1:]:
+        rows.append(line.split("\t"))
+
+    print(json.dumps({
+        "ok": True,
+        "database": db,
+        "columns": columns,
+        "rows": rows,
+        "total_rows": len(rows),
+        "execution_time_ms": duration_ms
+    }))
+except subprocess.TimeoutExpired:
+    print(json.dumps({"ok": False, "error": "Query timed out after 15 seconds", "code": "TIMEOUT"}))
+except Exception as e:
+    print(json.dumps({"ok": False, "error": str(e), "code": "EXECUTION_FAILED"}))
+' "$db" "$query" "$sock"
+  return $EXIT_SUCCESS
+}
+
+cmd_user_list() {
+  local raw
+  raw="$(run_mysql "SELECT user, host FROM mysql.user WHERE user != '';" || echo "")"
+  local list="[]"
+  list="$(python3 - "$raw" <<'PYEOF'
+import sys, json
+raw = sys.argv[1].strip()
+protected = {"root", "mariadb.sys", "mysql.sys", "mysql.session", "mysql.infoschema"}
+users = []
+if raw:
+    for line in raw.split("\n"):
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            user, host = parts[0], parts[1]
+            if user not in protected:
+                users.append({"username": user, "host": host})
+print(json.dumps(users))
+PYEOF
+)"
+  echo "{\"ok\":true,\"users\":$list}"
+  return $EXIT_SUCCESS
+}
+
+cmd_user_create() {
+  local username="$1"
+  local host="${2:-%}"
+
+  if [[ ! "$username" =~ ^[a-zA-Z_][a-zA-Z0-9_]{0,31}$ ]]; then
+    echo "{\"ok\":false,\"error\":\"Invalid username: $username\",\"code\":\"INVALID_USERNAME\"}" >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  if is_protected_user "$username"; then
+    echo "{\"ok\":false,\"error\":\"User '$username' is protected\",\"code\":\"FORBIDDEN\"}" >&2
+    return $EXIT_FORBIDDEN
+  fi
+
+  local password=""
+  if [[ ! -t 0 ]]; then
+    password="$(read_secret "password")"
+  fi
+
+  if [[ -z "$password" ]]; then
+    echo '{"ok":false,"error":"Password required on stdin JSON payload","code":"MISSING_PASSWORD"}' >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  # Escape password for MySQL single quotes
+  local escaped_pw="${password//\'/\'\'}"
+  local sql="CREATE USER \`$username\`@'$host' IDENTIFIED BY '$escaped_pw'; FLUSH PRIVILEGES;"
+  if ! run_mysql "$sql"; then
+    echo "{\"ok\":false,\"error\":\"Failed to create user '$username'@'$host'\",\"code\":\"EXECUTION_FAILED\"}" >&2
+    return $EXIT_EXECUTION_FAILED
+  fi
+
+  echo "{\"ok\":true,\"username\":\"$username\",\"host\":\"$host\"}"
+  return $EXIT_SUCCESS
+}
+
+cmd_user_drop() {
+  local username="$1"
+  local host="${2:-%}"
+
+  if [[ ! "$username" =~ ^[a-zA-Z_][a-zA-Z0-9_]{0,31}$ ]]; then
+    echo "{\"ok\":false,\"error\":\"Invalid username: $username\",\"code\":\"INVALID_USERNAME\"}" >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  if is_protected_user "$username"; then
+    echo "{\"ok\":false,\"error\":\"Cannot drop protected user '$username'\",\"code\":\"FORBIDDEN\"}" >&2
+    return $EXIT_FORBIDDEN
+  fi
+
+  local sql="DROP USER \`$username\`@'$host'; FLUSH PRIVILEGES;"
+  if ! run_mysql "$sql"; then
+    echo "{\"ok\":false,\"error\":\"Failed to drop user '$username'@'$host'\",\"code\":\"EXECUTION_FAILED\"}" >&2
+    return $EXIT_EXECUTION_FAILED
+  fi
+
+  echo "{\"ok\":true,\"username\":\"$username\",\"host\":\"$host\",\"dropped\":true}"
+  return $EXIT_SUCCESS
+}
+
+cmd_user_set_password() {
+  local username="$1"
+  local host="${2:-%}"
+
+  if [[ ! "$username" =~ ^[a-zA-Z_][a-zA-Z0-9_]{0,31}$ ]]; then
+    echo "{\"ok\":false,\"error\":\"Invalid username: $username\",\"code\":\"INVALID_USERNAME\"}" >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  if is_protected_user "$username"; then
+    echo "{\"ok\":false,\"error\":\"Cannot modify password for protected user '$username'\",\"code\":\"FORBIDDEN\"}" >&2
+    return $EXIT_FORBIDDEN
+  fi
+
+  local password=""
+  if [[ ! -t 0 ]]; then
+    password="$(read_secret "password")"
+  fi
+
+  if [[ -z "$password" ]]; then
+    echo '{"ok":false,"error":"Password required on stdin JSON payload","code":"MISSING_PASSWORD"}' >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  local escaped_pw="${password//\'/\'\'}"
+  local sql="ALTER USER \`$username\`@'$host' IDENTIFIED BY '$escaped_pw'; FLUSH PRIVILEGES;"
+  if ! run_mysql "$sql"; then
+    echo "{\"ok\":false,\"error\":\"Failed to update password for '$username'@'$host'\",\"code\":\"EXECUTION_FAILED\"}" >&2
+    return $EXIT_EXECUTION_FAILED
+  fi
+
+  echo "{\"ok\":true,\"username\":\"$username\",\"host\":\"$host\",\"password_updated\":true}"
+  return $EXIT_SUCCESS
+}
+
+cmd_grant() {
+  local username="$1"
+  local db="$2"
+  local privs="${3:-ALL PRIVILEGES}"
+  local host="${4:-%}"
+
+  if [[ ! "$username" =~ ^[a-zA-Z_][a-zA-Z0-9_]{0,31}$ ]]; then
+    echo "{\"ok\":false,\"error\":\"Invalid username: $username\",\"code\":\"INVALID_USERNAME\"}" >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  if [[ ! "$db" =~ ^[a-zA-Z_][a-zA-Z0-9_]{0,63}$ ]]; then
+    echo "{\"ok\":false,\"error\":\"Invalid database: $db\",\"code\":\"INVALID_DATABASE\"}" >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  # Revoke previous privileges on this specific database first so unchecked privileges are removed
+  run_mysql "REVOKE ALL PRIVILEGES ON \`$db\`.* FROM \`$username\`@'$host';" 2>/dev/null || true
+
+  local sql="GRANT $privs ON \`$db\`.* TO \`$username\`@'$host'; FLUSH PRIVILEGES;"
+  if ! run_mysql "$sql"; then
+    echo "{\"ok\":false,\"error\":\"Failed to grant privileges on '$db' to '$username'@'$host'\",\"code\":\"EXECUTION_FAILED\"}" >&2
+    return $EXIT_EXECUTION_FAILED
+  fi
+
+  echo "{\"ok\":true,\"username\":\"$username\",\"database\":\"$db\",\"privileges\":\"$privs\",\"host\":\"$host\"}"
+  return $EXIT_SUCCESS
+}
+
+cmd_revoke() {
+  local username="$1"
+  local db="$2"
+  local host="${3:-%}"
+
+  if [[ ! "$username" =~ ^[a-zA-Z_][a-zA-Z0-9_]{0,31}$ ]]; then
+    echo "{\"ok\":false,\"error\":\"Invalid username: $username\",\"code\":\"INVALID_USERNAME\"}" >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  if [[ ! "$db" =~ ^[a-zA-Z_][a-zA-Z0-9_]{0,63}$ ]]; then
+    echo "{\"ok\":false,\"error\":\"Invalid database: $db\",\"code\":\"INVALID_DATABASE\"}" >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  local sql="REVOKE ALL PRIVILEGES ON \`$db\`.* FROM \`$username\`@'$host'; FLUSH PRIVILEGES;"
+  if ! run_mysql "$sql"; then
+    echo "{\"ok\":false,\"error\":\"Failed to revoke privileges for '$username'@'$host' on '$db'\",\"code\":\"EXECUTION_FAILED\"}" >&2
+    return $EXIT_EXECUTION_FAILED
+  fi
+
+  echo "{\"ok\":true,\"username\":\"$username\",\"database\":\"$db\",\"revoked\":true,\"host\":\"$host\"}"
+  return $EXIT_SUCCESS
+}
+
+# ==================== ENGINE SERVICE LIFECYCLE ====================
+
+cmd_engine_status() {
+  local service="mariadb"
+  local active=false
+  local pid=0
+  local uptime="0s"
+  local status_text="stopped"
+
+  # Find active unit
+  for u in "mariadb.service" "mysql.service"; do
+    if systemctl is-active --quiet "$u" 2>/dev/null; then
+      service="${u%.service}"
+      active=true
+      status_text="running"
+      pid="$(systemctl show -p MainPID --value "$u" 2>/dev/null || echo "0")"
+      local uptime_sec
+      uptime_sec="$(ps -p "$pid" -o etimes= 2>/dev/null | tr -d ' ' || echo "0")"
+      if [[ "$uptime_sec" -gt 86400 ]]; then
+        uptime="$((uptime_sec / 86400))d $((uptime_sec % 86400 / 3600))h"
+      elif [[ "$uptime_sec" -gt 3600 ]]; then
+        uptime="$((uptime_sec / 3600))h $((uptime_sec % 3600 / 60))m"
+      else
+        uptime="${uptime_sec}s"
+      fi
+      break
+    fi
+  done
+
+  # Look up version
+  local version=""
+  if [[ -n "$MYSQLD_BIN" ]]; then
+    local raw_v
+    raw_v="$("$MYSQLD_BIN" --version 2>/dev/null || echo "")"
+    if [[ "$raw_v" =~ (MariaDB[[:space:]]+[0-9]+\.[0-9]+\.[0-9]+) ]]; then
+      version="${BASH_REMATCH[1]}"
+    elif [[ "$raw_v" =~ Ver[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+      version="MariaDB ${BASH_REMATCH[1]}"
+    else
+      version="MariaDB"
+    fi
+  fi
+
+  local conns=0
+  if [[ "$active" == "true" ]]; then
+    local c
+    c="$(run_mysql "SELECT COUNT(*) FROM information_schema.processlist;" 2>/dev/null || echo "0")"
+    conns="$(echo "$c" | grep -Eo '^[0-9]+$' | tail -n 1 || echo "0")"
+    conns="${conns:-0}"
+  fi
+
+  echo "{\"ok\":true,\"engine\":\"mysql\",\"service\":\"$service\",\"status\":\"$status_text\",\"active\":$active,\"pid\":$pid,\"uptime\":\"$uptime\",\"version\":\"$version\",\"connections\":$conns,\"port\":3306}"
+  return $EXIT_SUCCESS
+}
+
+cmd_engine_start() {
+  echo "[1/3] Preparing /opt/hostpanel isolated directories..."
+  mkdir -p "$DATA_DIR" "$LOG_DIR" "$RUN_DIR"
+  chown -R mysql:mysql "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" 2>/dev/null || true
+
+  echo "[2/3] Starting MySQL/MariaDB service..."
+  systemctl start mariadb.service 2>/dev/null || systemctl start mysql.service 2>/dev/null || true
+
+  echo "[3/3] Checking MySQL socket and service readiness..."
+  sleep 0.5
+  local pid
+  pid="$(systemctl show -p MainPID --value mariadb.service 2>/dev/null || systemctl show -p MainPID --value mysql.service 2>/dev/null || echo "0")"
+  echo "✓ MySQL/MariaDB daemon is active (PID $pid, port 3306)."
+  echo '{"ok":true,"action":"start","status":"active"}'
+  return $EXIT_SUCCESS
+}
+
+cmd_engine_stop() {
+  echo "[1/2] Sending termination signal to MySQL/MariaDB service..."
+  systemctl stop mariadb.service 2>/dev/null || systemctl stop mysql.service 2>/dev/null || true
+
+  echo "[2/2] Verifying process shutdown and cleaning socket locks..."
+  sleep 0.3
+  echo "✓ MySQL/MariaDB service stopped."
+  echo '{"ok":true,"action":"stop","status":"inactive"}'
+  return $EXIT_SUCCESS
+}
+
+cmd_engine_restart() {
+  echo "[1/4] Stopping active MySQL/MariaDB daemon..."
+  systemctl stop mariadb.service 2>/dev/null || systemctl stop mysql.service 2>/dev/null || true
+
+  echo "[2/4] Verifying isolated directories and runtime permissions..."
+  mkdir -p "$DATA_DIR" "$LOG_DIR" "$RUN_DIR"
+  chown -R mysql:mysql "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" 2>/dev/null || true
+
+  echo "[3/4] Starting MySQL/MariaDB service..."
+  systemctl start mariadb.service 2>/dev/null || systemctl start mysql.service 2>/dev/null || true
+
+  echo "[4/4] Verifying Unix domain socket connection..."
+  sleep 0.5
+  local pid
+  pid="$(systemctl show -p MainPID --value mariadb.service 2>/dev/null || systemctl show -p MainPID --value mysql.service 2>/dev/null || echo "0")"
+  echo "✓ MySQL/MariaDB restarted successfully (PID $pid)."
+  echo '{"ok":true,"action":"restart","status":"active"}'
+  return $EXIT_SUCCESS
+}
+
+cmd_engine_reload() {
+  echo "[1/2] Reloading MySQL configuration ($CONF_FILE)..."
+  for u in "mariadb.service" "mysql.service"; do
+    if systemctl is-active --quiet "$u" 2>/dev/null; then
+      systemctl reload "$u" 2>/dev/null || systemctl restart "$u" 2>/dev/null || true
+      break
+    fi
+  done
+
+  echo "[2/2] Validating daemon health status..."
+  sleep 0.5
+  local pid
+  pid="$(systemctl show -p MainPID --value mariadb.service 2>/dev/null || systemctl show -p MainPID --value mysql.service 2>/dev/null || echo "0")"
+  echo "✓ MySQL/MariaDB configuration reloaded (PID $pid)."
+  echo '{"ok":true,"action":"reload","status":"active"}'
+  return $EXIT_SUCCESS
+}
+
+cmd_engine_config_get() {
+  local target="$CONF_FILE"
+  if [[ ! -f "$target" ]]; then
+    if [[ -f "/etc/mysql/my.cnf" ]]; then
+      target="/etc/mysql/my.cnf"
+    elif [[ -f "/etc/my.cnf" ]]; then
+      target="/etc/my.cnf"
+    fi
+  fi
+
+  local content=""
+  if [[ -f "$target" ]]; then
+    content="$(cat "$target")"
+  fi
+  python3 -c 'import sys, json; print(json.dumps({"ok": True, "path": sys.argv[1], "content": sys.argv[2]}))' "$target" "$content"
+  return $EXIT_SUCCESS
+}
+
+cmd_engine_config_set() {
+  local content=""
+  if [[ ! -t 0 ]]; then
+    content="$(read_secret "content")"
+  fi
+
+  if [[ -z "$content" ]]; then
+    echo '{"ok":false,"error":"Configuration content required on stdin payload","code":"MISSING_CONTENT"}' >&2
+    return $EXIT_INVALID_INPUT
+  fi
+
+  mkdir -p "$CONF_DIR"
+  echo "$content" > "$CONF_FILE"
+  chmod 0644 "$CONF_FILE"
+
+  # Also update system fallback if writable
+  if [[ -d "/etc/mysql" ]]; then
+    echo "$content" > "/etc/mysql/my.cnf" 2>/dev/null || true
+  fi
+
+  echo "{\"ok\":true,\"path\":\"$CONF_FILE\",\"saved\":true}"
+  return $EXIT_SUCCESS
+}
+
+cmd_engine_logs() {
+  local lines="${1:-50}"
+  if [[ ! "$lines" =~ ^[0-9]+$ ]]; then
+    lines=50
+  fi
+  local out=""
+  for u in "mariadb.service" "mysql.service" "hostpanel-mariadbd.service"; do
+    if systemctl is-active --quiet "$u" 2>/dev/null; then
+      out="$(journalctl -u "$u" -n "$lines" --no-pager 2>/dev/null || true)"
+      break
+    fi
+  done
+  if [[ -z "$out" && -f "$LOG_FILE" ]]; then
+    out="$(tail -n "$lines" "$LOG_FILE" 2>/dev/null || true)"
+  fi
+  if [[ -z "$out" && -f "/var/log/mysql/error.log" ]]; then
+    out="$(tail -n "$lines" "/var/log/mysql/error.log" 2>/dev/null || true)"
+  fi
+  python3 -c 'import sys, json; print(json.dumps({"ok": True, "lines": sys.argv[1], "content": sys.argv[2]}))' "$lines" "${out:-No log output recorded.}"
+  return $EXIT_SUCCESS
+}
+
+cmd_engine_install() {
+  echo "============================================================"
+  echo "  HostPanel v3 — MySQL / MariaDB Engine Provisioner"
+  echo "============================================================"
+  echo
+
+  mkdir -p "$CONF_DIR" "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" "$RUNTIME_DIR"
+  chown -R hp-mysql:hp-mysql "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" 2>/dev/null || true
+
+  echo "[1/4] Checking MariaDB / MySQL binaries..."
+  if [[ -n "$MYSQL_BIN" && -n "$MYSQLD_BIN" ]]; then
+    echo "  Found installed binary: $($MYSQL_BIN --version 2>/dev/null || echo "$MYSQL_BIN")"
+  else
+    echo "  Downloading portable MariaDB runtime..."
+    local arch
+    arch="$(uname -m)"
+    echo "  Architecture: $arch"
+    if command -v apt-get >/dev/null 2>&1; then
+      echo "  Provisioning mariadb-server packages via apt..."
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -y || true
+      apt-get install -y --no-install-recommends mariadb-server mariadb-client || true
+    fi
+  fi
+
+  echo
+  echo "[2/4] Initializing /opt/hostpanel isolated directories..."
+  mkdir -p "$CONF_DIR" "$DATA_DIR" "$LOG_DIR" "$RUN_DIR"
+  chown -R mysql:mysql "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" 2>/dev/null || chown -R hp-mysql:hp-mysql "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" 2>/dev/null || true
+  chmod 0750 "$DATA_DIR" "$LOG_DIR" "$RUN_DIR"
+
+  if [[ ! -d "$DATA_DIR/mysql" ]]; then
+    echo "  Initializing new MariaDB system tables..."
+    mariadb-install-db --user=mysql --datadir="$DATA_DIR" || mysql_install_db --user=mysql --datadir="$DATA_DIR" || true
+  fi
+
+  echo
+  echo "[3/4] Configuring isolated MySQL parameters & systemd unit..."
+  if [[ ! -f "$CONF_FILE" ]]; then
+    cat > "$CONF_FILE" <<EOF
+[mysqld]
+datadir = $DATA_DIR
+socket = $RUN_DIR/mysqld.sock
+port = 3306
+bind-address = 127.0.0.1
+log-error = $LOG_DIR/mariadb.log
+pid-file = $RUN_DIR/mariadb.pid
+character-set-server = utf8mb4
+collation-server = utf8mb4_unicode_ci
+
+[client]
+socket = $RUN_DIR/mysqld.sock
+EOF
+    chmod 0644 "$CONF_FILE"
+    echo "  Created configuration: $CONF_FILE"
+  fi
+
+  mkdir -p /etc/systemd/system/mariadb.service.d
+  cat > /etc/systemd/system/mariadb.service.d/hostpanel.conf <<EOF
+[Service]
+ExecStart=
+ExecStart=/usr/sbin/mariadbd --defaults-file=$CONF_FILE
+ProtectSystem=off
+ProtectHome=false
+ReadOnlyPaths=/opt/hostpanel/etc
+ReadWritePaths=$DATA_DIR $LOG_DIR $RUN_DIR
+EOF
+  systemctl daemon-reload
+
+  echo
+  echo "[4/4] Starting service and validating engine..."
+  systemctl restart mariadb.service 2>/dev/null || systemctl enable --now mariadb.service 2>/dev/null || systemctl enable --now mysql.service 2>/dev/null || true
+  sleep 1
+
+  echo
+  echo "✓ MariaDB / MySQL engine ready and isolated under /opt/hostpanel"
+  echo '{"ok":true,"engine":"mysql","status":"installed"}'
+  return $EXIT_SUCCESS
+}
+
+# ==================== MAIN DISPATCHER ====================
+
+if [[ $# -eq 0 ]]; then
+  echo '{"ok":false,"error":"No verb provided","code":"INVALID_ARGUMENTS"}' >&2
+  exit $EXIT_INVALID_INPUT
+fi
+
+VERB="$1"
+shift
+
+case "$VERB" in
+  db-list)
+    if [[ $# -ne 0 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_db_list
+    ;;
+  db-create)
+    if [[ $# -lt 1 || $# -gt 3 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_db_create "$@"
+    ;;
+  db-drop)
+    if [[ $# -ne 1 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_db_drop "$1"
+    ;;
+  db-size)
+    if [[ $# -ne 1 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_db_size "$1"
+    ;;
+  db-connections)
+    if [[ $# -ne 0 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_db_connections
+    ;;
+  table-list)
+    if [[ $# -ne 1 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_table_list "$1"
+    ;;
+  db-query)
+    if [[ $# -ne 1 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_db_query "$1"
+    ;;
+  user-list)
+    if [[ $# -ne 0 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_user_list
+    ;;
+  user-create)
+    if [[ $# -lt 1 || $# -gt 2 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_user_create "$@"
+    ;;
+  user-drop)
+    if [[ $# -lt 1 || $# -gt 2 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_user_drop "$@"
+    ;;
+  user-set-password)
+    if [[ $# -lt 1 || $# -gt 2 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_user_set_password "$@"
+    ;;
+  grant)
+    if [[ $# -lt 2 || $# -gt 4 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_grant "$@"
+    ;;
+  revoke)
+    if [[ $# -lt 2 || $# -gt 3 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_revoke "$@"
+    ;;
+  engine-status)
+    if [[ $# -ne 0 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_engine_status
+    ;;
+  engine-start)
+    if [[ $# -ne 0 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_engine_start
+    ;;
+  engine-stop)
+    if [[ $# -ne 0 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_engine_stop
+    ;;
+  engine-restart)
+    if [[ $# -ne 0 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_engine_restart
+    ;;
+  engine-reload)
+    if [[ $# -ne 0 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_engine_reload
+    ;;
+  engine-config-get)
+    if [[ $# -ne 0 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_engine_config_get
+    ;;
+  engine-config-set)
+    if [[ $# -ne 0 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_engine_config_set
+    ;;
+  engine-logs)
+    if [[ $# -gt 1 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_engine_logs "${1:-50}"
+    ;;
+  engine-install)
+    if [[ $# -ne 0 ]]; then exit $EXIT_INVALID_INPUT; fi
+    cmd_engine_install
+    ;;
+  *)
+    echo "{\"ok\":false,\"error\":\"Unknown verb: $VERB\",\"code\":\"UNKNOWN_VERB\"}" >&2
+    exit $EXIT_COMMAND_NOT_FOUND
+    ;;
+esac

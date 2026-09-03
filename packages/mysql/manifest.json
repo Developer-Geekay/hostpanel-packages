@@ -1,0 +1,308 @@
+{
+  "manifest_version": 1,
+  "feature": "mysql",
+  "label": "MySQL",
+  "version": "3.0.0",
+  "requires_core": [
+    3,
+    0,
+    0
+  ],
+  "api": {
+    "module": "hostpanel_mysqld",
+    "unit": "hostpanel-mysqld.service",
+    "run_as": "hp-mysql"
+  },
+  "frontend": {
+    "entry": "frontend/dist/main.js"
+  },
+  "nav": [
+    {
+      "section": "database",
+      "section_label": "Database",
+      "section_order": 20,
+      "label": "MySQL",
+      "icon": "database",
+      "order": 10
+    }
+  ],
+  "ops": {
+    "script": "/opt/hostpanel/packages/mysql/ops/hp-mysql",
+    "sudoers": "hostpanel-mysqld"
+  },
+  "sandbox": {
+    "read_write_paths": [
+      "/opt/hostpanel/etc",
+      "/opt/hostpanel/data",
+      "/opt/hostpanel/logs",
+      "/opt/hostpanel/run",
+      "/tmp"
+    ]
+  },
+  "operations": {
+    "database.list": {
+      "verb": "db-list",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "mysql.database.list",
+      "timeout_ms": 15000
+    },
+    "database.create": {
+      "verb": "db-create",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "mysql.database.create",
+      "timeout_ms": 15000,
+      "params": {
+        "name": {
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,63}$",
+          "required": true
+        }
+      }
+    },
+    "database.drop": {
+      "verb": "db-drop",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "mysql.database.drop",
+      "timeout_ms": 15000,
+      "params": {
+        "name": {
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,63}$",
+          "required": true
+        }
+      }
+    },
+    "database.size": {
+      "verb": "db-size",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "mysql.database.size",
+      "timeout_ms": 15000,
+      "params": {
+        "name": {
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,63}$",
+          "required": true
+        }
+      }
+    },
+    "database.connections": {
+      "verb": "db-connections",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "mysql.database.connections",
+      "timeout_ms": 15000
+    },
+    "database.tables": {
+      "verb": "table-list",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "mysql.database.tables",
+      "timeout_ms": 15000,
+      "params": {
+        "database": {
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,63}$",
+          "required": true
+        }
+      }
+    },
+    "database.query": {
+      "verb": "db-query",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "mysql.database.query",
+      "timeout_ms": 30000,
+      "params": {
+        "database": {
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,63}$",
+          "required": true
+        },
+        "query": {
+          "secret": true,
+          "required": true
+        }
+      }
+    },
+    "user.list": {
+      "verb": "user-list",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "mysql.user.list",
+      "timeout_ms": 15000
+    },
+    "user.create": {
+      "verb": "user-create",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "mysql.user.create",
+      "timeout_ms": 15000,
+      "params": {
+        "username": {
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,31}$",
+          "required": true
+        },
+        "host": {
+          "required": false
+        },
+        "password": {
+          "secret": true,
+          "required": true
+        }
+      }
+    },
+    "user.drop": {
+      "verb": "user-drop",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "mysql.user.drop",
+      "timeout_ms": 15000,
+      "params": {
+        "username": {
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,31}$",
+          "required": true
+        },
+        "host": {
+          "required": false
+        }
+      }
+    },
+    "user.set_password": {
+      "verb": "user-set-password",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "mysql.user.set_password",
+      "timeout_ms": 15000,
+      "params": {
+        "username": {
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,31}$",
+          "required": true
+        },
+        "host": {
+          "required": false
+        },
+        "password": {
+          "secret": true,
+          "required": true
+        }
+      }
+    },
+    "grant.set": {
+      "verb": "grant",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "mysql.grant.set",
+      "timeout_ms": 15000,
+      "params": {
+        "username": {
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,31}$",
+          "required": true
+        },
+        "database": {
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,63}$",
+          "required": true
+        },
+        "privileges": {
+          "required": false
+        },
+        "host": {
+          "required": false
+        }
+      }
+    },
+    "grant.revoke": {
+      "verb": "revoke",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "mysql.grant.revoke",
+      "timeout_ms": 15000,
+      "params": {
+        "username": {
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,31}$",
+          "required": true
+        },
+        "database": {
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,63}$",
+          "required": true
+        },
+        "host": {
+          "required": false
+        }
+      }
+    },
+    "engine.status": {
+      "verb": "engine-status",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "mysql.engine.status",
+      "timeout_ms": 15000
+    },
+    "engine.start": {
+      "verb": "engine-start",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "mysql.engine.start",
+      "timeout_ms": 30000
+    },
+    "engine.stop": {
+      "verb": "engine-stop",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "mysql.engine.stop",
+      "timeout_ms": 30000
+    },
+    "engine.restart": {
+      "verb": "engine-restart",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "mysql.engine.restart",
+      "timeout_ms": 30000
+    },
+    "engine.reload": {
+      "verb": "engine-reload",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "mysql.engine.reload",
+      "timeout_ms": 30000
+    },
+    "engine.config_get": {
+      "verb": "engine-config-get",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "mysql.engine.config_get",
+      "timeout_ms": 15000
+    },
+    "engine.config_set": {
+      "verb": "engine-config-set",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "mysql.engine.config_set",
+      "timeout_ms": 15000,
+      "params": {
+        "content": {
+          "secret": true,
+          "required": true
+        }
+      }
+    },
+    "engine.logs": {
+      "verb": "engine-logs",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "mysql.engine.logs",
+      "timeout_ms": 15000,
+      "params": {
+        "lines": {
+          "pattern": "^[0-9]+$",
+          "required": false
+        }
+      }
+    },
+    "engine.install": {
+      "verb": "engine-install",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "mysql.engine.install",
+      "timeout_ms": 300000
+    }
+  }
+}

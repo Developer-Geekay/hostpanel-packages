@@ -1,0 +1,347 @@
+{
+  "manifest_version": 1,
+  "feature": "mongodb",
+  "label": "MongoDB",
+  "version": "3.0.0",
+  "requires_core": [
+    3,
+    0,
+    0
+  ],
+  "api": {
+    "module": "hostpanel_mongodbd",
+    "unit": "hostpanel-mongodbd.service",
+    "run_as": "hp-mongodb"
+  },
+  "frontend": {
+    "entry": "frontend/dist/main.js"
+  },
+  "nav": [
+    {
+      "section": "database",
+      "section_label": "Database",
+      "section_order": 20,
+      "label": "MongoDB",
+      "icon": "database",
+      "order": 20
+    }
+  ],
+  "ops": {
+    "script": "/opt/hostpanel/packages/mongodb/ops/hp-mongodb",
+    "sudoers": "hostpanel-mongodbd"
+  },
+  "sandbox": {
+    "read_write_paths": [
+      "/opt/hostpanel/etc",
+      "/opt/hostpanel/data",
+      "/opt/hostpanel/logs",
+      "/opt/hostpanel/run",
+      "/tmp"
+    ]
+  },
+  "operations": {
+    "database.list": {
+      "verb": "db-list",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "mongodb.database.list",
+      "timeout_ms": 15000
+    },
+    "database.create": {
+      "verb": "db-create",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "mongodb.database.create",
+      "timeout_ms": 15000,
+      "params": {
+        "name": {
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,63}$",
+          "required": true
+        }
+      }
+    },
+    "database.drop": {
+      "verb": "db-drop",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "mongodb.database.drop",
+      "timeout_ms": 15000,
+      "params": {
+        "name": {
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,63}$",
+          "required": true
+        }
+      }
+    },
+    "database.size": {
+      "verb": "db-size",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "mongodb.database.size",
+      "timeout_ms": 15000,
+      "params": {
+        "name": {
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,63}$",
+          "required": true
+        }
+      }
+    },
+    "database.connections": {
+      "verb": "db-connections",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "mongodb.database.connections",
+      "timeout_ms": 15000
+    },
+    "database.collections": {
+      "verb": "collection-list",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "mongodb.database.collections",
+      "timeout_ms": 15000,
+      "params": {
+        "database": {
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,63}$",
+          "required": true
+        }
+      }
+    },
+    "collection.create": {
+      "verb": "collection-create",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "mongodb.collection.create",
+      "timeout_ms": 15000,
+      "params": {
+        "database": {
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,63}$",
+          "required": true
+        },
+        "collection": {
+          "pattern": "^[a-zA-Z0-9_.-]{1,120}$",
+          "required": true
+        }
+      }
+    },
+    "collection.drop": {
+      "verb": "collection-drop",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "mongodb.collection.drop",
+      "timeout_ms": 15000,
+      "params": {
+        "database": {
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,63}$",
+          "required": true
+        },
+        "collection": {
+          "pattern": "^[a-zA-Z0-9_.-]{1,120}$",
+          "required": true
+        }
+      }
+    },
+    "collection.query": {
+      "verb": "collection-query",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "mongodb.collection.query",
+      "timeout_ms": 30000,
+      "params": {
+        "database": {
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,63}$",
+          "required": true
+        },
+        "collection": {
+          "pattern": "^[a-zA-Z0-9_.-]{1,120}$",
+          "required": true
+        },
+        "filter": {
+          "secret": true,
+          "required": true
+        },
+        "limit": {
+          "pattern": "^[0-9]+$",
+          "required": false
+        }
+      }
+    },
+    "user.list": {
+      "verb": "user-list",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "mongodb.user.list",
+      "timeout_ms": 15000
+    },
+    "user.create": {
+      "verb": "user-create",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "mongodb.user.create",
+      "timeout_ms": 15000,
+      "params": {
+        "username": {
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,31}$",
+          "required": true
+        },
+        "database": {
+          "required": false
+        },
+        "roles": {
+          "required": false
+        },
+        "password": {
+          "secret": true,
+          "required": true
+        }
+      }
+    },
+    "user.drop": {
+      "verb": "user-drop",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "mongodb.user.drop",
+      "timeout_ms": 15000,
+      "params": {
+        "username": {
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,31}$",
+          "required": true
+        },
+        "database": {
+          "required": false
+        }
+      }
+    },
+    "user.set_password": {
+      "verb": "user-set-password",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "mongodb.user.set_password",
+      "timeout_ms": 15000,
+      "params": {
+        "username": {
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,31}$",
+          "required": true
+        },
+        "database": {
+          "required": false
+        },
+        "password": {
+          "secret": true,
+          "required": true
+        }
+      }
+    },
+    "grant.set": {
+      "verb": "grant",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "mongodb.grant.set",
+      "timeout_ms": 15000,
+      "params": {
+        "username": {
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,31}$",
+          "required": true
+        },
+        "database": {
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,63}$",
+          "required": true
+        },
+        "roles": {
+          "required": false
+        }
+      }
+    },
+    "grant.revoke": {
+      "verb": "revoke",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "mongodb.grant.revoke",
+      "timeout_ms": 15000,
+      "params": {
+        "username": {
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,31}$",
+          "required": true
+        },
+        "database": {
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,63}$",
+          "required": true
+        }
+      }
+    },
+    "engine.status": {
+      "verb": "engine-status",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "mongodb.engine.status",
+      "timeout_ms": 15000
+    },
+    "engine.start": {
+      "verb": "engine-start",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "mongodb.engine.start",
+      "timeout_ms": 30000
+    },
+    "engine.stop": {
+      "verb": "engine-stop",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "mongodb.engine.stop",
+      "timeout_ms": 30000
+    },
+    "engine.restart": {
+      "verb": "engine-restart",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "mongodb.engine.restart",
+      "timeout_ms": 30000
+    },
+    "engine.reload": {
+      "verb": "engine-reload",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "mongodb.engine.reload",
+      "timeout_ms": 30000
+    },
+    "engine.config_get": {
+      "verb": "engine-config-get",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "mongodb.engine.config_get",
+      "timeout_ms": 15000
+    },
+    "engine.config_set": {
+      "verb": "engine-config-set",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "mongodb.engine.config_set",
+      "timeout_ms": 15000,
+      "params": {
+        "content": {
+          "secret": true,
+          "required": true
+        }
+      }
+    },
+    "engine.logs": {
+      "verb": "engine-logs",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "mongodb.engine.logs",
+      "timeout_ms": 15000,
+      "params": {
+        "lines": {
+          "pattern": "^[0-9]+$",
+          "required": false
+        }
+      }
+    },
+    "engine.install": {
+      "verb": "engine-install",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "mongodb.engine.install",
+      "timeout_ms": 300000
+    }
+  }
+}

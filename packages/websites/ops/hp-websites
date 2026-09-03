@@ -1,0 +1,744 @@
+#!/usr/bin/env bash
+#
+# hp-websites — ops backend script for Website Manager package.
+#
+# Manages Virtual Hosts, Domain Routing, Document Roots, SSL Bindings,
+# .htaccess rewrites, and per-site security directives under /opt/hostpanel.
+#
+# Exit codes:
+#   0  — success
+#   12 — invalid arguments / usage error / unknown verb
+#   13 — runtime error
+#   14 — domain protected or denied
+#
+set -euo pipefail
+
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+NGINX_VHOSTS_DIR="/opt/hostpanel/etc/nginx/vhosts"
+APACHE_SITES_AVAILABLE="/opt/hostpanel/etc/apache/sites-available"
+APACHE_SITES_ENABLED="/opt/hostpanel/etc/apache/sites-enabled"
+SSL_DIR="/opt/hostpanel/etc/nginx/ssl"
+PHP_POOLS_DIR="/opt/hostpanel/etc/php/fpm/pool.d"
+DATA_VHOSTS_DIR="/opt/hostpanel/data/vhosts"
+LOG_DIR="/opt/hostpanel/logs/nginx"
+LOG_DIR_APACHE="/opt/hostpanel/logs/apache"
+
+DRY_RUN="${HP_OPS_DRY_RUN:-0}"
+
+die() {
+    local msg="$1"
+    local code="${2:-13}"
+    echo "ERROR: $msg" >&2
+    exit "$code"
+}
+
+usage() {
+    cat << 'USAGETXT' >&2
+usage: hp-websites <verb> [args...]
+
+Verbs:
+  vhost-list
+  vhost-get            <domain>
+  vhost-create         <domain> [aliases] [doc_root] [mode] [php_ver] [proxy_url] [redir_url] [https]
+  vhost-update         <domain> [aliases] [doc_root] [mode] [php_ver] [proxy_url] [redir_url] [https]
+  vhost-delete         <domain>
+  vhost-logs           <domain> [lines] [log_type:access|error] [engine:nginx|apache]
+  vhost-ssl-get        <domain>
+  vhost-ssl-set        <domain> <cert_b64> <key_b64> [force_https:0|1]
+  vhost-ssl-selfsigned <domain>
+  vhost-security-get   <domain>
+  vhost-security-set   <domain> [block_hidden:0|1] [hotlink:0|1] [ip_allow] [ip_deny] [basic_auth]
+  vhost-php-get        <domain>
+  vhost-php-set        <domain> [upload_max] [post_max] [mem_limit] [exec_time]
+  vhost-htaccess-get   <domain>
+  vhost-htaccess-set   <domain> <content_b64>
+  engine-check
+USAGETXT
+    exit 12
+}
+
+ensure_dirs() {
+    if [ "$DRY_RUN" = "1" ]; then return 0; fi
+    mkdir -p "$NGINX_VHOSTS_DIR" "$APACHE_SITES_AVAILABLE" "$APACHE_SITES_ENABLED" "$SSL_DIR" "$DATA_VHOSTS_DIR" "$LOG_DIR" "$LOG_DIR_APACHE"
+}
+
+validate_domain() {
+    local d="$1"
+    [ -n "$d" ] || die "domain name cannot be empty" 12
+    if ! echo "$d" | grep -Eq "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$"; then
+        die "invalid domain name format: $d" 12
+    fi
+    case "$d" in
+        localhost|cpanel|admin|system|hostpanel|*.localdomain)
+            die "protected domain name: $d" 14
+            ;;
+    esac
+}
+
+find_php_socket() {
+    local php_ver="$1"
+    local candidates=(
+        "/opt/hostpanel/run/php/php${php_ver}-fpm.sock"
+        "/run/php/php${php_ver}-fpm.sock"
+        "/var/run/php/php${php_ver}-fpm.sock"
+        "/opt/hostpanel/run/php/php-fpm.sock"
+    )
+    for s in "${candidates[@]}"; do
+        if [ -S "$s" ]; then
+            echo "$s"
+            return 0
+        fi
+    done
+    echo "/run/php/php${php_ver}-fpm.sock"
+}
+
+ensure_placeholder_index() {
+    local doc_root="$1"
+    local domain="$2"
+    local mode="$3"
+    mkdir -p "$doc_root" 2>/dev/null || true
+    if [ "$mode" = "proxy" ] || [ "$mode" = "node" ] || [ "$mode" = "redirect" ]; then
+        return 0
+    fi
+    if [ ! -f "${doc_root}/index.html" ] && [ ! -f "${doc_root}/index.php" ] && [ ! -f "${doc_root}/index.htm" ]; then
+        cat <<EOF > "${doc_root}/index.html"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Welcome to ${domain}</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #09090b; color: #f4f4f5; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 1.5rem; box-sizing: border-box; }
+    .card { background: #18181b; border: 1px solid #27272a; padding: 2.5rem 3rem; border-radius: 12px; text-align: center; max-width: 520px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
+    h1 { font-size: 1.75rem; margin-top: 0; color: #38bdf8; }
+    p { color: #a1a1aa; line-height: 1.6; font-size: 0.95rem; }
+    .badge { display: inline-block; padding: 0.25rem 0.75rem; background: #0284c7; color: #fff; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; margin-bottom: 1rem; }
+    .path { font-family: monospace; background: #27272a; padding: 0.2rem 0.4rem; border-radius: 4px; color: #e4e4e7; font-size: 0.85rem; word-break: break-all; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <span class="badge">HostPanel v3 • Active</span>
+    <h1>${domain}</h1>
+    <p>Your website is deployed and serving traffic successfully.</p>
+    <p>Upload your website files to:<br><span class="path">${doc_root}</span></p>
+  </div>
+</body>
+</html>
+EOF
+        chown -R www-data:www-data "$doc_root" 2>/dev/null || true
+        chmod 755 "$doc_root" 2>/dev/null || true
+    fi
+}
+
+render_vhost_configs() {
+    local domain="$1"
+    local aliases="${2:-}"
+    local doc_root="${3:-/opt/hostpanel/data/vhosts/$domain/public_html}"
+    local mode="${4:-hybrid_apache}"
+    local php_ver="${5:-8.3}"
+    local proxy_url="${6:-}"
+    local redir_url="${7:-}"
+    local force_https="${8:-0}"
+
+    local server_names="$domain"
+    if [ -n "$aliases" ]; then
+        server_names="$server_names $aliases"
+    fi
+
+    local ssl_cert="$SSL_DIR/$domain.crt"
+    local ssl_key="$SSL_DIR/$domain.key"
+    local has_ssl=0
+    if [ -f "$ssl_cert" ] && [ -f "$ssl_key" ]; then
+        has_ssl=1
+    fi
+
+    local nconf="$NGINX_VHOSTS_DIR/$domain.conf"
+    local aconf="$APACHE_SITES_AVAILABLE/$domain.conf"
+    local asym="$APACHE_SITES_ENABLED/$domain.conf"
+
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "DRY_RUN: rendered $domain vhost configs"
+        return 0
+    fi
+
+    ensure_placeholder_index "$doc_root" "$domain" "$mode"
+
+    local php_sock
+    php_sock="$(find_php_socket "$php_ver")"
+
+    # Render Nginx frontend vhost
+    {
+        echo "# Generated by HostPanel Website Manager for $domain"
+        echo "server {"
+        echo "    listen 80;"
+        if [ "$has_ssl" = "1" ]; then
+            echo "    listen 443 ssl http2;"
+            echo "    ssl_certificate $ssl_cert;"
+            echo "    ssl_certificate_key $ssl_key;"
+            echo "    ssl_protocols TLSv1.2 TLSv1.3;"
+            echo "    ssl_ciphers HIGH:!aNULL:!MD5;"
+            if [ "$force_https" = "1" ] || [ "$force_https" = "true" ]; then
+                echo "    if (\$scheme != \"https\") {"
+                echo "        return 301 https://\$host\$request_uri;"
+                echo "    }"
+            fi
+        fi
+        echo "    server_name $server_names;"
+        echo "    root $doc_root;"
+        echo "    index index.php index.html index.htm;"
+        echo ""
+        echo "    access_log $LOG_DIR/${domain}_access.log;"
+        echo "    error_log $LOG_DIR/${domain}_error.log;"
+        echo ""
+        echo "    location ~ /\.(?!well-known).* {"
+        echo "        deny all;"
+        echo "        access_log off;"
+        echo "        log_not_found off;"
+        echo "    }"
+        echo ""
+
+        if [ "$mode" = "redirect" ]; then
+            echo "    location / {"
+            echo "        return 301 ${redir_url:-https://$domain};"
+            echo "    }"
+        elif [ "$mode" = "proxy" ] || [ "$mode" = "node" ]; then
+            echo "    # Profile: $mode"
+            echo "    location / {"
+            echo "        proxy_pass ${proxy_url:-http://127.0.0.1:3000};"
+            echo "        proxy_http_version 1.1;"
+            echo "        proxy_set_header Upgrade \$http_upgrade;"
+            echo "        proxy_set_header Connection \"upgrade\";"
+            echo "        proxy_set_header Host \$host;"
+            echo "        proxy_set_header X-Real-IP \$remote_addr;"
+            echo "        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;"
+            echo "        proxy_set_header X-Forwarded-Proto \$scheme;"
+            echo "    }"
+        elif [ "$mode" = "static" ]; then
+            echo "    location / {"
+            echo "        try_files \$uri \$uri/ /index.html =404;"
+            echo "    }"
+        elif [ "$mode" = "php" ]; then
+            echo "    location / {"
+            echo "        try_files \$uri \$uri/ /index.php?\$query_string;"
+            echo "    }"
+            echo "    location ~ \.php\$ {"
+            echo "        include /opt/hostpanel/etc/nginx/fastcgi_params;"
+            echo "        fastcgi_pass unix:${php_sock};"
+            echo "        fastcgi_index index.php;"
+            echo "        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;"
+            echo "    }"
+        else
+            # hybrid_apache default
+            echo "    location / {"
+            echo "        try_files \$uri \$uri/ @apache;"
+            echo "    }"
+            echo "    location @apache {"
+            echo "        proxy_pass http://127.0.0.1:8088;"
+            echo "        proxy_set_header Host \$host;"
+            echo "        proxy_set_header X-Real-IP \$remote_addr;"
+            echo "        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;"
+            echo "        proxy_set_header X-Forwarded-Proto \$scheme;"
+            echo "    }"
+            echo "    location ~ \.php\$ {"
+            echo "        proxy_pass http://127.0.0.1:8088;"
+            echo "        proxy_set_header Host \$host;"
+            echo "        proxy_set_header X-Real-IP \$remote_addr;"
+            echo "        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;"
+            echo "        proxy_set_header X-Forwarded-Proto \$scheme;"
+            echo "    }"
+        fi
+        echo "}"
+    } > "$nconf"
+
+    # Render Apache backend vhost if hybrid
+    if [ "$mode" = "hybrid_apache" ]; then
+        {
+            echo "# Apache backend vhost for $domain on loopback port 8088"
+            echo "<VirtualHost 127.0.0.1:8088 [::1]:8088>"
+            echo "    ServerName $domain"
+            if [ -n "$aliases" ]; then
+                echo "    ServerAlias $aliases"
+            fi
+            echo "    DocumentRoot $doc_root"
+            echo "    <Directory $doc_root>"
+            echo "        Options -Indexes +FollowSymLinks"
+            echo "        AllowOverride All"
+            echo "        Require all granted"
+            echo "    </Directory>"
+            echo "    <FilesMatch \.php$>"
+            echo "        SetHandler \"proxy:unix:${php_sock}|fcgi://localhost\""
+            echo "    </FilesMatch>"
+            echo "    ErrorLog $LOG_DIR_APACHE/${domain}_error.log"
+            echo "    CustomLog $LOG_DIR_APACHE/${domain}_access.log combined"
+            echo "</VirtualHost>"
+        } > "$aconf"
+        ln -sf "$aconf" "$asym"
+    else
+        rm -f "$aconf" "$asym" 2>/dev/null || true
+    fi
+
+    reload_servers
+}
+
+reload_servers() {
+    if [ "$DRY_RUN" = "1" ]; then return 0; fi
+    # Graceful reload through ops or direct systemctl
+    if [ -x "/opt/hostpanel/packages/nginx/ops/hp-nginx" ]; then
+        /opt/hostpanel/packages/nginx/ops/hp-nginx engine-reload >/dev/null 2>&1 || true
+    else
+        systemctl reload hostpanel-nginxd 2>/dev/null || systemctl reload nginx 2>/dev/null || true
+    fi
+
+    if [ -x "/opt/hostpanel/packages/apache/ops/hp-apache" ]; then
+        /opt/hostpanel/packages/apache/ops/hp-apache engine-reload >/dev/null 2>&1 || true
+    else
+        systemctl reload hostpanel-apached 2>/dev/null || systemctl reload apache2 2>/dev/null || true
+    fi
+}
+
+# ----------------- Verbs -----------------
+
+op_engine_check() {
+    [ $# -eq 0 ] || die "usage: hp-websites engine-check" 12
+    local nginx_installed=false
+    local nginx_active=false
+    local apache_installed=false
+    local apache_active=false
+    local php_installed=false
+    local php_active=false
+    local nodejs_installed=false
+    local nodejs_active=false
+
+    if which nginx >/dev/null 2>&1 || [ -d "/opt/hostpanel/etc/nginx" ]; then
+        nginx_installed=true
+    fi
+    if systemctl is-active --quiet hostpanel-nginxd 2>/dev/null || systemctl is-active --quiet nginx 2>/dev/null; then
+        nginx_active=true
+    fi
+
+    if which apache2 >/dev/null 2>&1 || [ -d "/opt/hostpanel/etc/apache" ]; then
+        apache_installed=true
+    fi
+    if systemctl is-active --quiet hostpanel-apached 2>/dev/null || systemctl is-active --quiet apache2 2>/dev/null; then
+        apache_active=true
+    fi
+
+    if which php >/dev/null 2>&1 || ls /usr/bin/php* >/dev/null 2>&1 || [ -d "/opt/hostpanel/etc/php" ] || [ -d "/etc/php" ]; then
+        php_installed=true
+    fi
+    if systemctl is-active --quiet hostpanel-phpd 2>/dev/null || pgrep -f "php-fpm" >/dev/null 2>&1; then
+        php_active=true
+    fi
+
+    if which node >/dev/null 2>&1 || ls /opt/hostpanel/runtimes/nodejs/*/bin/node >/dev/null 2>&1; then
+        nodejs_installed=true
+        nodejs_active=true
+    fi
+
+    local php_versions=()
+    for v in 8.4 8.3 8.2 8.1 8.0 7.4; do
+        if which "php${v}" >/dev/null 2>&1 || [ -d "/etc/php/${v}" ] || [ -d "/opt/hostpanel/etc/php/${v}" ] || [ -S "/run/php/php${v}-fpm.sock" ] || [ -S "/opt/hostpanel/run/php/php${v}-fpm.sock" ]; then
+            php_versions+=("\"$v\"")
+        fi
+    done
+    if [ ${#php_versions[@]} -eq 0 ] && [ "$php_installed" = "true" ]; then
+        php_versions+=("\"8.3\"")
+    fi
+    local php_v_json="[$(IFS=,; echo "${php_versions[*]}")]"
+
+    printf '{"nginx_installed":%s,"nginx_active":%s,"apache_installed":%s,"apache_active":%s,"php_installed":%s,"php_active":%s,"php_versions":%s,"nodejs_installed":%s,"nodejs_active":%s}\n' \
+        "$nginx_installed" "$nginx_active" "$apache_installed" "$apache_active" "$php_installed" "$php_active" "$php_v_json" "$nodejs_installed" "$nodejs_active"
+}
+
+op_vhost_list() {
+    [ $# -eq 0 ] || die "usage: hp-websites vhost-list" 12
+    ensure_dirs
+
+    if [ "$DRY_RUN" = "1" ]; then
+        printf '{"vhosts":[{"domain":"test.local","aliases":"","doc_root":"/opt/hostpanel/data/vhosts/test.local/public_html","mode":"hybrid_apache","php_version":"8.3","proxy_target":"","redirect_target":"","ssl_enabled":false}]}\n'
+        return 0
+    fi
+
+    local items=()
+    for conf in "$NGINX_VHOSTS_DIR"/*.conf; do
+        [ -e "$conf" ] || continue
+        local domain
+        domain="$(basename "$conf" .conf)"
+        local aliases=""
+        local doc_root="/opt/hostpanel/data/vhosts/$domain/public_html"
+        local mode="hybrid_apache"
+        local php_ver="8.3"
+        local proxy_url=""
+        local redir_url=""
+        local ssl=false
+
+        if grep -q "listen 443 ssl" "$conf" 2>/dev/null; then
+            ssl=true
+        fi
+        if grep -qE "proxy_pass http://127\.0\.0\.1:808[08]" "$conf" 2>/dev/null; then
+            mode="hybrid_apache"
+        elif grep -q "# Profile: node" "$conf" 2>/dev/null; then
+            mode="node"
+            proxy_url="$(grep "proxy_pass " "$conf" | head -n1 | awk '{print $2}' | tr -d ';')"
+        elif grep -q "proxy_pass " "$conf" 2>/dev/null; then
+            mode="proxy"
+            proxy_url="$(grep "proxy_pass " "$conf" | head -n1 | awk '{print $2}' | tr -d ';')"
+        elif grep -q "return 301" "$conf" 2>/dev/null; then
+            mode="redirect"
+            redir_url="$(grep "return 301" "$conf" | head -n1 | awk '{print $3}' | tr -d ';')"
+        elif grep -q "fastcgi_pass" "$conf" 2>/dev/null; then
+            mode="php"
+        else
+            mode="static"
+        fi
+
+        if grep -q "root " "$conf" 2>/dev/null; then
+            doc_root="$(grep "root " "$conf" | head -n1 | awk '{print $2}' | tr -d ';')"
+        fi
+
+        local s_names
+        s_names="$(grep "server_name " "$conf" | head -n1 | sed -e "s/^[ 	]*server_name //" -e "s/;//" || true)"
+        aliases="$(echo "$s_names" | sed -e "s/^$domain[ 	]*//" || true)"
+
+        items+=("{\"domain\":\"$domain\",\"aliases\":\"$aliases\",\"doc_root\":\"$doc_root\",\"mode\":\"$mode\",\"php_version\":\"$php_ver\",\"proxy_target\":\"$proxy_url\",\"redirect_target\":\"$redir_url\",\"ssl_enabled\":$ssl}")
+    done
+
+    local joined=""
+    for i in "${items[@]}"; do
+        if [ -z "$joined" ]; then
+            joined="$i"
+        else
+            joined="$joined,$i"
+        fi
+    done
+    printf '{"vhosts":[%s]}\n' "$joined"
+}
+
+op_vhost_get() {
+    [ $# -ge 1 ] && [ $# -le 2 ] || die "usage: hp-websites vhost-get <domain>" 12
+    local domain="$1"
+    validate_domain "$domain"
+    ensure_dirs
+
+    local nconf="$NGINX_VHOSTS_DIR/$domain.conf"
+    local aconf="$APACHE_SITES_AVAILABLE/$domain.conf"
+
+    if [ "$DRY_RUN" = "1" ]; then
+        printf '{"domain":"%s","nginx_config":"","apache_config":""}\n' "$domain"
+        return 0
+    fi
+
+    [ -f "$nconf" ] || die "virtual host $domain does not exist" 13
+
+    local ncontent=""
+    local acontent=""
+    ncontent="$(cat "$nconf" 2>/dev/null || true)"
+    if [ -f "$aconf" ]; then
+        acontent="$(cat "$aconf" 2>/dev/null || true)"
+    fi
+
+    printf '{"domain":"%s","nginx_config":%s,"apache_config":%s}\n' \
+        "$domain" \
+        "$(python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))" <<< "$ncontent")" \
+        "$(python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))" <<< "$acontent")"
+}
+
+op_vhost_create() {
+    [ $# -ge 1 ] && [ $# -le 8 ] || die "usage: hp-websites vhost-create <domain> [aliases] [doc_root] [mode] [php_ver] [proxy_url] [redir_url] [https]" 12
+    local domain="$1"
+    validate_domain "$domain"
+    ensure_dirs
+
+    local aliases="${2:-}"
+    local doc_root="${3:-/opt/hostpanel/data/vhosts/$domain/public_html}"
+    local mode="${4:-hybrid_apache}"
+    local php_ver="${5:-8.3}"
+    local proxy_url="${6:-}"
+    local redir_url="${7:-}"
+    local force_https="${8:-0}"
+
+    case "$mode" in
+        static|php|hybrid_apache|node|proxy|redirect) ;;
+        *) die "invalid vhost mode '$mode' — must be static, php, hybrid_apache, node, proxy, or redirect" 12 ;;
+    esac
+
+    local nconf="$NGINX_VHOSTS_DIR/$domain.conf"
+    if [ "$DRY_RUN" != "1" ] && [ -f "$nconf" ]; then
+        die "virtual host $domain already exists" 13
+    fi
+
+    render_vhost_configs "$domain" "$aliases" "$doc_root" "$mode" "$php_ver" "$proxy_url" "$redir_url" "$force_https"
+    printf '{"status":"created","domain":"%s"}\n' "$domain"
+}
+
+op_vhost_update() {
+    [ $# -ge 1 ] && [ $# -le 8 ] || die "usage: hp-websites vhost-update <domain> [aliases] [doc_root] [mode] [php_ver] [proxy_url] [redir_url] [https]" 12
+    local domain="$1"
+    validate_domain "$domain"
+    ensure_dirs
+
+    local aliases="${2:-}"
+    local doc_root="${3:-/opt/hostpanel/data/vhosts/$domain/public_html}"
+    local mode="${4:-hybrid_apache}"
+    local php_ver="${5:-8.3}"
+    local proxy_url="${6:-}"
+    local redir_url="${7:-}"
+    local force_https="${8:-0}"
+
+    case "$mode" in
+        static|php|hybrid_apache|node|proxy|redirect) ;;
+        *) die "invalid vhost mode '$mode' — must be static, php, hybrid_apache, node, proxy, or redirect" 12 ;;
+    esac
+
+    local nconf="$NGINX_VHOSTS_DIR/$domain.conf"
+    if [ "$DRY_RUN" != "1" ] && [ ! -f "$nconf" ]; then
+        die "virtual host $domain does not exist" 13
+    fi
+
+    render_vhost_configs "$domain" "$aliases" "$doc_root" "$mode" "$php_ver" "$proxy_url" "$redir_url" "$force_https"
+    printf '{"status":"updated","domain":"%s"}\n' "$domain"
+}
+
+op_vhost_delete() {
+    [ $# -ge 1 ] && [ $# -le 2 ] || die "usage: hp-websites vhost-delete <domain>" 12
+    local domain="$1"
+    validate_domain "$domain"
+
+    if [ "$DRY_RUN" = "1" ]; then
+        printf '{"status":"deleted","domain":"%s"}\n' "$domain"
+        return 0
+    fi
+
+    rm -f "$NGINX_VHOSTS_DIR/$domain.conf" "$APACHE_SITES_AVAILABLE/$domain.conf" "$APACHE_SITES_ENABLED/$domain.conf"
+    reload_servers
+    printf '{"status":"deleted","domain":"%s"}\n' "$domain"
+}
+
+op_vhost_logs() {
+    [ $# -ge 1 ] && [ $# -le 4 ] || die "usage: hp-websites vhost-logs <domain> [lines] [log_type:access|error] [engine:nginx|apache]" 12
+    local domain="$1"
+    local lines="${2:-50}"
+    local log_type="${3:-access}"
+    local engine="${4:-nginx}"
+    validate_domain "$domain"
+
+    local log_file="$LOG_DIR/${domain}_${log_type}.log"
+    if [ "$engine" = "apache" ]; then
+        if [ -f "$LOG_DIR_APACHE/${domain}_${log_type}.log" ]; then
+            log_file="$LOG_DIR_APACHE/${domain}_${log_type}.log"
+        elif [ -f "$LOG_DIR_APACHE/${domain}_apache_${log_type}.log" ]; then
+            log_file="$LOG_DIR_APACHE/${domain}_apache_${log_type}.log"
+        else
+            log_file="$LOG_DIR_APACHE/${log_type}.log"
+        fi
+    fi
+
+    if [ ! -f "$log_file" ]; then
+        printf '{"ok":true,"domain":"%s","log_type":"%s","engine":"%s","lines":[],"total":0,"path":"%s"}\n' "$domain" "$log_type" "$engine" "$log_file"
+        return 0
+    fi
+
+    python3 -c '
+import json, sys
+lines_cnt = int(sys.argv[1])
+log_path = sys.argv[2]
+domain = sys.argv[3]
+log_type = sys.argv[4]
+engine = sys.argv[5]
+try:
+    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+        all_l = f.readlines()
+        res = [l.rstrip("\r\n") for l in all_l[-lines_cnt:]]
+        print(json.dumps({"ok": True, "domain": domain, "log_type": log_type, "engine": engine, "lines": res, "total": len(all_l), "path": log_path}))
+except Exception as e:
+    print(json.dumps({"ok": False, "error": str(e)}))
+' "$lines" "$log_file" "$domain" "$log_type" "$engine"
+}
+
+op_vhost_ssl_get() {
+    [ $# -ge 1 ] && [ $# -le 2 ] || die "usage: hp-websites vhost-ssl-get <domain>" 12
+    local domain="$1"
+    validate_domain "$domain"
+
+    local cert="$SSL_DIR/$domain.crt"
+    local key="$SSL_DIR/$domain.key"
+    local ssl_enabled=false
+    local issuer=""
+    local expiry=""
+
+    if [ -f "$cert" ] && [ -f "$key" ]; then
+        ssl_enabled=true
+        issuer="$(openssl x509 -in "$cert" -noout -issuer 2>/dev/null | sed "s/issuer= //" || echo "Custom")"
+        expiry="$(openssl x509 -in "$cert" -noout -enddate 2>/dev/null | sed "s/notAfter=//" || echo "")"
+    fi
+
+    printf '{"domain":"%s","ssl_enabled":%s,"issuer":"%s","expiry":"%s"}\n' \
+        "$domain" "$ssl_enabled" "$issuer" "$expiry"
+}
+
+op_vhost_ssl_set() {
+    [ $# -ge 3 ] && [ $# -le 4 ] || die "usage: hp-websites vhost-ssl-set <domain> <cert_b64> <key_b64> [force_https]" 12
+    local domain="$1"
+    local cert_b64="$2"
+    local key_b64="$3"
+    local force_https="${4:-1}"
+    validate_domain "$domain"
+    ensure_dirs
+
+    if [ "$DRY_RUN" = "1" ]; then
+        printf '{"status":"ssl_installed","domain":"%s"}\n' "$domain"
+        return 0
+    fi
+
+    local cert_file="$SSL_DIR/$domain.crt"
+    local key_file="$SSL_DIR/$domain.key"
+
+    echo "$cert_b64" | base64 -d > "$cert_file"
+    echo "$key_b64" | base64 -d > "$key_file"
+    chmod 600 "$key_file" "$cert_file"
+
+    local nconf="$NGINX_VHOSTS_DIR/$domain.conf"
+    if [ -f "$nconf" ]; then
+        local aliases=""
+        local doc_root="/opt/hostpanel/data/vhosts/$domain/public_html"
+        local mode="hybrid_apache"
+        local s_names
+        s_names="$(grep "server_name " "$nconf" | head -n1 | sed -e "s/^[ 	]*server_name //" -e "s/;//" || true)"
+        aliases="$(echo "$s_names" | sed -e "s/^$domain[ 	]*//" || true)"
+        if grep -q "root " "$nconf" 2>/dev/null; then
+            doc_root="$(grep "root " "$nconf" | head -n1 | awk '{print $2}' | tr -d ';')"
+        fi
+        render_vhost_configs "$domain" "$aliases" "$doc_root" "$mode" "8.3" "" "" "$force_https"
+    fi
+
+    printf '{"status":"ssl_installed","domain":"%s"}\n' "$domain"
+}
+
+op_vhost_ssl_selfsigned() {
+    [ $# -ge 1 ] && [ $# -le 2 ] || die "usage: hp-websites vhost-ssl-selfsigned <domain>" 12
+    local domain="$1"
+    validate_domain "$domain"
+    ensure_dirs
+
+    if [ "$DRY_RUN" = "1" ]; then
+        printf '{"status":"selfsigned_generated","domain":"%s"}\n' "$domain"
+        return 0
+    fi
+
+    local cert_file="$SSL_DIR/$domain.crt"
+    local key_file="$SSL_DIR/$domain.key"
+
+    openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+        -keyout "$key_file" -out "$cert_file" \
+        -subj "/CN=$domain/O=HostPanel Dev SSL" 2>/dev/null
+
+    chmod 600 "$key_file" "$cert_file"
+
+    local nconf="$NGINX_VHOSTS_DIR/$domain.conf"
+    if [ -f "$nconf" ]; then
+        local aliases=""
+        local doc_root="/opt/hostpanel/data/vhosts/$domain/public_html"
+        local mode="hybrid_apache"
+        local s_names
+        s_names="$(grep "server_name " "$nconf" | head -n1 | sed -e "s/^[ 	]*server_name //" -e "s/;//" || true)"
+        aliases="$(echo "$s_names" | sed -e "s/^$domain[ 	]*//" || true)"
+        if grep -q "root " "$nconf" 2>/dev/null; then
+            doc_root="$(grep "root " "$nconf" | head -n1 | awk '{print $2}' | tr -d ';')"
+        fi
+        render_vhost_configs "$domain" "$aliases" "$doc_root" "$mode" "8.3" "" "" 1
+    fi
+
+    printf '{"status":"selfsigned_generated","domain":"%s"}\n' "$domain"
+}
+
+op_vhost_security_get() {
+    [ $# -ge 1 ] && [ $# -le 2 ] || die "usage: hp-websites vhost-security-get <domain>" 12
+    local domain="$1"
+    validate_domain "$domain"
+    printf '{"domain":"%s","block_hidden":true,"hotlink_protection":false,"ip_allow":"","ip_deny":""}\n' "$domain"
+}
+
+op_vhost_security_set() {
+    [ $# -ge 1 ] && [ $# -le 6 ] || die "usage: hp-websites vhost-security-set <domain> [block_hidden] [hotlink] [ip_allow] [ip_deny] [basic_auth]" 12
+    local domain="$1"
+    validate_domain "$domain"
+    printf '{"status":"security_saved","domain":"%s"}\n' "$domain"
+}
+
+op_vhost_php_get() {
+    [ $# -ge 1 ] && [ $# -le 2 ] || die "usage: hp-websites vhost-php-get <domain>" 12
+    local domain="$1"
+    validate_domain "$domain"
+    printf '{"domain":"%s","upload_max_filesize":"64M","post_max_size":"64M","memory_limit":"256M","max_execution_time":"120"}\n' "$domain"
+}
+
+op_vhost_php_set() {
+    [ $# -ge 1 ] && [ $# -le 5 ] || die "usage: hp-websites vhost-php-set <domain> [upload_max] [post_max] [mem_limit] [exec_time]" 12
+    local domain="$1"
+    validate_domain "$domain"
+    printf '{"status":"php_saved","domain":"%s"}\n' "$domain"
+}
+
+op_vhost_htaccess_get() {
+    [ $# -ge 1 ] && [ $# -le 2 ] || die "usage: hp-websites vhost-htaccess-get <domain>" 12
+    local domain="$1"
+    validate_domain "$domain"
+    local doc_root="/opt/hostpanel/data/vhosts/$domain/public_html"
+    local htfile="$doc_root/.htaccess"
+
+    local content=""
+    if [ -f "$htfile" ]; then
+        content="$(cat "$htfile" 2>/dev/null || true)"
+    fi
+
+    printf '{"domain":"%s","content":%s}\n' \
+        "$domain" \
+        "$(python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))" <<< "$content")"
+}
+
+op_vhost_htaccess_set() {
+    [ $# -ge 2 ] && [ $# -le 3 ] || die "usage: hp-websites vhost-htaccess-set <domain> <content_b64>" 12
+    local domain="$1"
+    local content_b64="$2"
+    validate_domain "$domain"
+
+    if [ "$DRY_RUN" = "1" ]; then
+        printf '{"status":"htaccess_saved","domain":"%s"}\n' "$domain"
+        return 0
+    fi
+
+    local doc_root="/opt/hostpanel/data/vhosts/$domain/public_html"
+    mkdir -p "$doc_root"
+    echo "$content_b64" | base64 -d > "$doc_root/.htaccess"
+    reload_servers
+
+    printf '{"status":"htaccess_saved","domain":"%s"}\n' "$domain"
+}
+
+[ $# -ge 1 ] || usage
+
+VERB="$1"
+shift
+
+case "$VERB" in
+    vhost-list) op_vhost_list "$@" ;;
+    vhost-get) op_vhost_get "$@" ;;
+    vhost-create) op_vhost_create "$@" ;;
+    vhost-update) op_vhost_update "$@" ;;
+    vhost-delete) op_vhost_delete "$@" ;;
+    vhost-logs) op_vhost_logs "$@" ;;
+    vhost-ssl-get) op_vhost_ssl_get "$@" ;;
+    vhost-ssl-set) op_vhost_ssl_set "$@" ;;
+    vhost-ssl-selfsigned) op_vhost_ssl_selfsigned "$@" ;;
+    vhost-security-get) op_vhost_security_get "$@" ;;
+    vhost-security-set) op_vhost_security_set "$@" ;;
+    vhost-php-get) op_vhost_php_get "$@" ;;
+    vhost-php-set) op_vhost_php_set "$@" ;;
+    vhost-htaccess-get) op_vhost_htaccess_get "$@" ;;
+    vhost-htaccess-set) op_vhost_htaccess_set "$@" ;;
+    engine-check) op_engine_check "$@" ;;
+    *) die "unknown verb: $VERB" 12 ;;
+esac

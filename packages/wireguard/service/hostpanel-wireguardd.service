@@ -1,0 +1,33 @@
+# SCAFFOLD — not installed by this step.
+[Unit]
+Description=HostPanel v3 — WireGuard VPN feature service
+After=network.target
+
+[Service]
+Type=simple
+User=hp-wireguard
+Group=hp-wireguard
+
+# Port and token. The token file is root-owned 0640 root:hp-wireguard, so the service
+# can read its own credential and nothing else on the box can.
+EnvironmentFile=/etc/hostpanel/wireguard.env
+
+# Loopback ONLY. Binding 0.0.0.0 would expose privileged operations to the network.
+ExecStart=/opt/hostpanel/venv/bin/python -m hostpanel_wireguardd
+
+Restart=on-failure
+RestartSec=5
+
+# sudo is setuid, and invoking it is this service's entire purpose.
+NoNewPrivileges=no
+
+ProtectSystem=strict
+ProtectKernelTunables=yes
+MemoryMax=128M
+TasksMax=64
+
+# Strict isolation under /opt/hostpanel
+ReadWritePaths=/opt/hostpanel/etc/wireguard /opt/hostpanel/run/wireguard /opt/hostpanel/logs/wireguard /tmp
+
+[Install]
+WantedBy=multi-user.target

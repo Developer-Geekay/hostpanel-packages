@@ -1,0 +1,11 @@
+node_modules/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+dist/assets/*.map
+*.log
+.DS_Store
+Thumbs.db

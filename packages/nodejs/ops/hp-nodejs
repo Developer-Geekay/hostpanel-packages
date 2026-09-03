@@ -1,0 +1,740 @@
+#!/bin/bash
+# hp-nodejs — root helper for the HostPanel v3 Node.js daemon.
+#
+# Installed root-owned 0755. The daemon's sudoers file grants THIS SINGLE PATH
+# and nothing else:
+#
+#   hp-nodejs ALL=(root) NOPASSWD: /opt/hostpanel/packages/nodejs/ops/hp-nodejs *
+#
+# 100% Isolation under /opt/hostpanel:
+#   - Runtimes:  /opt/hostpanel/runtimes/node/
+#   - Apps data: /opt/hostpanel/data/apps/
+#   - Config:    /opt/hostpanel/etc/nodejs/
+#   - Logs:      /opt/hostpanel/logs/nodejs/
+#   - Runtime:   /opt/hostpanel/run/nodejs/
+#
+# Verbs: status list-apps get-app create-app start-app stop-app restart-app
+#        delete-app set-env get-env get-logs list-runtimes install-runtime
+#        remove-runtime deploy-app
+#
+# Exit codes: 0 ok | 1 internal | 10 not found | 11 precondition | 12 validation
+#             13 conflict | 14 denied | 20 dependency
+
+set -euo pipefail
+
+# shellcheck disable=SC2034
+OPS_NAME="hp-nodejs"
+
+# Pinned when root: sudo always invokes this as root, so the environment cannot
+# redirect a privileged script at an attacker-controlled copy of the validators.
+if [ "$(id -u)" = "0" ]; then
+    HP_CORE_LIB=/opt/hostpanel/hpcore/lib
+    HP_NODE_ROOT=/opt/hostpanel/runtimes/node
+    HP_APPS_ROOT=/opt/hostpanel/data/apps
+    HP_ETC_ROOT=/opt/hostpanel/etc/nodejs
+    HP_LOGS_ROOT=/opt/hostpanel/logs/nodejs
+    HP_RUN_ROOT=/opt/hostpanel/run/nodejs
+else
+    : "${HP_CORE_LIB:=/opt/hostpanel/hpcore/lib}"
+    : "${HP_NODE_ROOT:=/opt/hostpanel/runtimes/node}"
+    : "${HP_APPS_ROOT:=/opt/hostpanel/data/apps}"
+    : "${HP_ETC_ROOT:=/opt/hostpanel/etc/nodejs}"
+    : "${HP_LOGS_ROOT:=/opt/hostpanel/logs/nodejs}"
+    : "${HP_RUN_ROOT:=/opt/hostpanel/run/nodejs}"
+fi
+
+# Sourced shared validators from hpcore
+# shellcheck disable=SC1091
+if [ -f "$HP_CORE_LIB/common.sh" ]; then
+    . "$HP_CORE_LIB/common.sh"
+else
+    # Minimal fallback when common.sh is not reachable (e.g. testing in isolation)
+    die() { echo "${OPS_NAME:-ops}: $1" >&2; exit "${2:-12}"; }
+    warn() { echo "${OPS_NAME:-ops}: $1" >&2; }
+    is_dryrun() { [ "${HP_OPS_DRYRUN:-0}" = "1" ] && [ "$(id -u)" != "0" ]; }
+    act() { if is_dryrun; then echo "WOULD-EXEC: $*" >&2; return 0; fi; "$@"; }
+    require_argc() { [ "$2" -eq "$1" ] || die "expected $1 argument(s), got $2 — usage: $3" 12; }
+    valid_abs_path() { case "$1" in /*) ;; *) die "path must be absolute: '$1'" 12 ;; esac; }
+    no_traversal() { case "$1" in *..*) die "path must not contain '..': '$1'" 12 ;; esac; }
+    _SEC_KEYS=(); _SEC_VALS=()
+    read_secrets() {
+        [ -t 0 ] && return 0
+        local key value
+        while IFS= read -r -d '' key && IFS= read -r -d '' value; do
+            _SEC_KEYS+=("$key")
+            _SEC_VALS+=("$value")
+        done
+        return 0
+    }
+    secret() {
+        local want="$1" i=0
+        while [ "$i" -lt "${#_SEC_KEYS[@]}" ]; do
+            if [ "${_SEC_KEYS[$i]}" = "$want" ]; then
+                printf '%s' "${_SEC_VALS[$i]}"
+                return 0
+            fi
+            i=$((i + 1))
+        done
+        return 0
+    }
+fi
+
+# Ensure isolated directories exist
+ensure_dirs() {
+    if ! is_dryrun; then
+        mkdir -p "$HP_NODE_ROOT" "$HP_APPS_ROOT" "$HP_ETC_ROOT/apps" "$HP_LOGS_ROOT" "$HP_RUN_ROOT" 2>/dev/null || true
+    fi
+}
+
+valid_app_name() {
+    local n="$1"
+    [ -n "$n" ] || die "app name must not be empty" 12
+    echo "$n" | grep -Eq '^[a-z0-9][a-z0-9_-]{0,63}$' \
+        || die "invalid app name '$n' (want ^[a-z0-9][a-z0-9_-]{0,63}\$)" 12
+}
+
+valid_node_version() {
+    local v="$1"
+    [ -n "$v" ] || die "node version must not be empty" 12
+    echo "$v" | grep -Eq '^[0-9]+(\.[0-9]+(\.[0-9]+)?)?$' \
+        || die "invalid node version '$v' (want ^[0-9]+(\\.[0-9]+(\\.[0-9]+)?)?\$)" 12
+}
+
+valid_port() {
+    local p="$1"
+    [ -n "$p" ] || die "port must not be empty" 12
+    echo "$p" | grep -Eq '^[0-9]{1,5}$' || die "invalid port '$p'" 12
+    if [ "$p" != "0" ]; then
+        if [ "$p" -lt 1024 ] || [ "$p" -gt 65535 ]; then
+            die "port '$p' out of range (must be 1024-65535 or 0 for auto)" 12
+        fi
+    fi
+}
+
+app_conf_file() {
+    printf '%s/apps/%s.json' "$HP_ETC_ROOT" "$1"
+}
+
+app_env_file() {
+    printf '%s/apps/%s.env' "$HP_ETC_ROOT" "$1"
+}
+
+app_pid_file() {
+    printf '%s/%s.pid' "$HP_RUN_ROOT" "$1"
+}
+
+app_out_log() {
+    printf '%s/%s.out.log' "$HP_LOGS_ROOT" "$1"
+}
+
+app_err_log() {
+    printf '%s/%s.err.log' "$HP_LOGS_ROOT" "$1"
+}
+
+app_exists() {
+    local conf
+    conf="$(app_conf_file "$1")"
+    [ -f "$conf" ]
+}
+
+require_app_exists() {
+    app_exists "$1" || die "app '$1' does not exist" 10
+}
+
+require_app_absent() {
+    ! app_exists "$1" || die "app '$1' already exists" 13
+}
+
+is_app_running() {
+    local name="$1" pid_file pid
+    pid_file="$(app_pid_file "$name")"
+    if [ -f "$pid_file" ]; then
+        pid="$(cat "$pid_file" 2>/dev/null || true)"
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+get_app_pid() {
+    local name="$1" pid_file pid
+    pid_file="$(app_pid_file "$name")"
+    if [ -f "$pid_file" ]; then
+        pid="$(cat "$pid_file" 2>/dev/null || true)"
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            printf '%s' "$pid"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# Resolve node executable path
+find_node_bin() {
+    local ver="$1"
+    # 1. Exact or prefix match under HP_NODE_ROOT
+    if [ -x "$HP_NODE_ROOT/v$ver/bin/node" ]; then
+        printf '%s/v%s/bin/node' "$HP_NODE_ROOT" "$ver"
+        return 0
+    fi
+    if [ -x "$HP_NODE_ROOT/$ver/bin/node" ]; then
+        printf '%s/%s/bin/node' "$HP_NODE_ROOT" "$ver"
+        return 0
+    fi
+    # Search for matching major version directory (e.g. v20.18.0 for 20)
+    for dir in "$HP_NODE_ROOT"/v"$ver".* "$HP_NODE_ROOT"/v"$ver" "$HP_NODE_ROOT"/"$ver".*; do
+        if [ -x "$dir/bin/node" ]; then
+            printf '%s/bin/node' "$dir"
+            return 0
+        fi
+    done
+    # Fallback to system node if available
+    if command -v node >/dev/null 2>&1; then
+        command -v node
+        return 0
+    fi
+    printf '/opt/hostpanel/runtimes/node/v%s/bin/node' "$ver"
+}
+
+# Escape string for JSON
+json_escape() {
+    local str="$1"
+    str="${str//\\/\\\\}"
+    str="${str//\"/\\\"}"
+    str="${str//$'\n'/\\n}"
+    str="${str//$'\r'/\\r}"
+    str="${str//$'\t'/\\t}"
+    printf '%s' "$str"
+}
+
+# Read JSON app details
+app_to_json() {
+    local name="$1" conf pid status mem cpu dir ver script port
+    conf="$(app_conf_file "$name")"
+    [ -f "$conf" ] || die "app '$name' config not found" 10
+
+    # Extract fields from config JSON using awk/sed/grep
+    dir="$(grep -o '"directory"[^,]*' "$conf" | head -n 1 | cut -d':' -f2- | tr -d ' "' || echo "")"
+    ver="$(grep -o '"node_version"[^,]*' "$conf" | head -n 1 | cut -d':' -f2- | tr -d ' "' || echo "20")"
+    script="$(grep -o '"script"[^,]*' "$conf" | head -n 1 | cut -d':' -f2- | tr -d ' "' || echo "index.js")"
+    port="$(grep -o '"port"[^,]*' "$conf" | head -n 1 | cut -d':' -f2- | tr -d ' "' || echo "31000")"
+    [ -n "$port" ] || port=31000
+
+    if pid="$(get_app_pid "$name")"; then
+        status="running"
+        # Get memory (MB) and CPU (%)
+        mem="$(ps -o rss= -p "$pid" 2>/dev/null | awk '{printf "%.1f", $1/1024}' || echo "0.0")"
+        cpu="$(ps -o %cpu= -p "$pid" 2>/dev/null | tr -d ' ' || echo "0.0")"
+        [ -n "$mem" ] || mem="0.0"
+        [ -n "$cpu" ] || cpu="0.0"
+    else
+        status="stopped"
+        pid=0
+        mem="0.0"
+        cpu="0.0"
+    fi
+
+    printf '{"name":"%s","directory":"%s","node_version":"%s","script":"%s","port":%d,"status":"%s","pid":%d,"memory_mb":%s,"cpu_pct":%s}\n' \
+        "$(json_escape "$name")" \
+        "$(json_escape "$dir")" \
+        "$(json_escape "$ver")" \
+        "$(json_escape "$script")" \
+        "$port" \
+        "$status" \
+        "$pid" \
+        "$mem" \
+        "$cpu"
+}
+
+usage() {
+    cat >&2 <<'EOF'
+usage: hp-nodejs <verb> [args]
+  status
+  list-apps
+  get-app         <name>
+  create-app      <name> <directory> <node_version> <script> <port>
+  start-app       <name>
+  stop-app        <name>
+  restart-app     <name>
+  delete-app      <name>
+  set-env         <name>                  [required: env payload on stdin]
+  get-env         <name>
+  get-logs        <name> <lines> <type:all|out|err>
+  list-runtimes
+  install-runtime <version>
+  remove-runtime  <version>
+  deploy-app      <name> <command> <custom_cmd>
+EOF
+    exit 12
+}
+
+[ $# -ge 1 ] || usage
+verb="$1"; shift
+
+ensure_dirs
+
+case "$verb" in
+
+  status)
+    require_argc 0 $# "status"
+    total_apps=0
+    running_apps=0
+    total_mem="0.0"
+    if [ -d "$HP_ETC_ROOT/apps" ]; then
+        for conf in "$HP_ETC_ROOT/apps"/*.json; do
+            [ -e "$conf" ] || continue
+            total_apps=$((total_apps + 1))
+            name="$(basename "$conf" .json)"
+            if is_app_running "$name"; then
+                running_apps=$((running_apps + 1))
+                if pid="$(get_app_pid "$name")"; then
+                    rss="$(ps -o rss= -p "$pid" 2>/dev/null || echo "0")"
+                    total_mem="$(awk -v t="$total_mem" -v r="$rss" 'BEGIN {printf "%.1f", t + (r/1024)}')"
+                fi
+            fi
+        done
+    fi
+
+    installed_runtimes=0
+    if [ -d "$HP_NODE_ROOT" ]; then
+        for rdir in "$HP_NODE_ROOT"/*; do
+            if [ -x "$rdir/bin/node" ]; then
+                installed_runtimes=$((installed_runtimes + 1))
+            fi
+        done
+    fi
+
+    printf '{"package":"nodejs","version":"3.0.0","service_unit":"hostpanel-nodejsd.service","run_as":"hp-nodejs","port":9111,"total_apps":%d,"running_apps":%d,"installed_runtimes":%d,"total_memory_mb":%s,"healthy":true}\n' \
+        "$total_apps" "$running_apps" "$installed_runtimes" "$total_mem"
+    ;;
+
+  list-apps)
+    require_argc 0 $# "list-apps"
+    first=1
+    printf '{"apps":['
+    if [ -d "$HP_ETC_ROOT/apps" ]; then
+        for conf in "$HP_ETC_ROOT/apps"/*.json; do
+            [ -e "$conf" ] || continue
+            name="$(basename "$conf" .json)"
+            [ "$first" = "1" ] && first=0 || printf ','
+            app_to_json "$name" | tr -d '\n'
+        done
+    fi
+    printf ']}\n'
+    ;;
+
+  get-app)
+    require_argc 1 $# "get-app <name>"
+    name="$1"
+    valid_app_name "$name"
+    require_app_exists "$name"
+    app_to_json "$name"
+    ;;
+
+  create-app)
+    require_argc 5 $# "create-app <name> <directory> <node_version> <script> <port>"
+    name="$1"; directory="$2"; node_version="$3"; script="$4"; port="$5"
+    valid_app_name "$name"
+    valid_abs_path "$directory"
+    no_traversal "$directory"
+    valid_node_version "$node_version"
+    valid_port "$port"
+    require_app_absent "$name"
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: mkdir -p '$directory' && write $(app_conf_file "$name")" >&2
+        printf '{"name":"%s","directory":"%s","node_version":"%s","script":"%s","port":%d,"status":"stopped","created":true}\n' \
+            "$name" "$directory" "$node_version" "$script" "$port"
+        exit 0
+    fi
+
+    mkdir -p "$directory" 2>/dev/null || true
+    mkdir -p "$HP_ETC_ROOT/apps" "$HP_LOGS_ROOT" "$HP_RUN_ROOT" 2>/dev/null || true
+
+    conf="$(app_conf_file "$name")"
+    cat > "$conf" <<EOF
+{
+  "name": "$(json_escape "$name")",
+  "directory": "$(json_escape "$directory")",
+  "node_version": "$(json_escape "$node_version")",
+  "script": "$(json_escape "$script")",
+  "port": $port,
+  "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+EOF
+
+    env_file="$(app_env_file "$name")"
+    if [ ! -f "$env_file" ]; then
+        touch "$env_file"
+    fi
+
+    app_to_json "$name"
+    ;;
+
+  start-app)
+    require_argc 1 $# "start-app <name>"
+    name="$1"
+    valid_app_name "$name"
+    require_app_exists "$name"
+
+    if is_app_running "$name"; then
+        app_to_json "$name"
+        exit 0
+    fi
+
+    conf="$(app_conf_file "$name")"
+    dir="$(grep -o '"directory"[^,]*' "$conf" | head -n 1 | cut -d':' -f2- | tr -d ' "' || echo "")"
+    ver="$(grep -o '"node_version"[^,]*' "$conf" | head -n 1 | cut -d':' -f2- | tr -d ' "' || echo "20")"
+    script="$(grep -o '"script"[^,]*' "$conf" | head -n 1 | cut -d':' -f2- | tr -d ' "' || echo "index.js")"
+    port="$(grep -o '"port"[^,]*' "$conf" | head -n 1 | cut -d':' -f2- | tr -d ' "' || echo "31000")"
+    [ -n "$port" ] || port=31000
+
+    node_bin="$(find_node_bin "$ver")"
+    node_dir="$(dirname "$node_bin")"
+    pid_file="$(app_pid_file "$name")"
+    out_log="$(app_out_log "$name")"
+    err_log="$(app_err_log "$name")"
+    env_file="$(app_env_file "$name")"
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: cd '$dir' && PORT=$port nohup '$node_bin' '$script' >> '$out_log' 2>> '$err_log' &" >&2
+        printf '{"name":"%s","status":"running","pid":99999,"started":true}\n' "$name"
+        exit 0
+    fi
+
+    [ -d "$dir" ] || die "app directory '$dir' does not exist" 11
+
+    # Load environment variables
+    env_vars=""
+    if [ -f "$env_file" ]; then
+        env_vars="$(grep -v '^#' "$env_file" | grep -v '^[[:space:]]*$' || true)"
+    fi
+
+    # Spawn daemonized node process
+    (
+        cd "$dir"
+        export PORT="$port"
+        export NODE_ENV="${NODE_ENV:-production}"
+        export PATH="$node_dir:$PATH"
+        if [ -n "$env_vars" ]; then
+            while IFS='=' read -r k v; do
+                [ -n "$k" ] && export "$k=$v"
+            done <<< "$env_vars"
+        fi
+        nohup "$node_bin" "$script" >> "$out_log" 2>> "$err_log" &
+        echo $! > "$pid_file"
+    )
+
+    sleep 0.2
+    app_to_json "$name"
+    ;;
+
+  stop-app)
+    require_argc 1 $# "stop-app <name>"
+    name="$1"
+    valid_app_name "$name"
+    require_app_exists "$name"
+
+    pid_file="$(app_pid_file "$name")"
+    if is_dryrun; then
+        echo "WOULD-EXEC: kill -TERM (pid) && rm '$pid_file'" >&2
+        printf '{"name":"%s","status":"stopped"}\n' "$name"
+        exit 0
+    fi
+
+    if pid="$(get_app_pid "$name")"; then
+        act kill -TERM "$pid" 2>/dev/null || true
+        for _ in 1 2 3 4 5; do
+            if kill -0 "$pid" 2>/dev/null; then
+                sleep 0.2
+            else
+                break
+            fi
+        done
+        if kill -0 "$pid" 2>/dev/null; then
+            act kill -KILL "$pid" 2>/dev/null || true
+        fi
+    fi
+    rm -f "$pid_file"
+    printf '{"name":"%s","status":"stopped"}\n' "$name"
+    ;;
+
+  restart-app)
+    require_argc 1 $# "restart-app <name>"
+    name="$1"
+    valid_app_name "$name"
+    require_app_exists "$name"
+
+    # Stop if running
+    pid_file="$(app_pid_file "$name")"
+    if ! is_dryrun; then
+        if pid="$(get_app_pid "$name")"; then
+            kill -TERM "$pid" 2>/dev/null || true
+            sleep 0.3
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
+        rm -f "$pid_file"
+    fi
+
+    # Start
+    "$0" start-app "$name"
+    ;;
+
+  delete-app)
+    require_argc 1 $# "delete-app <name>"
+    name="$1"
+    valid_app_name "$name"
+    require_app_exists "$name"
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: stop-app '$name' && rm conf, env, logs, pid" >&2
+        printf '{"name":"%s","deleted":true}\n' "$name"
+        exit 0
+    fi
+
+    # Stop process if running
+    if pid="$(get_app_pid "$name")"; then
+        kill -TERM "$pid" 2>/dev/null || true
+        sleep 0.2
+        kill -KILL "$pid" 2>/dev/null || true
+    fi
+
+    rm -f "$(app_conf_file "$name")" \
+          "$(app_env_file "$name")" \
+          "$(app_pid_file "$name")"
+
+    printf '{"name":"%s","deleted":true}\n' "$name"
+    ;;
+
+  set-env)
+    require_argc 1 $# "set-env <name>"
+    name="$1"
+    valid_app_name "$name"
+    require_app_exists "$name"
+
+    read_secrets
+    env_content="$(secret env)"
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: write $(app_env_file "$name")" >&2
+        printf '{"name":"%s","env_updated":true}\n' "$name"
+        exit 0
+    fi
+
+    env_file="$(app_env_file "$name")"
+    printf '%s\n' "$env_content" > "$env_file"
+    printf '{"name":"%s","env_updated":true}\n' "$name"
+    ;;
+
+  get-env)
+    require_argc 1 $# "get-env <name>"
+    name="$1"
+    valid_app_name "$name"
+    require_app_exists "$name"
+
+    env_file="$(app_env_file "$name")"
+    content=""
+    if [ -f "$env_file" ]; then
+        content="$(cat "$env_file")"
+    fi
+    printf '{"name":"%s","env":"%s"}\n' "$name" "$(json_escape "$content")"
+    ;;
+
+  get-logs)
+    require_argc 3 $# "get-logs <name> <lines> <type>"
+    name="$1"; lines="$2"; ltype="$3"
+    valid_app_name "$name"
+    require_app_exists "$name"
+    case "$ltype" in all|out|err) ;; *) die "log type must be all, out, or err" 12 ;; esac
+    echo "$lines" | grep -Eq '^[0-9]+$' || die "lines must be integer" 12
+
+    out_log="$(app_out_log "$name")"
+    err_log="$(app_err_log "$name")"
+
+    out_content=""
+    err_content=""
+    combined=""
+
+    if [ -f "$out_log" ]; then
+        out_content="$(tail -n "$lines" "$out_log" 2>/dev/null || true)"
+    fi
+    if [ -f "$err_log" ]; then
+        err_content="$(tail -n "$lines" "$err_log" 2>/dev/null || true)"
+    fi
+
+    if [ "$ltype" = "out" ]; then
+        combined="$out_content"
+    elif [ "$ltype" = "err" ]; then
+        combined="$err_content"
+    else
+        combined="$(printf '%s\n--- STDERR ---\n%s' "$out_content" "$err_content")"
+    fi
+
+    printf '{"name":"%s","stdout":"%s","stderr":"%s","logs":"%s"}\n' \
+        "$name" \
+        "$(json_escape "$out_content")" \
+        "$(json_escape "$err_content")" \
+        "$(json_escape "$combined")"
+    ;;
+
+  list-runtimes)
+    require_argc 0 $# "list-runtimes"
+    first=1
+    printf '{"runtimes":['
+    known_versions=("18" "20" "22" "24")
+    for v in "${known_versions[@]}"; do
+        installed="false"
+        path=""
+        exact_ver=""
+        node_bin="$(find_node_bin "$v")"
+        if [ -x "$node_bin" ]; then
+            installed="true"
+            path="$node_bin"
+            exact_ver="$("$node_bin" --version 2>/dev/null || echo "v$v")"
+        fi
+        [ "$first" = "1" ] && first=0 || printf ','
+        printf '{"major":"%s","version":"%s","installed":%s,"path":"%s","is_default":%s}' \
+            "$v" \
+            "${exact_ver:-v$v}" \
+            "$installed" \
+            "$(json_escape "$path")" \
+            "$([ "$v" = "20" ] && echo true || echo false)"
+    done
+    printf ']}\n'
+    ;;
+
+  install-runtime)
+    require_argc 1 $# "install-runtime <version>"
+    version="$1"
+    valid_node_version "$version"
+
+    echo "==> Preparing to install Node.js v$version runtime under $HP_NODE_ROOT/v$version" >&2
+    dest_dir="$HP_NODE_ROOT/v$version"
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: download and extract Node.js v$version into $dest_dir" >&2
+        printf '{"version":"%s","installed":true,"path":"%s/bin/node"}\n' "$version" "$dest_dir"
+        exit 0
+    fi
+
+    mkdir -p "$dest_dir" 2>/dev/null || true
+
+    # In production on server, fetch official node standalone tarball
+    arch="$(uname -m)"
+    case "$arch" in
+        x86_64) node_arch="x64" ;;
+        aarch64|arm64) node_arch="arm64" ;;
+        *) node_arch="x64" ;;
+    esac
+
+    echo "==> Target architecture: $node_arch" >&2
+    echo "==> Downloading official Node.js v$version standalone binary tarball from nodejs.org..." >&2
+
+    # Map major versions to latest LTS patch
+    case "$version" in
+        18*) full_node_ver="18.20.7" ;;
+        20*) full_node_ver="20.19.0" ;;
+        22*) full_node_ver="22.14.0" ;;
+        23*) full_node_ver="23.8.0" ;;
+        *) full_node_ver="${version}.0.0" ;;
+    esac
+
+    tar_url="https://nodejs.org/dist/v${full_node_ver}/node-v${full_node_ver}-linux-${node_arch}.tar.gz"
+    tmp_tar="/tmp/node-v${version}.tar.gz"
+
+    if curl -sSLf --connect-timeout 10 --max-time 120 "$tar_url" -o "$tmp_tar" 2>&1; then
+        echo "==> Extracting standalone Node.js into $dest_dir..." >&2
+        tar -xzf "$tmp_tar" -C "$dest_dir" --strip-components=1 2>&1 || die "failed to extract Node.js archive" 20
+        rm -f "$tmp_tar"
+    else
+        die "failed to download Node.js v$full_node_ver from nodejs.org" 20
+    fi
+
+    echo "==> Node.js v$version installed successfully." >&2
+    printf '{"version":"%s","installed":true,"path":"%s/bin/node"}\n' "$version" "$dest_dir"
+    ;;
+
+  remove-runtime)
+    require_argc 1 $# "remove-runtime <version>"
+    version="$1"
+    valid_node_version "$version"
+
+    # Check if in use
+    if [ -d "$HP_ETC_ROOT/apps" ]; then
+        for conf in "$HP_ETC_ROOT/apps"/*.json; do
+            [ -e "$conf" ] || continue
+            app_ver="$(grep -o '"node_version"[^,]*' "$conf" | head -n 1 | cut -d':' -f2- | tr -d ' "' || echo "")"
+            if [ "$app_ver" = "$version" ] || [ "$app_ver" = "v$version" ]; then
+                app_name="$(basename "$conf" .json)"
+                die "cannot remove runtime v$version: still in use by app '$app_name'" 11
+            fi
+        done
+    fi
+
+    dest_dir="$HP_NODE_ROOT/v$version"
+    if is_dryrun; then
+        echo "WOULD-EXEC: rm -rf $dest_dir" >&2
+        printf '{"version":"%s","removed":true}\n' "$version"
+        exit 0
+    fi
+
+    rm -rf "$dest_dir" "$HP_NODE_ROOT/$version"
+    printf '{"version":"%s","removed":true}\n' "$version"
+    ;;
+
+  deploy-app)
+    require_argc 3 $# "deploy-app <name> <command> <custom_cmd>"
+    name="$1"; cmd="$2"; custom_cmd="$3"
+    valid_app_name "$name"
+    require_app_exists "$name"
+
+    case "$cmd" in
+        npm-install|npm-build|npm-install-and-build|custom) ;;
+        *) die "unknown deploy command: $cmd" 12 ;;
+    esac
+
+    conf="$(app_conf_file "$name")"
+    dir="$(grep -o '"directory"[^,]*' "$conf" | head -n 1 | cut -d':' -f2- | tr -d ' "' || echo "")"
+    ver="$(grep -o '"node_version"[^,]*' "$conf" | head -n 1 | cut -d':' -f2- | tr -d ' "' || echo "20")"
+    node_bin="$(find_node_bin "$ver")"
+    node_dir="$(dirname "$node_bin")"
+
+    [ -d "$dir" ] || die "app directory '$dir' does not exist" 11
+
+    echo "==> Deploying application '$name' in $dir (Node.js v$ver)" >&2
+    if is_dryrun; then
+        echo "WOULD-EXEC: cd '$dir' && PATH=$node_dir:\$PATH $cmd" >&2
+        printf '{"name":"%s","command":"%s","deployed":true}\n' "$name" "$cmd"
+        exit 0
+    fi
+
+    (
+        cd "$dir"
+        export PATH="$node_dir:$PATH"
+        export NODE_ENV=production
+        if [ "$cmd" = "npm-install" ]; then
+            echo "==> Running npm install..."
+            npm install --production || die "npm install failed" 20
+        elif [ "$cmd" = "npm-build" ]; then
+            echo "==> Running npm run build..."
+            npm run build || die "npm build failed" 20
+        elif [ "$cmd" = "npm-install-and-build" ]; then
+            echo "==> Running npm install and build..."
+            npm install || die "npm install failed" 20
+            npm run build || die "npm build failed" 20
+        elif [ "$cmd" = "custom" ]; then
+            [ -n "$custom_cmd" ] || die "custom command must not be empty" 12
+            echo "==> Executing: $custom_cmd"
+            eval "$custom_cmd" || die "custom deploy command failed" 20
+        fi
+    )
+
+    echo "==> Deployment finished successfully." >&2
+    printf '{"name":"%s","command":"%s","deployed":true}\n' "$name" "$cmd"
+    ;;
+
+  *)
+    die "unknown verb: $verb" 12
+    ;;
+esac

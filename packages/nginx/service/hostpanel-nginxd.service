@@ -1,0 +1,22 @@
+[Unit]
+Description=HostPanel nginx package API
+After=network.target
+
+[Service]
+Type=simple
+User=hp-nginx
+Group=hp-nginx
+EnvironmentFile=-/opt/hostpanel/etc/nginx.env
+ExecStart=/opt/hostpanel/venv/bin/python -m hostpanel_nginxd
+Restart=on-failure
+RestartSec=5s
+
+# Isolation sandbox
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/hostpanel/etc/nginx /opt/hostpanel/data/vhosts /opt/hostpanel/logs/nginx /opt/hostpanel/run /tmp
+PrivateTmp=true
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target

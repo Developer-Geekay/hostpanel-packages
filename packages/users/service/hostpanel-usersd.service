@@ -1,0 +1,34 @@
+# SCAFFOLD — not installed by this step.
+[Unit]
+Description=HostPanel v3 — users feature service
+After=network.target
+
+[Service]
+Type=simple
+User=hp-users
+Group=hp-users
+
+# Port and token. The token file is root-owned 0640 root:hp-users, so the service
+# can read its own credential and nothing else on the box can.
+EnvironmentFile=/etc/hostpanel/users.env
+
+# Loopback ONLY. Binding 0.0.0.0 would expose privileged operations to the network.
+ExecStart=/opt/hostpanel/venv/bin/python -m hostpanel_usersd
+
+Restart=on-failure
+RestartSec=5
+
+# sudo is setuid, and invoking it is this service's entire purpose.
+NoNewPrivileges=no
+
+ProtectSystem=strict
+ProtectKernelTunables=yes
+MemoryMax=128M
+TasksMax=64
+
+# NOTE: do not add ProtectHome=yes. systemd sandboxing is inherited by children
+# reached through sudo, so it would break useradd -m and userdel -r in a way that
+# looks like a permissions bug.
+
+[Install]
+WantedBy=multi-user.target

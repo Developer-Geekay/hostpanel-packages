@@ -1,0 +1,22 @@
+[Unit]
+Description=HostPanel apache package API
+After=network.target
+
+[Service]
+Type=simple
+User=hp-apache
+Group=hp-apache
+EnvironmentFile=-/opt/hostpanel/etc/apache.env
+ExecStart=/opt/hostpanel/venv/bin/python -m hostpanel_apached
+Restart=on-failure
+RestartSec=5s
+
+# Isolation sandbox
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/hostpanel/etc/apache /opt/hostpanel/data/vhosts /opt/hostpanel/logs/apache /opt/hostpanel/run /tmp
+PrivateTmp=true
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target

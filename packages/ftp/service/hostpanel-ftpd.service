@@ -1,0 +1,35 @@
+# SCAFFOLD — not installed by this step.
+[Unit]
+Description=HostPanel v3 — ftp feature service
+After=network.target
+
+[Service]
+Type=simple
+User=hp-ftp
+Group=hp-ftp
+
+# Port and token. The token file is root-owned 0640 root:hp-ftp, so the
+# service can read its own credential and nothing else on the box can.
+EnvironmentFile=/etc/hostpanel/ftp.env
+
+# Loopback ONLY. Binding 0.0.0.0 would expose privileged FTP account
+# operations to the network.
+ExecStart=/opt/hostpanel/venv/bin/python -m hostpanel_ftpd
+
+Restart=on-failure
+RestartSec=5
+
+# sudo is setuid, and invoking it is this service's entire purpose.
+NoNewPrivileges=no
+
+ProtectSystem=strict
+ProtectKernelTunables=yes
+MemoryMax=128M
+TasksMax=64
+
+# NOTE: do not add ProtectHome=yes. systemd sandboxing is inherited by
+# children reached through sudo, and hp-ftp's ops script creates/chowns FTP
+# home directories under /home.
+
+[Install]
+WantedBy=multi-user.target

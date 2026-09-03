@@ -1,0 +1,8 @@
+# HostPanel v3 — wireguard feature service.
+#
+# ONE grant, ONE script path. hp-wireguard cannot edit system files or invoke
+# wg directly; only through this script, which validates every argument before acting.
+#
+# Installed 0440 root:root by provision-service.sh, after visudo -c -f.
+
+hp-wireguard ALL=(root) NOPASSWD: /opt/hostpanel/packages/wireguard/ops/hp-wireguard *

@@ -1,0 +1,9 @@
+# HostPanel v3 — storage feature service.
+#
+# ONE grant, ONE script path. hp-storage cannot invoke system commands
+# directly; only through this script, which validates every argument
+# before acting.
+#
+# Installed 0440 root:root by provision-service.sh, after visudo -c -f.
+
+hp-storage ALL=(root) NOPASSWD: /opt/hostpanel/packages/storage/ops/hp-storage *

@@ -1,0 +1,29 @@
+[Unit]
+Description=HostPanel v3 — storage and backups feature service
+After=network.target
+
+[Service]
+Type=simple
+User=hp-storage
+Group=hp-storage
+
+# Port 9114 and token.
+EnvironmentFile=/etc/hostpanel/storage.env
+
+# Loopback ONLY. Binding 0.0.0.0 would expose privileged operations to the network.
+ExecStart=/opt/hostpanel/venv/bin/python -m hostpanel_storaged
+
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=no
+
+ProtectSystem=strict
+ProtectKernelTunables=yes
+MemoryMax=512M
+TasksMax=128
+
+ReadWritePaths=/opt/hostpanel/data/storage /opt/hostpanel/data/backups /opt/hostpanel/etc/storage /opt/hostpanel/logs/storage /opt/hostpanel/run/storage
+
+[Install]
+WantedBy=multi-user.target

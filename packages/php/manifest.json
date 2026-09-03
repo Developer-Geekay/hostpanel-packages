@@ -1,0 +1,487 @@
+{
+  "manifest_version": 1,
+  "feature": "php",
+  "label": "PHP",
+  "version": "3.0.0",
+  "requires_core": [
+    3,
+    0,
+    0
+  ],
+  "api": {
+    "module": "hostpanel_phpd",
+    "unit": "hostpanel-phpd.service",
+    "run_as": "hp-php"
+  },
+  "frontend": {
+    "entry": "frontend/dist/main.js",
+    "_comment": "built bundle the shell imports at runtime and mounts"
+  },
+  "nav": [
+    {
+      "section": "runtime",
+      "section_label": "Web Servers & Runtimes",
+      "section_order": 15,
+      "label": "PHP",
+      "icon": "code",
+      "order": 30
+    }
+  ],
+  "ops": {
+    "script": "/opt/hostpanel/packages/php/ops/hp-php",
+    "sudoers": "hostpanel-phpd"
+  },
+  "sandbox": {
+    "protect_system": false,
+    "read_write_paths": [
+      "/opt/hostpanel/runtimes/php",
+      "/opt/hostpanel/etc/php",
+      "/opt/hostpanel/run/php",
+      "/opt/hostpanel/logs/php",
+      "/opt/hostpanel/data",
+      "/tmp"
+    ],
+    "_comment": "100% Isolation under /opt/hostpanel. Runtimes under /opt/hostpanel/runtimes/php/<version>, configurations under /opt/hostpanel/etc/php/<version>, sockets under /opt/hostpanel/run/php, and logs under /opt/hostpanel/logs/php."
+  },
+  "operations": {
+    "php.engine_status": {
+      "verb": "engine-status",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "php.engine_status",
+      "timeout_ms": 10000,
+      "params": {}
+    },
+    "php.engine_install": {
+      "verb": "engine-install",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "php.engine_install",
+      "timeout_ms": 600000,
+      "params": {}
+    },
+    "php.engine_uninstall": {
+      "verb": "engine-uninstall",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "php.engine_uninstall",
+      "timeout_ms": 60000,
+      "params": {}
+    },
+    "php.engine_action": {
+      "verb": "engine-action",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "php.engine_action",
+      "timeout_ms": 30000,
+      "params": {
+        "action": {
+          "enum": [
+            "start",
+            "stop",
+            "restart",
+            "reload"
+          ],
+          "required": true
+        },
+        "version": {
+          "pattern": "^[0-9]+\\.[0-9]+$",
+          "required": false
+        }
+      }
+    },
+    "php.version_list": {
+      "verb": "version-list",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "php.version_list",
+      "timeout_ms": 10000,
+      "params": {}
+    },
+    "php.version_install": {
+      "verb": "version-install",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "php.version_install",
+      "timeout_ms": 600000,
+      "params": {
+        "version": {
+          "pattern": "^[0-9]+\\.[0-9]+$",
+          "required": true
+        }
+      }
+    },
+    "php.version_uninstall": {
+      "verb": "version-uninstall",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "php.version_uninstall",
+      "timeout_ms": 60000,
+      "params": {
+        "version": {
+          "pattern": "^[0-9]+\\.[0-9]+$",
+          "required": true
+        }
+      }
+    },
+    "php.version_set_default": {
+      "verb": "version-set-default",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "php.version_set_default",
+      "timeout_ms": 15000,
+      "params": {
+        "version": {
+          "pattern": "^[0-9]+\\.[0-9]+$",
+          "required": true
+        }
+      }
+    },
+    "php.extension_list": {
+      "verb": "extension-list",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "php.extension_list",
+      "timeout_ms": 15000,
+      "params": {
+        "version": {
+          "pattern": "^[0-9]+\\.[0-9]+$",
+          "required": false
+        }
+      }
+    },
+    "php.extension_toggle": {
+      "verb": "extension-toggle",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "php.extension_toggle",
+      "timeout_ms": 20000,
+      "params": {
+        "version": {
+          "pattern": "^[0-9]+\\.[0-9]+$",
+          "required": true
+        },
+        "extension": {
+          "pattern": "^[a-z0-9_.-]{1,64}$",
+          "required": true
+        },
+        "enabled": {
+          "pattern": "^(true|false|1|0|enable|disable)$",
+          "required": true
+        }
+      }
+    },
+    "php.extension_install": {
+      "verb": "extension-install",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "php.extension_install",
+      "timeout_ms": 180000,
+      "params": {
+        "version": {
+          "pattern": "^[0-9]+\\.[0-9]+$",
+          "required": true
+        },
+        "extension": {
+          "pattern": "^[a-z0-9_.-]{1,64}$",
+          "required": true
+        }
+      }
+    },
+    "php.extension_install_pecl": {
+      "verb": "extension-install-pecl",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "php.extension_install_pecl",
+      "timeout_ms": 300000,
+      "params": {
+        "version": {
+          "pattern": "^[0-9]+\\.[0-9]+$",
+          "required": true
+        },
+        "extension": {
+          "pattern": "^[a-z0-9_.-]{1,64}$",
+          "required": true
+        }
+      }
+    },
+    "php.extension_install_so": {
+      "verb": "extension-install-so",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "php.extension_install_so",
+      "timeout_ms": 30000,
+      "params": {
+        "version": {
+          "pattern": "^[0-9]+\\.[0-9]+$",
+          "required": true
+        },
+        "extension": {
+          "pattern": "^[a-z0-9_.-]{1,64}$",
+          "required": true
+        },
+        "so_content_b64": {
+          "required": true
+        },
+        "is_zend": {
+          "pattern": "^(true|false|1|0)$",
+          "required": false
+        }
+      }
+    },
+    "php.extension_uninstall": {
+      "verb": "extension-uninstall",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "php.extension_uninstall",
+      "timeout_ms": 60000,
+      "params": {
+        "version": {
+          "pattern": "^[0-9]+\\.[0-9]+$",
+          "required": true
+        },
+        "extension": {
+          "pattern": "^[a-z0-9_.-]{1,64}$",
+          "required": true
+        }
+      }
+    },
+    "php.config_get": {
+      "verb": "config-get",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "php.config_get",
+      "timeout_ms": 10000,
+      "params": {
+        "version": {
+          "pattern": "^[0-9]+\\.[0-9]+$",
+          "required": true
+        },
+        "target": {
+          "pattern": "^(fpm|cli)$",
+          "required": false
+        }
+      }
+    },
+    "php.config_set": {
+      "verb": "config-set",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "php.config_set",
+      "timeout_ms": 20000,
+      "params": {
+        "version": {
+          "pattern": "^[0-9]+\\.[0-9]+$",
+          "required": true
+        },
+        "content_b64": {
+          "required": true
+        },
+        "target": {
+          "pattern": "^(fpm|cli)$",
+          "required": false
+        }
+      }
+    },
+    "php.directives_get": {
+      "verb": "directives-get",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "php.directives_get",
+      "timeout_ms": 10000,
+      "params": {
+        "version": {
+          "pattern": "^[0-9]+\\.[0-9]+$",
+          "required": true
+        }
+      }
+    },
+    "php.directives_set": {
+      "verb": "directives-set",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "php.directives_set",
+      "timeout_ms": 20000,
+      "params": {
+        "version": {
+          "pattern": "^[0-9]+\\.[0-9]+$",
+          "required": true
+        },
+        "upload_max_filesize": {
+          "pattern": "^[0-9]{1,6}[KMG]$",
+          "required": false
+        },
+        "post_max_size": {
+          "pattern": "^[0-9]{1,6}[KMG]$",
+          "required": false
+        },
+        "memory_limit": {
+          "pattern": "^[0-9]{1,6}[KMG]$",
+          "required": false
+        },
+        "max_execution_time": {
+          "pattern": "^[0-9]{1,5}$",
+          "required": false
+        },
+        "max_input_time": {
+          "pattern": "^[0-9]{1,5}$",
+          "required": false
+        },
+        "max_input_vars": {
+          "pattern": "^[0-9]{1,7}$",
+          "required": false
+        },
+        "timezone": {
+          "pattern": "^[A-Za-z0-9_/+-]{1,64}$",
+          "required": false
+        },
+        "display_errors": {
+          "pattern": "^(On|Off|1|0|true|false)$",
+          "required": false
+        },
+        "opcache_enable": {
+          "pattern": "^(1|0|true|false|On|Off)$",
+          "required": false
+        }
+      }
+    },
+    "php.logs_get": {
+      "verb": "logs-get",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "php.logs_get",
+      "timeout_ms": 10000,
+      "params": {
+        "version": {
+          "pattern": "^[0-9]+\\.[0-9]+$",
+          "required": false
+        },
+        "log_type": {
+          "pattern": "^(error|slow|fpm)$",
+          "required": false
+        },
+        "lines": {
+          "pattern": "^[0-9]{1,5}$",
+          "required": false
+        }
+      }
+    },
+    "php.list-pools": {
+      "verb": "list-pools",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "php.list_pools",
+      "timeout_ms": 10000,
+      "params": {
+        "version": {
+          "pattern": "^[0-9]+\\.[0-9]+$",
+          "required": false
+        }
+      }
+    },
+    "php.get-pool": {
+      "verb": "get-pool",
+      "mutating": false,
+      "streams": false,
+      "audit_action": "php.get_pool",
+      "timeout_ms": 10000,
+      "params": {
+        "pool": {
+          "pattern": "^[a-z][a-z0-9_-]{0,63}$",
+          "required": true
+        }
+      }
+    },
+    "php.create-pool": {
+      "verb": "create-pool",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "php.create_pool",
+      "timeout_ms": 20000,
+      "params": {
+        "pool": {
+          "pattern": "^[a-z][a-z0-9_-]{0,63}$",
+          "required": true
+        },
+        "version": {
+          "pattern": "^[0-9]+\\.[0-9]+$",
+          "required": true
+        },
+        "memory_limit": {
+          "pattern": "^[0-9]{1,6}[KMG]$",
+          "required": false,
+          "default": "128M"
+        },
+        "max_execution_time": {
+          "pattern": "^[0-9]{1,4}$",
+          "required": false,
+          "default": "30"
+        }
+      }
+    },
+    "php.delete-pool": {
+      "verb": "delete-pool",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "php.delete_pool",
+      "timeout_ms": 20000,
+      "params": {
+        "pool": {
+          "pattern": "^[a-z][a-z0-9_-]{0,63}$",
+          "required": true
+        }
+      }
+    },
+    "php.set-pool-version": {
+      "verb": "set-pool-version",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "php.set_pool_version",
+      "timeout_ms": 20000,
+      "params": {
+        "pool": {
+          "pattern": "^[a-z][a-z0-9_-]{0,63}$",
+          "required": true
+        },
+        "version": {
+          "pattern": "^[0-9]+\\.[0-9]+$",
+          "required": true
+        }
+      }
+    },
+    "php.set-pool-limits": {
+      "verb": "set-pool-limits",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "php.set_pool_limits",
+      "timeout_ms": 20000,
+      "params": {
+        "pool": {
+          "pattern": "^[a-z][a-z0-9_-]{0,63}$",
+          "required": true
+        },
+        "memory_limit": {
+          "pattern": "^[0-9]{1,6}[KMG]$",
+          "required": true
+        },
+        "max_execution_time": {
+          "pattern": "^[0-9]{1,4}$",
+          "required": true
+        }
+      }
+    },
+    "php.restart-fpm": {
+      "verb": "restart-fpm",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "php.restart_fpm",
+      "timeout_ms": 30000,
+      "params": {
+        "version": {
+          "pattern": "^[0-9]+\\.[0-9]+$",
+          "required": false
+        }
+      }
+    }
+  }
+}

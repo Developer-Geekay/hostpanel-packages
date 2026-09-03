@@ -1,0 +1,809 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# 100% Isolation paths under /opt/hostpanel
+CONF_DIR="/opt/hostpanel/etc/apache"
+SITES_AVAILABLE="${CONF_DIR}/sites-available"
+SITES_ENABLED="${CONF_DIR}/sites-enabled"
+MODS_AVAILABLE="${CONF_DIR}/mods-available"
+MODS_ENABLED="${CONF_DIR}/mods-enabled"
+LOG_DIR="/opt/hostpanel/logs/apache"
+RUN_DIR="/opt/hostpanel/run/apache"
+CONF_FILE="${CONF_DIR}/apache2.conf"
+PORTS_FILE="${CONF_DIR}/ports.conf"
+PID_FILE="${RUN_DIR}/apache2.pid"
+
+export APACHE_RUN_DIR="$RUN_DIR"
+export APACHE_LOG_DIR="$LOG_DIR"
+export APACHE_RUN_USER="www-data"
+export APACHE_RUN_GROUP="www-data"
+
+RUNTIME_DIR="/opt/hostpanel/runtimes/apache"
+MODULES_DIR="${RUNTIME_DIR}/modules"
+APACHE_BIN="${RUNTIME_DIR}/bin/httpd"
+[ ! -x "$APACHE_BIN" ] && APACHE_BIN="${RUNTIME_DIR}/bin/apache2"
+[ ! -x "$APACHE_BIN" ] && APACHE_BIN="/opt/hostpanel/packages/apache/bin/httpd"
+[ ! -x "$APACHE_BIN" ] && APACHE_BIN="/opt/hostpanel/packages/apache/bin/apache2"
+[ ! -x "$APACHE_BIN" ] && APACHE_BIN="$(which httpd 2>/dev/null || which apache2 2>/dev/null || true)"
+[ -z "$APACHE_BIN" ] && [ -x "/usr/sbin/apache2" ] && APACHE_BIN="/usr/sbin/apache2"
+
+EXIT_SUCCESS=0
+EXIT_INVALID_INPUT=12
+EXIT_INTERNAL_ERROR=20
+EXIT_EXECUTION_FAILED=1
+
+die() {
+  local msg="$1"
+  local code="${2:-$EXIT_INTERNAL_ERROR}"
+  echo "{\"ok\":false,\"error\":\"$msg\",\"code\":\"ERROR\"}" >&2
+  exit "$code"
+}
+
+read_secret() {
+  local target_key="$1"
+  python3 -c '
+import sys, json
+target = sys.argv[1]
+try:
+    raw = sys.stdin.buffer.read()
+    if not raw: sys.exit(0)
+    parts = raw.split(b"\0")
+    if len(parts) > 1:
+        for i in range(0, len(parts) - 1, 2):
+            if parts[i].decode("utf-8", errors="replace") == target:
+                sys.stdout.write(parts[i+1].decode("utf-8", errors="replace"))
+                sys.exit(0)
+    data = json.loads(raw.decode("utf-8", errors="replace"))
+    if isinstance(data, dict) and target in data:
+        sys.stdout.write(str(data[target]))
+        sys.exit(0)
+except Exception: pass
+' "$target_key"
+}
+
+cmd_engine_status() {
+  local is_running=false
+  local pid=0
+  local uptime="0s"
+  local version="Apache"
+  local workers=0
+  local mpm="event"
+  local port=8088
+
+  if [ -f "$PORTS_FILE" ]; then
+    local p_match
+    p_match="$(grep -E "^\s*Listen\s+.*[0-9]+" "$PORTS_FILE" | head -1 | awk '{print $2}' | sed -E 's/.*:([0-9]+)$/\1/' || true)"
+    if [ -n "$p_match" ]; then port="$p_match"; fi
+  fi
+
+  if [ -n "$APACHE_BIN" ] && [ -x "$APACHE_BIN" ]; then
+    version="$("$APACHE_BIN" -v 2>&1 | sed -n 's/Server version: //p' | cut -d' ' -f1 || echo "Apache/2.4")"
+    local mpm_out
+    mpm_out="$("$APACHE_BIN" -V 2>&1 | grep "Server MPM:" || true)"
+    if [ -n "$mpm_out" ]; then mpm="$(echo "$mpm_out" | awk '{print $3}')"; fi
+  fi
+
+  if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; then
+    is_running=true
+    pid="$(cat "$PID_FILE")"
+    if [ -d "/proc/$pid" ]; then
+      local ticks
+      ticks=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || echo 0)
+      local uptime_sec
+      uptime_sec=$(awk '{print int($1)}' /proc/uptime 2>/dev/null || echo 0)
+      local elapsed=$(( uptime_sec - (ticks / 100) ))
+      [ "$elapsed" -lt 0 ] && elapsed=0
+      uptime="${elapsed}s"
+    fi
+  elif systemctl is-active --quiet apache2 2>/dev/null; then
+    is_running=true
+    pid="$(pgrep -f "apache2|httpd" 2>/dev/null | head -1 || echo 0)"
+  fi
+
+  local port_str="$port"
+  local active_sites=0
+  local total_sites=0
+  local instances=0
+
+  if [ "$is_running" = true ]; then
+    local detected_ports
+    detected_ports="$(ss -tlnp 2>/dev/null | grep -E "apache2|httpd" | awk '{print $4}' | sed -E 's/.*:([0-9]+)$/\1/' | sort -un | tr '\n' ',' | sed 's/,$//' || true)"
+    if [ -n "$detected_ports" ]; then
+      port_str="$detected_ports"
+    fi
+    workers="$(pgrep -f "apache2|httpd" 2>/dev/null | wc -l | tr -d ' ')"
+    workers="${workers:-0}"
+    instances="$workers"
+  fi
+
+  if [ -d "$SITES_ENABLED" ]; then
+    active_sites="$(find "$SITES_ENABLED" -maxdepth 1 -name "*.conf" 2>/dev/null | wc -l | tr -d ' ')"
+  fi
+  if [ -d "$SITES_AVAILABLE" ]; then
+    total_sites="$(find "$SITES_AVAILABLE" -maxdepth 1 -name "*.conf" 2>/dev/null | wc -l | tr -d ' ')"
+  fi
+  total_sites="${total_sites:-0}"
+  active_sites="${active_sites:-0}"
+
+  printf '{"ok":true,"engine":"apache","service":"apache2","status":"%s","active":%s,"pid":%d,"uptime":"%s","version":"%s","port":"%s","ports":"%s","mpm":"%s","workers":%d,"instances":%d,"active_sites":%d,"total_sites":%d}\n' \
+    "$([ "$is_running" = true ] && echo "running" || echo "stopped")" \
+    "$is_running" \
+    "$pid" \
+    "$uptime" \
+    "$version" \
+    "$port_str" \
+    "$port_str" \
+    "$mpm" \
+    "$workers" \
+    "$instances" \
+    "$active_sites" \
+    "$total_sites"
+}
+
+cmd_engine_start() {
+  mkdir -p "$LOG_DIR" "$RUN_DIR"
+  if [ -n "$APACHE_BIN" ] && [ -f "$CONF_FILE" ]; then
+    local syn_err
+    if ! syn_err="$("$APACHE_BIN" -d "$CONF_DIR" -f "$CONF_FILE" -t 2>&1)"; then
+      printf '{"ok":false,"error":%s,"code":"SYNTAX_ERROR"}\n' "$(python3 -c "import json, sys; print(json.dumps(sys.argv[1]))" "$syn_err")" >&2
+      return $EXIT_EXECUTION_FAILED
+    fi
+  fi
+  if [ -d /etc/systemd/system ]; then
+    mkdir -p /etc/systemd/system/apache2.service.d
+    if [ ! -f /etc/systemd/system/apache2.service.d/hostpanel.conf ] || ! grep -q "APACHE_RUN_DIR" /etc/systemd/system/apache2.service.d/hostpanel.conf 2>/dev/null; then
+      cat <<EOF > /etc/systemd/system/apache2.service.d/hostpanel.conf
+[Service]
+Type=simple
+Environment=APACHE_RUN_DIR=$RUN_DIR
+Environment=APACHE_LOG_DIR=$LOG_DIR
+Environment=APACHE_RUN_USER=www-data
+Environment=APACHE_RUN_GROUP=www-data
+ExecStart=
+ExecStart=$APACHE_BIN -d $CONF_DIR -f $CONF_FILE -DFOREGROUND
+ExecReload=
+ExecReload=/usr/sbin/apachectl -d $CONF_DIR -f $CONF_FILE -k graceful
+ExecStop=
+ExecStop=/usr/sbin/apachectl -d $CONF_DIR -f $CONF_FILE -k graceful-stop
+ReadWritePaths=$LOG_DIR $RUN_DIR $CONF_DIR /opt/hostpanel/data/vhosts
+EOF
+      systemctl daemon-reload 2>/dev/null || true
+    fi
+  fi
+  if [ -f "/etc/systemd/system/apache2.service" ] || [ -f "/lib/systemd/system/apache2.service" ] || [ -f "/usr/lib/systemd/system/apache2.service" ]; then
+    if ! systemctl start apache2 2>/dev/null; then
+      local err
+      err="$(journalctl -u apache2 -n 10 --no-pager 2>/dev/null || echo "systemctl start apache2 failed")"
+      printf '{"ok":false,"error":%s,"code":"START_FAILED"}\n' "$(python3 -c "import json, sys; print(json.dumps(sys.argv[1]))" "$err")" >&2
+      return $EXIT_EXECUTION_FAILED
+    fi
+  elif [ -n "$APACHE_BIN" ]; then
+    if ! "$APACHE_BIN" -d "$CONF_DIR" -f "$CONF_FILE" -k start 2>/dev/null; then
+      echo '{"ok":false,"error":"Failed to execute Apache binary","code":"START_FAILED"}' >&2
+      return $EXIT_EXECUTION_FAILED
+    fi
+  fi
+  sleep 0.2
+  if ! systemctl is-active --quiet apache2 2>/dev/null && ! pgrep -f "apache2|httpd" >/dev/null 2>&1; then
+    echo '{"ok":false,"error":"Apache process failed to stay active after launch","code":"START_FAILED"}' >&2
+    return $EXIT_EXECUTION_FAILED
+  fi
+  printf '{"ok":true,"action":"start","status":"running"}\n'
+}
+
+cmd_engine_stop() {
+  if [ -f "/etc/systemd/system/apache2.service" ] || [ -f "/lib/systemd/system/apache2.service" ]; then
+    systemctl stop apache2 2>/dev/null || true
+  elif [ -f "$PID_FILE" ]; then
+    kill "$(cat "$PID_FILE")" 2>/dev/null || true
+  fi
+  pkill -f "apache2|httpd" 2>/dev/null || true
+  printf '{"ok":true,"action":"stop","status":"stopped"}\n'
+}
+
+cmd_engine_restart() {
+  cmd_engine_stop >/dev/null 2>&1 || true
+  sleep 0.5
+  cmd_engine_start
+}
+
+cmd_engine_reload() {
+  if [ -n "$APACHE_BIN" ]; then
+    apachectl -d "$CONF_DIR" -f "$CONF_FILE" -k graceful 2>/dev/null || systemctl reload apache2 2>/dev/null || true
+  else
+    systemctl reload apache2 2>/dev/null || true
+  fi
+  printf '{"ok":true,"action":"reload","reloaded":true}\n'
+}
+
+cmd_engine_test() {
+  if [ -z "$APACHE_BIN" ]; then
+    echo '{"ok":false,"error":"Apache binary not installed","code":"NOT_INSTALLED"}' >&2
+    return $EXIT_INTERNAL_ERROR
+  fi
+  local content=""
+  if [[ ! -t 0 ]]; then content="$(read_secret "content")"; fi
+
+  local out
+  if [ -n "$content" ]; then
+    local tmp_file
+    tmp_file="$(mktemp /tmp/apache_test_XXXXXX.conf)"
+    printf '%s' "$content" > "$tmp_file"
+    if out="$("$APACHE_BIN" -d "$CONF_DIR" -f "$tmp_file" -t 2>&1)"; then
+      rm -f "$tmp_file"
+      printf '{"ok":true,"valid":true,"output":%s}\n' "$(python3 -c "import json, sys; print(json.dumps(sys.argv[1]))" "$out")"
+    else
+      rm -f "$tmp_file"
+      printf '{"ok":false,"valid":false,"error":%s,"code":"SYNTAX_ERROR"}\n' "$(python3 -c "import json, sys; print(json.dumps(sys.argv[1]))" "$out")" >&2
+      return $EXIT_EXECUTION_FAILED
+    fi
+  else
+    if out="$(apachectl -d "$CONF_DIR" -f "$CONF_FILE" -t 2>&1 || "$APACHE_BIN" -d "$CONF_DIR" -f "$CONF_FILE" -t 2>&1)"; then
+      printf '{"ok":true,"valid":true,"output":%s}\n' "$(python3 -c "import json, sys; print(json.dumps(sys.argv[1]))" "$out")"
+    else
+      printf '{"ok":false,"valid":false,"error":%s,"code":"SYNTAX_ERROR"}\n' "$(python3 -c "import json, sys; print(json.dumps(sys.argv[1]))" "$out")" >&2
+      return $EXIT_EXECUTION_FAILED
+    fi
+  fi
+}
+
+cmd_engine_config_get() {
+  if [ ! -f "$CONF_FILE" ]; then
+    echo "{\"ok\":false,\"error\":\"Configuration not found at $CONF_FILE\",\"code\":\"NOT_FOUND\"}" >&2
+    return $EXIT_INVALID_INPUT
+  fi
+  python3 -c '
+import json, sys
+with open(sys.argv[1], "r", encoding="utf-8", errors="replace") as f:
+    content = f.read()
+print(json.dumps({"ok": True, "path": sys.argv[1], "content": content}))
+' "$CONF_FILE"
+}
+
+cmd_engine_config_set() {
+  local content=""
+  if [[ ! -t 0 ]]; then content="$(read_secret "content")"; fi
+  [ -z "$content" ] && die "content payload required" "$EXIT_INVALID_INPUT"
+
+  local tmp_file
+  tmp_file="$(mktemp /tmp/apache_test_XXXXXX.conf)"
+  printf '%s' "$content" > "$tmp_file"
+
+  if [ -n "$APACHE_BIN" ]; then
+    if ! "$APACHE_BIN" -d "$CONF_DIR" -f "$tmp_file" -t >/dev/null 2>&1; then
+      local err
+      err="$("$APACHE_BIN" -d "$CONF_DIR" -f "$tmp_file" -t 2>&1 || true)"
+      rm -f "$tmp_file"
+      printf '{"ok":false,"error":%s,"code":"INVALID_SYNTAX"}\n' "$(python3 -c "import json, sys; print(json.dumps(sys.argv[1]))" "$err")" >&2
+      return $EXIT_INVALID_INPUT
+    fi
+  fi
+
+  mkdir -p "$CONF_DIR"
+  if [ -f "$CONF_FILE" ]; then
+    cp "$CONF_FILE" "${CONF_FILE}.bak" 2>/dev/null || true
+  fi
+  cp "$tmp_file" "$CONF_FILE"
+  rm -f "$tmp_file"
+  cmd_engine_reload >/dev/null 2>&1 || true
+  printf '{"ok":true,"updated":true,"path":"%s"}\n' "$CONF_FILE"
+}
+
+cmd_engine_logs() {
+  local lines="${1:-50}"
+  local log_type="${2:-error}"
+  local domain="${3:-}"
+  local target_log="${LOG_DIR}/${log_type}.log"
+  if [ -n "$domain" ] && [ "$domain" != "global" ]; then
+    if [ -f "${LOG_DIR}/${domain}_${log_type}.log" ]; then
+      target_log="${LOG_DIR}/${domain}_${log_type}.log"
+    elif [ -f "${LOG_DIR}/${domain}.${log_type}.log" ]; then
+      target_log="${LOG_DIR}/${domain}.${log_type}.log"
+    fi
+  fi
+
+  if [ ! -f "$target_log" ]; then
+    printf '{"ok":true,"log_type":"%s","domain":"%s","lines":[],"total":0,"path":"%s"}\n' "$log_type" "$domain" "$target_log"
+    return 0
+  fi
+  python3 -c '
+import json, sys
+lines_cnt = int(sys.argv[1])
+log_path = sys.argv[2]
+try:
+    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+        all_l = f.readlines()
+        res = [l.rstrip("\r\n") for l in all_l[-lines_cnt:]]
+        print(json.dumps({"ok": True, "lines": res, "total": len(all_l), "path": log_path}))
+except Exception as e:
+    print(json.dumps({"ok": False, "error": str(e)}))
+' "$lines" "$target_log"
+}
+
+cmd_vhost_list() {
+  mkdir -p "$SITES_AVAILABLE" "$SITES_ENABLED" 2>/dev/null || true
+  python3 -c '
+import os, json, sys, re
+vdir = sys.argv[1]
+edir = sys.argv[2]
+vhosts = []
+if os.path.isdir(vdir):
+    for f in sorted(os.listdir(vdir)):
+        if f.endswith(".conf"):
+            path = os.path.join(vdir, f)
+            enabled = os.path.exists(os.path.join(edir, f))
+            domain = f.replace(".conf", "")
+            port = 80
+            ssl = False
+            root_dir = "/opt/hostpanel/data/vhosts/" + domain
+            try:
+                with open(path, "r", errors="ignore") as fp:
+                    content = fp.read()
+                    m_port = re.search(r"<VirtualHost\s+[^:>]+:([0-9]+)>", content)
+                    if m_port: port = int(m_port.group(1))
+                    if "SSLEngine on" in content or port == 443 or port == 8443: ssl = True
+                    m_root = re.search(r"DocumentRoot\s+([^\s\n]+)", content)
+                    if m_root:
+                        root_dir = m_root.group(1).strip("\"'\''")
+            except Exception: pass
+            vhosts.append({
+                "domain": domain,
+                "file": f,
+                "enabled": enabled,
+                "port": port,
+                "ssl": ssl,
+                "root": root_dir
+            })
+print(json.dumps({"ok": True, "vhosts": vhosts}))
+' "$SITES_AVAILABLE" "$SITES_ENABLED"
+}
+
+cmd_vhost_get() {
+  local domain="${1:-}"
+  [ -n "$domain" ] && [[ "$domain" =~ ^[a-zA-Z0-9.-]+$ ]] || die "invalid domain" "$EXIT_INVALID_INPUT"
+  local target="${SITES_AVAILABLE}/${domain}.conf"
+  [ -f "$target" ] || die "vhost '$domain' not found" "$EXIT_INVALID_INPUT"
+
+  python3 -c '
+import json, sys
+with open(sys.argv[1], "r", encoding="utf-8", errors="replace") as f:
+    print(json.dumps({"ok": True, "domain": sys.argv[2], "content": f.read(), "file": sys.argv[1]}))
+' "$target" "$domain"
+}
+
+cmd_vhost_set() {
+  local domain="${1:-}"
+  [ -n "$domain" ] && [[ "$domain" =~ ^[a-zA-Z0-9.-]+$ ]] || die "invalid domain" "$EXIT_INVALID_INPUT"
+  local content=""
+  if [[ ! -t 0 ]]; then content="$(read_secret "content")"; fi
+  [ -z "$content" ] && die "content payload required" "$EXIT_INVALID_INPUT"
+
+  mkdir -p "$SITES_AVAILABLE" "$SITES_ENABLED"
+  local target="${SITES_AVAILABLE}/${domain}.conf"
+  local backup=""
+  if [ -f "$target" ]; then
+    backup="$(cat "$target")"
+  fi
+
+  printf '%s' "$content" > "$target"
+  ln -sf "$target" "${SITES_ENABLED}/${domain}.conf"
+
+  # Validate syntax pre-flight & rollback
+  if [ -n "$APACHE_BIN" ] && [ -x "$APACHE_BIN" ]; then
+    if ! "$APACHE_BIN" -d "$CONF_DIR" -f "$CONF_FILE" -t >/dev/null 2>&1; then
+      local err
+      err="$("$APACHE_BIN" -d "$CONF_DIR" -f "$CONF_FILE" -t 2>&1 || true)"
+      if [ -n "$backup" ]; then
+        printf '%s' "$backup" > "$target"
+      else
+        rm -f "$target" "${SITES_ENABLED}/${domain}.conf"
+      fi
+      printf '{"ok":false,"error":%s,"code":"INVALID_SYNTAX"}\n' "$(python3 -c "import json, sys; print(json.dumps(sys.argv[1]))" "$err")" >&2
+      return $EXIT_INVALID_INPUT
+    fi
+  fi
+
+  # Auto-provision DocumentRoot and branded index.html placeholder
+  local docroot
+  docroot="$(python3 -c '
+import re, sys
+m = re.search(r"DocumentRoot\s+([^\s\n]+)", sys.argv[1])
+if m: print(m.group(1).strip("\"'\''"))
+' "$content")"
+  if [ -n "$docroot" ]; then
+    mkdir -p "$docroot"
+    if [ ! -f "${docroot}/index.html" ] && [ ! -f "${docroot}/index.php" ] && [ ! -f "${docroot}/index.htm" ]; then
+      cat <<EOF > "${docroot}/index.html"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Welcome to ${domain}</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #09090b; color: #f4f4f5; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+    .card { background: #18181b; border: 1px solid #27272a; padding: 2.5rem 3rem; border-radius: 12px; text-align: center; max-width: 480px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
+    h1 { font-size: 1.75rem; margin-top: 0; color: #38bdf8; }
+    p { color: #a1a1aa; line-height: 1.6; font-size: 0.95rem; }
+    .badge { display: inline-block; padding: 0.25rem 0.75rem; background: #0284c7; color: #fff; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; margin-bottom: 1rem; }
+    .path { font-family: monospace; background: #27272a; padding: 0.2rem 0.4rem; border-radius: 4px; color: #e4e4e7; font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <span class="badge">HostPanel v3 • Apache</span>
+    <h1>${domain}</h1>
+    <p>Your Apache virtual host is active and working properly.</p>
+    <p>Replace this file at:<br><span class="path">${docroot}/index.html</span></p>
+  </div>
+</body>
+</html>
+EOF
+      chown -R www-data:www-data "$docroot" 2>/dev/null || true
+      chmod 755 "$docroot" 2>/dev/null || true
+    fi
+  fi
+
+  cmd_engine_reload >/dev/null 2>&1 || true
+  printf '{"ok":true,"domain":"%s","saved":true}\n' "$domain"
+}
+
+cmd_vhost_delete() {
+  local domain="${1:-}"
+  [ -n "$domain" ] && [[ "$domain" =~ ^[a-zA-Z0-9.-]+$ ]] || die "invalid domain" "$EXIT_INVALID_INPUT"
+  rm -f "${SITES_AVAILABLE}/${domain}.conf" "${SITES_ENABLED}/${domain}.conf"
+  cmd_engine_reload >/dev/null 2>&1 || true
+  printf '{"ok":true,"domain":"%s","deleted":true}\n' "$domain"
+}
+
+cmd_vhost_enable() {
+  local domain="${1:-}"
+  [ -n "$domain" ] && [[ "$domain" =~ ^[a-zA-Z0-9.-]+$ ]] || die "invalid domain" "$EXIT_INVALID_INPUT"
+  local avail="${SITES_AVAILABLE}/${domain}.conf"
+  [ -f "$avail" ] || die "vhost not available" "$EXIT_INVALID_INPUT"
+  ln -sf "$avail" "${SITES_ENABLED}/${domain}.conf"
+  cmd_engine_reload >/dev/null 2>&1 || true
+  printf '{"ok":true,"domain":"%s","enabled":true}\n' "$domain"
+}
+
+cmd_vhost_disable() {
+  local domain="${1:-}"
+  [ -n "$domain" ] && [[ "$domain" =~ ^[a-zA-Z0-9.-]+$ ]] || die "invalid domain" "$EXIT_INVALID_INPUT"
+  rm -f "${SITES_ENABLED}/${domain}.conf"
+  cmd_engine_reload >/dev/null 2>&1 || true
+  printf '{"ok":true,"domain":"%s","enabled":false}\n' "$domain"
+}
+
+cmd_module_list() {
+  local mod_dir="${MODULES_DIR:-/opt/hostpanel/runtimes/apache/modules}"
+  python3 -c '
+import os, json, sys
+modules = []
+enabled_mods = set()
+mods_enabled_dir = "/opt/hostpanel/etc/apache/mods-enabled"
+mods_avail_dir = "/opt/hostpanel/etc/apache/mods-available"
+runtime_mod_dir = sys.argv[1]
+
+if os.path.isdir(mods_enabled_dir):
+    for f in os.listdir(mods_enabled_dir):
+        if f.endswith(".load"):
+            enabled_mods.add(f.replace(".load", ""))
+
+all_mods = set(enabled_mods)
+if os.path.isdir(mods_avail_dir):
+    for f in os.listdir(mods_avail_dir):
+        if f.endswith(".load"):
+            all_mods.add(f.replace(".load", ""))
+
+if os.path.isdir(runtime_mod_dir):
+    for f in os.listdir(runtime_mod_dir):
+        if f.startswith("mod_") and f.endswith(".so"):
+            mod_name = f[4:-3]
+            all_mods.add(mod_name)
+
+known_mods = ["rewrite", "ssl", "headers", "proxy", "proxy_fcgi", "proxy_http", "http2", "deflate", "expires", "security2", "authz_core", "dir", "mime", "mpm_event"]
+for m in sorted(all_mods | set(known_mods)):
+    modules.append({"name": m, "enabled": m in enabled_mods})
+
+print(json.dumps({"ok": True, "modules": modules}))
+' "$mod_dir"
+}
+
+cmd_module_enable() {
+  local mod="${1:-}"
+  [ -n "$mod" ] && [[ "$mod" =~ ^[a-zA-Z0-9_]+$ ]] || die "invalid module name" "$EXIT_INVALID_INPUT"
+  mkdir -p "$MODS_AVAILABLE" "$MODS_ENABLED"
+  local avail="${MODS_AVAILABLE}/${mod}.load"
+  local enabled="${MODS_ENABLED}/${mod}.load"
+
+  local so_path=""
+  for candidate in \
+    "${MODULES_DIR}/mod_${mod}.so" \
+    "/opt/hostpanel/runtimes/apache/modules/mod_${mod}.so" \
+    "/opt/hostpanel/packages/apache/modules/mod_${mod}.so" \
+    "/usr/lib/apache2/modules/mod_${mod}.so" \
+    "/usr/lib64/httpd/modules/mod_${mod}.so" \
+    "/usr/lib/httpd/modules/mod_${mod}.so"; do
+    if [ -f "$candidate" ]; then
+      so_path="$candidate"
+      break
+    fi
+  done
+  if [ -n "$so_path" ]; then
+    echo "LoadModule ${mod}_module $so_path" > "$avail"
+  elif [ ! -f "$avail" ] && [ -f "/etc/apache2/mods-available/${mod}.load" ]; then
+    cp "/etc/apache2/mods-available/${mod}.load" "$avail"
+  fi
+
+  if [ -f "$avail" ]; then
+    ln -sf "$avail" "$enabled"
+  fi
+
+  # Also link companion .conf if available (e.g., mime.conf, dir.conf, deflate.conf)
+  if [ -f "/etc/apache2/mods-available/${mod}.conf" ] && [ ! -f "${MODS_AVAILABLE}/${mod}.conf" ]; then
+    cp "/etc/apache2/mods-available/${mod}.conf" "${MODS_AVAILABLE}/${mod}.conf" 2>/dev/null || true
+  fi
+  if [ -f "${MODS_AVAILABLE}/${mod}.conf" ]; then
+    ln -sf "${MODS_AVAILABLE}/${mod}.conf" "${MODS_ENABLED}/${mod}.conf"
+  fi
+
+  cmd_engine_reload >/dev/null 2>&1 || true
+  printf '{"ok":true,"module":"%s","enabled":true}\n' "$mod"
+}
+
+cmd_module_disable() {
+  local mod="${1:-}"
+  [ -n "$mod" ] && [[ "$mod" =~ ^[a-zA-Z0-9_]+$ ]] || die "invalid module name" "$EXIT_INVALID_INPUT"
+  rm -f "${MODS_ENABLED}/${mod}.load" "${MODS_ENABLED}/${mod}.conf" 2>/dev/null || true
+  cmd_engine_reload >/dev/null 2>&1 || true
+  printf '{"ok":true,"module":"%s","enabled":false}\n' "$mod"
+}
+
+cmd_engine_install() {
+  echo "============================================================"
+  echo "  HostPanel v3 — Apache HTTP Server Engine Provisioner"
+  echo "============================================================"
+  echo ""
+  echo "[1/4] Checking / Provisioning standalone Apache runtime & modules..."
+  local arch
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64|amd64) arch="x86_64" ;;
+    aarch64|arm64) arch="aarch64" ;;
+    *) arch="x86_64" ;;
+  esac
+
+  mkdir -p "${RUNTIME_DIR}/bin" "${MODULES_DIR}"
+
+  if [ ! -x "$APACHE_BIN" ] || [ "$APACHE_BIN" = "/usr/sbin/apache2" ]; then
+    echo "  Fetching standalone Apache HTTP server runtime ($arch)..."
+    local base_dl="https://raw.githubusercontent.com/Developer-Geekay/hostpanel-binaries/main/webserver/Apache/${arch}"
+    if ! curl -fsSL --connect-timeout 20 --retry 3 --retry-delay 2 "${base_dl}/httpd" -o "${RUNTIME_DIR}/bin/httpd"; then
+      die "failed to download standalone apache httpd from ${base_dl}/httpd" "$EXIT_INTERNAL_ERROR"
+    fi
+    chmod 0755 "${RUNTIME_DIR}/bin/httpd"
+    cp -f "${RUNTIME_DIR}/bin/httpd" "${RUNTIME_DIR}/bin/apache2"
+    APACHE_BIN="${RUNTIME_DIR}/bin/httpd"
+
+    echo "  Fetching Apache runtime modules archive..."
+    if curl -fsSL --connect-timeout 20 --retry 3 --retry-delay 2 "${base_dl}/modules.tar.gz" -o "${RUNTIME_DIR}/modules.tar.gz"; then
+      tar -xzf "${RUNTIME_DIR}/modules.tar.gz" -C "${MODULES_DIR}"
+      rm -f "${RUNTIME_DIR}/modules.tar.gz"
+      echo "  ✓ Extracted loadable modules to ${MODULES_DIR}"
+    else
+      echo "  [!] Warning: modules archive download failed from ${base_dl}/modules.tar.gz" >&2
+    fi
+  fi
+
+  [ -x "$APACHE_BIN" ] || die "failed to install standalone apache executable" "$EXIT_INTERNAL_ERROR"
+  echo "  ✓ Apache executable ready: $APACHE_BIN"
+
+  echo "[2/4] Initializing /opt/hostpanel isolated directories..."
+  mkdir -p "$CONF_DIR" "$SITES_AVAILABLE" "$SITES_ENABLED" "$MODS_AVAILABLE" "$MODS_ENABLED" "$LOG_DIR" "$RUN_DIR" "/opt/hostpanel/data/vhosts"
+  touch "${LOG_DIR}/access.log" "${LOG_DIR}/error.log"
+
+  echo "[3/4] Configuring isolated Apache parameters & systemd integration..."
+  local pkg_cfg_dir="/opt/hostpanel/packages/apache/config"
+  [ ! -d "$pkg_cfg_dir" ] && [ -d "/srv/hostpanel-v3/packages/apache/config" ] && pkg_cfg_dir="/srv/hostpanel-v3/packages/apache/config"
+
+  # Copy standard mime.types
+  if [ ! -f "${CONF_DIR}/mime.types" ]; then
+    if [ -d "$pkg_cfg_dir" ] && [ -f "${pkg_cfg_dir}/mime.types" ]; then
+      cp -f "${pkg_cfg_dir}/mime.types" "${CONF_DIR}/mime.types" 2>/dev/null || true
+    elif [ -f "/etc/mime.types" ]; then
+      cp -f "/etc/mime.types" "${CONF_DIR}/mime.types" 2>/dev/null || true
+    elif [ -f "/etc/apache2/mime.types" ]; then
+      cp -f "/etc/apache2/mime.types" "${CONF_DIR}/mime.types" 2>/dev/null || true
+    fi
+  fi
+
+  if [ ! -f "$CONF_FILE" ]; then
+    if [ -d "$pkg_cfg_dir" ] && [ -f "$pkg_cfg_dir/apache2.conf" ]; then
+      cp -f "$pkg_cfg_dir/apache2.conf" "$CONF_FILE"
+    else
+      cat <<'EOF' > "$CONF_FILE"
+ServerRoot "/opt/hostpanel/etc/apache"
+ServerName 127.0.0.1
+DefaultRuntimeDir "/opt/hostpanel/run/apache"
+PidFile "/opt/hostpanel/run/apache/apache2.pid"
+Timeout 300
+KeepAlive On
+MaxKeepAliveRequests 100
+KeepAliveTimeout 5
+
+User www-data
+Group www-data
+HostnameLookups Off
+
+ErrorLog "/opt/hostpanel/logs/apache/error.log"
+LogLevel warn
+
+IncludeOptional "/opt/hostpanel/etc/apache/mods-enabled/*.load"
+IncludeOptional "/opt/hostpanel/etc/apache/mods-enabled/*.conf"
+IncludeOptional "/opt/hostpanel/etc/apache/ports.conf"
+
+<IfModule mime_module>
+	TypesConfig /opt/hostpanel/etc/apache/mime.types
+	AddType application/x-compress .Z
+	AddType application/x-gzip .gz .tgz
+	AddType text/html .shtml
+	AddOutputFilter INCLUDES .shtml
+</IfModule>
+
+<Directory />
+	Options FollowSymLinks
+	AllowOverride None
+	Require all denied
+</Directory>
+
+<Directory /var/www/>
+	Options Indexes FollowSymLinks
+	AllowOverride All
+	Require all granted
+</Directory>
+
+<Directory /opt/hostpanel/data/vhosts/>
+	Options Indexes FollowSymLinks
+	AllowOverride All
+	Require all granted
+</Directory>
+
+AccessFileName .htaccess
+<FilesMatch "^\.ht">
+	Require all denied
+</FilesMatch>
+
+LogFormat "%v:%p %h %l %u %t \"%r\" %>s %O \"%{Referer}i\" \"%{User-Agent}i\"" vhost_combined
+LogFormat "%h %l %u %t \"%r\" %>s %O \"%{Referer}i\" \"%{User-Agent}i\"" combined
+LogFormat "%h %l %u %t \"%r\" %>s %O" common
+CustomLog "/opt/hostpanel/logs/apache/access.log" combined
+
+IncludeOptional "/opt/hostpanel/etc/apache/sites-enabled/*.conf"
+EOF
+    fi
+  fi
+
+  if [ ! -f "$PORTS_FILE" ]; then
+    if [ -d "$pkg_cfg_dir" ] && [ -f "$pkg_cfg_dir/ports.conf" ]; then
+      cp -f "$pkg_cfg_dir/ports.conf" "$PORTS_FILE"
+    else
+      cat <<'EOF' > "$PORTS_FILE"
+# Apache internal loopback backend listener
+Listen 127.0.0.1:8088
+Listen [::1]:8088
+EOF
+    fi
+  fi
+
+  # Enable core modules
+  for mod in mpm_event authz_core dir mime rewrite socache_shmcb ssl headers proxy proxy_fcgi proxy_http http2 deflate; do
+    cmd_module_enable "$mod" >/dev/null 2>&1 || true
+  done
+
+  cat <<EOF > /etc/systemd/system/apache2.service
+[Unit]
+Description=HostPanel Standalone Apache HTTP Server
+After=network.target remote-fs.target nss-lookup.target
+
+[Service]
+Type=simple
+Environment=APACHE_RUN_DIR=$RUN_DIR
+Environment=APACHE_LOG_DIR=$LOG_DIR
+Environment=APACHE_RUN_USER=www-data
+Environment=APACHE_RUN_GROUP=www-data
+ExecStart=$APACHE_BIN -d $CONF_DIR -f $CONF_FILE -DFOREGROUND
+ExecReload=$APACHE_BIN -d $CONF_DIR -f $CONF_FILE -k graceful
+ExecStop=$APACHE_BIN -d $CONF_DIR -f $CONF_FILE -k graceful-stop
+KillMode=mixed
+TimeoutStopSec=5
+PrivateTmp=true
+ReadWritePaths=$LOG_DIR $RUN_DIR $CONF_DIR /opt/hostpanel/data/vhosts
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload 2>/dev/null || true
+
+  echo "[4/4] Starting service and validating engine..."
+  cmd_engine_start >/dev/null 2>&1 || true
+  sleep 0.5
+
+  echo ""
+  echo "============================================================"
+  echo "  Apache Engine Provisioning & Network Topology"
+  echo "============================================================"
+  echo "  Active Engine Listen Ports:"
+  echo "    ✓ HTTP Listen Port:    127.0.0.1:8088 (isolated backend application server)"
+  echo "    ✓ Reverse Proxy Flow:  Nginx (80/443) -> Apache (8088)"
+  echo "  Applied Filesystem Isolation (/opt/hostpanel):"
+  echo "    ✓ Standalone Binary:   $APACHE_BIN"
+  echo "    ✓ Modules Directory:   $MODULES_DIR"
+  echo "    ✓ Main Config:         $CONF_FILE"
+  echo "    ✓ Ports Config:        $PORTS_FILE"
+  echo "    ✓ Sites Available:     $SITES_AVAILABLE"
+  echo "    ✓ Sites Enabled:       $SITES_ENABLED"
+  echo "    ✓ Error & Access Logs: $LOG_DIR"
+  echo "    ✓ Runtime PID / Sock:  $RUN_DIR"
+  echo "============================================================"
+  echo ""
+  echo "✓ Apache HTTP server engine ready and isolated under /opt/hostpanel"
+  printf '{"ok":true,"engine":"apache","status":"installed"}\n'
+}
+
+cmd_engine_uninstall() {
+  local mode="${1:-keep}"
+  echo "  ✓ Stopping Apache HTTP Server..."
+  systemctl stop apache2 httpd 2>/dev/null || true
+  systemctl disable apache2 httpd 2>/dev/null || true
+  pkill -f "apache2|httpd" 2>/dev/null || true
+  killall -9 apache2 httpd 2>/dev/null || true
+
+  echo "  ✓ Removing systemd service units & drop-ins..."
+  rm -rf /etc/systemd/system/apache2.service /etc/systemd/system/apache2.service.d /etc/systemd/system/httpd.service.d 2>/dev/null || true
+  systemctl daemon-reload 2>/dev/null || true
+
+  echo "  ✓ Cleaning runtime PID, socket paths, and standalone binaries & modules..."
+  rm -rf "$RUN_DIR" "${RUNTIME_DIR}" 2>/dev/null || true
+
+  if [ "$mode" = "purge" ] || [ "$mode" = "backup_and_purge" ]; then
+    echo "  ✓ Purging Apache configuration and log directories..."
+    rm -rf "$CONF_DIR" "$LOG_DIR" 2>/dev/null || true
+  fi
+
+  printf '{"ok":true,"engine":"apache","status":"uninstalled","mode":"%s"}\n' "$mode"
+}
+
+# Dispatch
+VERB="${1:-}"
+shift || true
+
+case "$VERB" in
+  engine-status) cmd_engine_status "$@" ;;
+  engine-start) cmd_engine_start "$@" ;;
+  engine-stop) cmd_engine_stop "$@" ;;
+  engine-restart) cmd_engine_restart "$@" ;;
+  engine-reload) cmd_engine_reload "$@" ;;
+  engine-test) cmd_engine_test "$@" ;;
+  engine-config-get) cmd_engine_config_get "$@" ;;
+  engine-config-set) cmd_engine_config_set "$@" ;;
+  engine-logs) cmd_engine_logs "$@" ;;
+  engine-install) cmd_engine_install "$@" ;;
+  engine-uninstall) cmd_engine_uninstall "$@" ;;
+  vhost-list) cmd_vhost_list "$@" ;;
+  vhost-get) cmd_vhost_get "$@" ;;
+  vhost-set) cmd_vhost_set "$@" ;;
+  vhost-delete) cmd_vhost_delete "$@" ;;
+  vhost-enable) cmd_vhost_enable "$@" ;;
+  vhost-disable) cmd_vhost_disable "$@" ;;
+  module-list) cmd_module_list "$@" ;;
+  module-enable) cmd_module_enable "$@" ;;
+  module-disable) cmd_module_disable "$@" ;;
+  *)
+    if [ -z "$VERB" ]; then
+      echo '{"ok":false,"error":"No verb specified","code":"MISSING_VERB"}' >&2
+      exit $EXIT_INVALID_INPUT
+    else
+      echo "{\"ok\":false,\"error\":\"Unknown verb: $VERB\",\"code\":\"UNKNOWN_VERB\"}" >&2
+      exit 11
+    fi
+    ;;
+esac

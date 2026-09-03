@@ -1,0 +1,29 @@
+[Unit]
+Description=HostPanel v3 — Node.js daemon service
+After=network.target
+
+[Service]
+Type=simple
+User=hp-nodejs
+Group=hp-nodejs
+
+# Port and token. The token file is root-owned 0640 root:hp-nodejs, so the service
+# can read its own credential and nothing else on the box can.
+EnvironmentFile=/etc/hostpanel/nodejs.env
+
+# Loopback ONLY. Binding 0.0.0.0 would expose privileged operations to the network.
+ExecStart=/opt/hostpanel/venv/bin/python -m hostpanel_nodejsd
+
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=no
+ProtectSystem=strict
+ProtectKernelTunables=yes
+MemoryMax=512M
+TasksMax=256
+
+ReadWritePaths=/opt/hostpanel/runtimes/node /opt/hostpanel/data/apps /opt/hostpanel/etc/nodejs /opt/hostpanel/logs/nodejs /opt/hostpanel/run/nodejs /tmp
+
+[Install]
+WantedBy=multi-user.target
