@@ -441,7 +441,6 @@ install_php_runtime() {
     echo "  [1/4] Checking for pre-compiled portable PHP $version ($arch_tag) binary tarball..." >&2
     local portable_url="https://github.com/hostpanel/php-runtimes/releases/download/v${patch_ver}/php-${patch_ver}-linux-${arch_tag}.tar.gz"
     local cache_tar="/opt/hostpanel/runtimes/cache/php-${patch_ver}-linux-${arch_tag}.tar.gz"
-    local repo_tar="/srv/hostpanel-v3/packages/php/runtimes/php-${patch_ver}-linux-${arch_tag}.tar.gz"
     local pkg_tar="/opt/hostpanel/packages/php/runtimes/php-${patch_ver}-linux-${arch_tag}.tar.gz"
     local tmp_tar="/tmp/php-${version}-${arch_tag}.tar.gz"
 
@@ -451,13 +450,6 @@ install_php_runtime() {
         if [ -x "$runtime_dir/bin/php" ] && [ -x "$runtime_dir/sbin/php-fpm" ]; then
             installed_ok=true
             echo "  ✓ Portable PHP $version runtime unpacked successfully from cache (<2s)." >&2
-        fi
-    elif [ -f "$repo_tar" ]; then
-        echo "  [+] Extracting local portable PHP $version runtime from $repo_tar..." >&2
-        tar -xzf "$repo_tar" -C "$runtime_dir" 2>&1
-        if [ -x "$runtime_dir/bin/php" ] && [ -x "$runtime_dir/sbin/php-fpm" ]; then
-            installed_ok=true
-            echo "  ✓ Portable PHP $version runtime unpacked successfully from local package (<2s)." >&2
         fi
     elif [ -f "$pkg_tar" ]; then
         echo "  [+] Extracting bundled portable PHP $version runtime from $pkg_tar..." >&2

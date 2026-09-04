@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0",
   "repository": "Developer-Geekay/hostpanel-packages",
-  "generated_at": "2026-09-03T19:10:44.679313+00:00",
+  "generated_at": "2026-09-04T17:56:32.193131+00:00",
   "total_packages": 15,
   "packages": [
     {
@@ -16,8 +16,8 @@
       "has_service": true,
       "has_ops": true,
       "manifest_path": "packages/apache/manifest.json",
-      "archive_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/releases/apache.tar.gz",
-      "raw_base_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/packages/apache"
+      "archive_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/releases/apache.tar.gz",
+      "raw_base_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/packages/apache"
     },
     {
       "name": "filemanager",
@@ -31,8 +31,8 @@
       "has_service": true,
       "has_ops": true,
       "manifest_path": "packages/filemanager/manifest.json",
-      "archive_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/releases/filemanager.tar.gz",
-      "raw_base_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/packages/filemanager"
+      "archive_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/releases/filemanager.tar.gz",
+      "raw_base_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/packages/filemanager"
     },
     {
       "name": "ftp",
@@ -46,8 +46,8 @@
       "has_service": true,
       "has_ops": true,
       "manifest_path": "packages/ftp/manifest.json",
-      "archive_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/releases/ftp.tar.gz",
-      "raw_base_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/packages/ftp"
+      "archive_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/releases/ftp.tar.gz",
+      "raw_base_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/packages/ftp"
     },
     {
       "name": "mail",
@@ -61,8 +61,8 @@
       "has_service": true,
       "has_ops": true,
       "manifest_path": "packages/mail/manifest.json",
-      "archive_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/releases/mail.tar.gz",
-      "raw_base_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/packages/mail"
+      "archive_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/releases/mail.tar.gz",
+      "raw_base_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/packages/mail"
     },
     {
       "name": "mongodb",
@@ -76,8 +76,8 @@
       "has_service": false,
       "has_ops": true,
       "manifest_path": "packages/mongodb/manifest.json",
-      "archive_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/releases/mongodb.tar.gz",
-      "raw_base_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/packages/mongodb"
+      "archive_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/releases/mongodb.tar.gz",
+      "raw_base_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/packages/mongodb"
     },
     {
       "name": "mysql",
@@ -91,8 +91,8 @@
       "has_service": false,
       "has_ops": true,
       "manifest_path": "packages/mysql/manifest.json",
-      "archive_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/releases/mysql.tar.gz",
-      "raw_base_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/packages/mysql"
+      "archive_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/releases/mysql.tar.gz",
+      "raw_base_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/packages/mysql"
     },
     {
       "name": "nginx",
@@ -106,8 +106,8 @@
       "has_service": true,
       "has_ops": true,
       "manifest_path": "packages/nginx/manifest.json",
-      "archive_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/releases/nginx.tar.gz",
-      "raw_base_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/packages/nginx"
+      "archive_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/releases/nginx.tar.gz",
+      "raw_base_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/packages/nginx"
     },
     {
       "name": "nodejs",
@@ -121,8 +121,8 @@
       "has_service": true,
       "has_ops": true,
       "manifest_path": "packages/nodejs/manifest.json",
-      "archive_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/releases/nodejs.tar.gz",
-      "raw_base_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/packages/nodejs"
+      "archive_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/releases/nodejs.tar.gz",
+      "raw_base_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/packages/nodejs"
     },
     {
       "name": "php",
@@ -136,8 +136,8 @@
       "has_service": true,
       "has_ops": true,
       "manifest_path": "packages/php/manifest.json",
-      "archive_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/releases/php.tar.gz",
-      "raw_base_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/packages/php"
+      "archive_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/releases/php.tar.gz",
+      "raw_base_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/packages/php"
     },
     {
       "name": "ssh",
@@ -151,8 +151,8 @@
       "has_service": true,
       "has_ops": true,
       "manifest_path": "packages/ssh/manifest.json",
-      "archive_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/releases/ssh.tar.gz",
-      "raw_base_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/packages/ssh"
+      "archive_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/releases/ssh.tar.gz",
+      "raw_base_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/packages/ssh"
     },
     {
       "name": "ssl",
@@ -166,8 +166,8 @@
       "has_service": true,
       "has_ops": true,
       "manifest_path": "packages/ssl/manifest.json",
-      "archive_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/releases/ssl.tar.gz",
-      "raw_base_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/packages/ssl"
+      "archive_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/releases/ssl.tar.gz",
+      "raw_base_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/packages/ssl"
     },
     {
       "name": "storage",
@@ -181,8 +181,8 @@
       "has_service": true,
       "has_ops": true,
       "manifest_path": "packages/storage/manifest.json",
-      "archive_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/releases/storage.tar.gz",
-      "raw_base_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/packages/storage"
+      "archive_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/releases/storage.tar.gz",
+      "raw_base_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/packages/storage"
     },
     {
       "name": "users",
@@ -196,8 +196,8 @@
       "has_service": true,
       "has_ops": true,
       "manifest_path": "packages/users/manifest.json",
-      "archive_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/releases/users.tar.gz",
-      "raw_base_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/packages/users"
+      "archive_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/releases/users.tar.gz",
+      "raw_base_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/packages/users"
     },
     {
       "name": "websites",
@@ -211,8 +211,8 @@
       "has_service": true,
       "has_ops": true,
       "manifest_path": "packages/websites/manifest.json",
-      "archive_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/releases/websites.tar.gz",
-      "raw_base_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/packages/websites"
+      "archive_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/releases/websites.tar.gz",
+      "raw_base_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/packages/websites"
     },
     {
       "name": "wireguard",
@@ -226,8 +226,8 @@
       "has_service": true,
       "has_ops": true,
       "manifest_path": "packages/wireguard/manifest.json",
-      "archive_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/releases/wireguard.tar.gz",
-      "raw_base_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/packages/wireguard"
+      "archive_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/releases/wireguard.tar.gz",
+      "raw_base_url": "https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/packages/wireguard"
     }
   ]
 }

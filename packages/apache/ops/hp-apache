@@ -603,7 +603,6 @@ cmd_engine_install() {
 
   echo "[3/4] Configuring isolated Apache parameters & systemd integration..."
   local pkg_cfg_dir="/opt/hostpanel/packages/apache/config"
-  [ ! -d "$pkg_cfg_dir" ] && [ -d "/srv/hostpanel-v3/packages/apache/config" ] && pkg_cfg_dir="/srv/hostpanel-v3/packages/apache/config"
 
   # Copy standard mime.types
   if [ ! -f "${CONF_DIR}/mime.types" ]; then

@@ -525,7 +525,6 @@ cmd_engine_install() {
   touch "${LOG_DIR}/access.log" "${LOG_DIR}/error.log"
 
   local pkg_cfg_dir="/opt/hostpanel/packages/nginx/config"
-  [ ! -d "$pkg_cfg_dir" ] && [ -d "/srv/hostpanel-v3/packages/nginx/config" ] && pkg_cfg_dir="/srv/hostpanel-v3/packages/nginx/config"
 
   # Copy standard mime.types and fastcgi_params if present
   if [ -f "/etc/nginx/mime.types" ] && [ ! -f "${CONF_DIR}/mime.types" ]; then

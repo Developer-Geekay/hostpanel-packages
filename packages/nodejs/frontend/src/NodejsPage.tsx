@@ -60,6 +60,32 @@ import type {
 } from "./types";
 import { Dot, Field, LogPane, MONO, Panel, Readout, type Line, appendEvent } from "./kit";
 
+export const RUNTIME_METADATA: Record<
+  string,
+  { title: string; status: string; desc: string }
+> = {
+  "18": {
+    title: "Node.js 18 LTS (Hydrogen)",
+    status: "Active LTS",
+    desc: "Stable for legacy frameworks and LTS maintenance",
+  },
+  "20": {
+    title: "Node.js 20 LTS (Iron)",
+    status: "Active LTS",
+    desc: "Enterprise LTS with high performance and security",
+  },
+  "22": {
+    title: "Node.js 22 LTS (Jod)",
+    status: "Latest LTS",
+    desc: "Modern V8 engine with native WebSocket & fetch",
+  },
+  "24": {
+    title: "Node.js 24 (Current)",
+    status: "Current",
+    desc: "Cutting edge features and latest ECMAScript syntax",
+  },
+};
+
 export function NodejsPage({ ctx }: { ctx: PackageContext }) {
   const theme = useMemo(
     () => createTheme((ctx.theme ?? {}) as ThemeOptions),
@@ -80,14 +106,36 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
   const [runtimes, setRuntimes] = useState<NodeRuntime[]>([]);
   const [search, setSearch] = useState("");
 
+  const installedRuntimes = useMemo(
+    () => runtimes.filter((r) => r.installed),
+    [runtimes]
+  );
+
   // Deploy New App Form State
+  const [deployDialogOpen, setDeployDialogOpen] = useState(false);
   const [deployName, setDeployName] = useState("");
   const [deployDir, setDeployDir] = useState("/opt/hostpanel/data/apps/");
-  const [deployVersion, setDeployVersion] = useState("20");
+  const [deployVersion, setDeployVersion] = useState("22");
   const [deployScript, setDeployScript] = useState("index.js");
   const [deployPort, setDeployPort] = useState("0");
   const [deployEnv, setDeployEnv] = useState("NODE_ENV=production\nPORT=31000\n");
   const [deployLoading, setDeployLoading] = useState(false);
+
+  // Automatically update deployVersion when installed runtimes load or change
+  useEffect(() => {
+    if (installedRuntimes.length > 0) {
+      if (!installedRuntimes.some((r) => r.major === deployVersion)) {
+        setDeployVersion(installedRuntimes[0].major);
+      }
+    }
+  }, [installedRuntimes, deployVersion]);
+
+  const handleOpenDeploy = () => {
+    if (installedRuntimes.length > 0 && !installedRuntimes.some((r) => r.major === deployVersion)) {
+      setDeployVersion(installedRuntimes[0].major);
+    }
+    setDeployDialogOpen(true);
+  };
 
   // Runtime Install Dialog
   const [runtimeDialogOpen, setRuntimeDialogOpen] = useState(false);
@@ -204,7 +252,7 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
   );
 
   useEffect(() => {
-    if (tab === 3 && selectedLogApp) {
+    if (tab === 2 && selectedLogApp) {
       fetchLogs(selectedLogApp, logLinesCount, logType);
     }
   }, [tab, selectedLogApp, logType, logLinesCount, fetchLogs]);
@@ -323,7 +371,7 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
         "success"
       );
       setDeployName("");
-      setTab(0);
+      setDeployDialogOpen(false);
       refresh();
     } catch (err: any) {
       showToast(err.message || "Failed to create application", "error");
@@ -408,9 +456,10 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
             </Typography>
             <Chip
               size="small"
-              icon={<Dot ok={true} size={8} />}
-              label="Daemon Active"
+              icon={<Dot ok={Boolean(statusData?.healthy)} size={8} />}
+              label={statusData?.healthy ? "Daemon Active" : "Daemon Inactive"}
               variant="outlined"
+              color={statusData?.healthy ? "success" : "default"}
               sx={{ fontWeight: 600, fontSize: "0.75rem" }}
             />
           </Stack>
@@ -419,7 +468,7 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
           </Typography>
         </Box>
 
-        <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", flexShrink: 0 }}>
+        <Stack direction="row" spacing={1} sx={{ alignItems: "center", flexShrink: 0 }}>
           {/* Refresh */}
           <Tooltip title="Refresh Status" arrow>
             <span>
@@ -434,27 +483,14 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
             </span>
           </Tooltip>
 
-          {/* Install Runtime */}
-          <Tooltip title="Install Node.js Runtime" arrow>
-            <span>
-              <IconButton
-                size="small"
-                onClick={() => setRuntimeDialogOpen(true)}
-                sx={{ border: "1px solid", borderColor: "divider" }}
-              >
-                <CloudUploadIcon sx={{ fontSize: 18 }} />
-              </IconButton>
-            </span>
-          </Tooltip>
-
           {/* Primary Action Button */}
           <Button
             variant="contained"
             color="primary"
             size="small"
             startIcon={<AddIcon />}
-            onClick={() => setTab(1)}
-            sx={{ ml: 1, whiteSpace: "nowrap" }}
+            onClick={handleOpenDeploy}
+            sx={{ ml: 0.5, whiteSpace: "nowrap" }}
           >
             Deploy Application
           </Button>
@@ -489,7 +525,7 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
                   Node Daemon Status
                 </Typography>
                 <Typography sx={{ fontWeight: 700, fontSize: "1.125rem" }}>
-                  {statusData ? "Active · Running" : "Active"}
+                  {statusData?.healthy ? "Active · Running" : "Stopped"}
                 </Typography>
               </Box>
             </Stack>
@@ -524,7 +560,7 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
               </Box>
             </Stack>
             <Typography sx={{ fontSize: "0.75rem", color: "text.secondary" }}>
-              {apps.length - runningAppsCount} stopped or paused
+              {apps.length === 0 ? "No applications deployed" : `${apps.length - runningAppsCount} stopped or paused`}
             </Typography>
           </CardContent>
         </Card>
@@ -549,12 +585,14 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
                   Runtime Versions
                 </Typography>
                 <Typography sx={{ fontWeight: 700, fontSize: "1.125rem" }}>
-                  {runtimes.filter((r) => r.installed).length || 2} Installed
+                  {installedRuntimes.length} Installed
                 </Typography>
               </Box>
             </Stack>
             <Typography sx={{ fontSize: "0.75rem", color: "text.secondary" }}>
-              Node 18, 20 LTS, 22 LTS, 24
+              {installedRuntimes.length > 0
+                ? installedRuntimes.map((r) => `v${r.major}`).join(", ") + " active"
+                : "No runtimes installed"}
             </Typography>
           </CardContent>
         </Card>
@@ -584,7 +622,7 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
               </Box>
             </Stack>
             <Typography sx={{ fontSize: "0.75rem", color: "text.secondary" }}>
-              Reverse Proxy Pool: 31000–31999
+              {runningAppsCount} active app process{runningAppsCount === 1 ? "" : "es"}
             </Typography>
           </CardContent>
         </Card>
@@ -595,7 +633,6 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
         <Box sx={{ borderBottom: 1, borderColor: "divider", px: 2 }}>
           <Tabs value={tab} onChange={(_, v) => setTab(v)}>
             <Tab label={`Applications (${apps.length})`} />
-            <Tab label="Deploy New App" />
             <Tab label="Node Runtimes" />
             <Tab label="Live Console Logs" />
             <Tab label="Service & Isolation" />
@@ -624,16 +661,8 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
                     ),
                   },
                 }}
-                sx={{ width: 340 }}
+                sx={{ maxWidth: 360, width: "100%" }}
               />
-              <Button
-                variant="contained"
-                size="small"
-                startIcon={<AddIcon />}
-                onClick={() => setTab(1)}
-              >
-                Deploy Application
-              </Button>
             </Stack>
 
             <TableContainer>
@@ -671,7 +700,13 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
                         <Typography sx={{ fontSize: "0.8125rem", color: "text.disabled", mb: 2 }}>
                           Deploy an Express, Next.js, Fastify, or custom Node.js application to get started.
                         </Typography>
-                        <Button variant="outlined" size="small" onClick={() => setTab(1)}>
+                        <Button
+                          variant="contained"
+                          color="primary"
+                          size="small"
+                          startIcon={<AddIcon />}
+                          onClick={handleOpenDeploy}
+                        >
                           Deploy First App
                         </Button>
                       </TableCell>
@@ -764,7 +799,7 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
                                 size="small"
                                 onClick={() => {
                                   setSelectedLogApp(app.name);
-                                  setTab(3);
+                                  setTab(2);
                                 }}
                               >
                                 <ArticleIcon sx={{ fontSize: 18 }} />
@@ -790,118 +825,8 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
           </Box>
         )}
 
-        {/* Tab 1: Deploy New Application Form */}
+        {/* Tab 1: Node Runtimes Manager */}
         {tab === 1 && (
-          <Box sx={{ p: 3, maxWidth: 720 }}>
-            <Typography sx={{ fontWeight: 700, fontSize: "1.125rem", mb: 0.5 }}>
-              Deploy Node.js Application
-            </Typography>
-            <Typography sx={{ fontSize: "0.8125rem", color: "text.secondary", mb: 3 }}>
-              Configure application parameters, runtime version, entrypoint, and isolated reverse proxy port.
-            </Typography>
-
-            <Box component="form" onSubmit={handleDeployAppSubmit} sx={{ display: "flex", flexDirection: "column", gap: 2.5 }}>
-              <Field label="Application Name" hint="Unique identifier, e.g. 'my-app' or 'api-service'">
-                <TextField
-                  fullWidth
-                  size="small"
-                  placeholder="e.g. backend-api"
-                  value={deployName}
-                  onChange={(e) => {
-                    const val = e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, "");
-                    setDeployName(val);
-                    if (deployDir.startsWith("/opt/hostpanel/data/apps/")) {
-                      setDeployDir(`/opt/hostpanel/data/apps/${val}`);
-                    }
-                  }}
-                  required
-                />
-              </Field>
-
-              <Field label="Application Directory" hint="Root path containing package.json and entrypoint">
-                <TextField
-                  fullWidth
-                  size="small"
-                  placeholder="/opt/hostpanel/data/apps/my-app"
-                  value={deployDir}
-                  onChange={(e) => setDeployDir(e.target.value)}
-                  required
-                />
-              </Field>
-
-              <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
-                <Field label="Node.js Version" hint="Installed runtime" sx={{ flex: 1 }}>
-                  <Select
-                    fullWidth
-                    size="small"
-                    value={deployVersion}
-                    onChange={(e) => setDeployVersion(e.target.value)}
-                  >
-                    <MenuItem value="18">Node.js 18 LTS (Hydrogen)</MenuItem>
-                    <MenuItem value="20">Node.js 20 LTS (Iron - Recommended)</MenuItem>
-                    <MenuItem value="22">Node.js 22 LTS (Jod)</MenuItem>
-                    <MenuItem value="24">Node.js 24 (Current)</MenuItem>
-                  </Select>
-                </Field>
-
-                <Field label="Start Script / Entrypoint" hint="e.g. index.js or dist/server.js" sx={{ flex: 1 }}>
-                  <TextField
-                    fullWidth
-                    size="small"
-                    placeholder="index.js"
-                    value={deployScript}
-                    onChange={(e) => setDeployScript(e.target.value)}
-                    required
-                  />
-                </Field>
-              </Stack>
-
-              <Field label="Port Assignment (31000–31999)" hint="Set to 0 for automatic port allocation">
-                <TextField
-                  fullWidth
-                  size="small"
-                  placeholder="0 (Auto-allocate next free port in 31000-31999)"
-                  value={deployPort}
-                  onChange={(e) => setDeployPort(e.target.value)}
-                />
-              </Field>
-
-              <Field label="Environment Variables" hint="KEY=VALUE format, one per line">
-                <TextField
-                  fullWidth
-                  multiline
-                  rows={4}
-                  size="small"
-                  value={deployEnv}
-                  onChange={(e) => setDeployEnv(e.target.value)}
-                  slotProps={{
-                    input: {
-                      sx: { fontFamily: MONO, fontSize: "0.8125rem" },
-                    },
-                  }}
-                />
-              </Field>
-
-              <Stack direction="row" spacing={1.5} sx={{ mt: 1 }}>
-                <Button
-                  type="submit"
-                  variant="contained"
-                  color="primary"
-                  disabled={deployLoading || !deployName}
-                  startIcon={deployLoading ? <CircularProgress size={16} /> : <CheckCircleIcon />}
-                >
-                  {deployLoading ? "Deploying Application…" : "Deploy Application"}
-                </Button>
-                <Button variant="outlined" onClick={() => setTab(0)}>
-                  Cancel
-                </Button>
-              </Stack>
-            </Box>
-          </Box>
-        )}
-
-        {/* Tab 2: Node Runtimes Manager */}
-        {tab === 2 && (
           <Box sx={{ p: 3 }}>
             <Stack direction="row" spacing={2} sx={{ justifyContent: "space-between", alignItems: "center", mb: 2.5 }}>
               <Box>
@@ -917,7 +842,7 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
             <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" }, gap: 2.5 }}>
               {[
                 { major: "18", title: "Node.js 18 LTS (Hydrogen)", status: "Active LTS", desc: "Stable for legacy frameworks and LTS maintenance" },
-                { major: "20", title: "Node.js 20 LTS (Iron)", status: "Recommended LTS", desc: "Default runtime for HostPanel applications" },
+                { major: "20", title: "Node.js 20 LTS (Iron)", status: "Active LTS", desc: "Enterprise LTS with high performance and security" },
                 { major: "22", title: "Node.js 22 LTS (Jod)", status: "Latest LTS", desc: "Modern V8 engine with native WebSocket & fetch" },
                 { major: "24", title: "Node.js 24 (Current)", status: "Current", desc: "Cutting edge features and latest ECMAScript syntax" },
               ].map((ver) => {
@@ -948,8 +873,23 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
                       <Divider sx={{ my: 1.5 }} />
 
                       <Stack direction="row" spacing={3} sx={{ mb: 2 }}>
-                        <Readout label="Binary Path" value={`/opt/hostpanel/runtimes/node/v${ver.major}/bin/node`} />
-                        <Readout label="Active Apps" value={`${appsUsing} Apps`} mono={false} />
+                        <Readout
+                          label="Binary Path"
+                          value={
+                            isInstalled ? (
+                              `/opt/hostpanel/runtimes/node/v${ver.major}/bin/node`
+                            ) : (
+                              <Typography component="span" sx={{ color: "text.disabled", fontStyle: "italic", fontSize: "0.75rem" }}>
+                                Not installed
+                              </Typography>
+                            )
+                          }
+                        />
+                        <Readout
+                          label="Active Apps"
+                          value={isInstalled ? `${appsUsing} Apps` : "—"}
+                          mono={false}
+                        />
                       </Stack>
 
                       <Stack direction="row" spacing={1}>
@@ -986,8 +926,8 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
           </Box>
         )}
 
-        {/* Tab 3: Live Console Logs */}
-        {tab === 3 && (
+        {/* Tab 2: Live Console Logs */}
+        {tab === 2 && (
           <Box sx={{ p: 3 }}>
             <Stack
               direction="row"
@@ -1051,8 +991,8 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
           </Box>
         )}
 
-        {/* Tab 4: Service & Isolation */}
-        {tab === 4 && (
+        {/* Tab 3: Service & Isolation */}
+        {tab === 3 && (
           <Box sx={{ p: 3 }}>
             <Typography sx={{ fontWeight: 700, fontSize: "1.125rem", mb: 0.5 }}>
               100% HostPanel Isolation Architecture
@@ -1155,6 +1095,151 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
         </Stack>
       </Drawer>
 
+      {/* Deploy Application Dialog */}
+      <Dialog
+        open={deployDialogOpen}
+        onClose={() => !deployLoading && setDeployDialogOpen(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+            <AddIcon sx={{ color: "primary.main" }} />
+            <Typography sx={{ fontWeight: 700, fontSize: "1.125rem" }}>
+              Deploy Node.js Application
+            </Typography>
+          </Stack>
+          <IconButton size="small" onClick={() => setDeployDialogOpen(false)} disabled={deployLoading}>
+            <CloseIcon sx={{ fontSize: 18 }} />
+          </IconButton>
+        </DialogTitle>
+        <Box component="form" onSubmit={handleDeployAppSubmit}>
+          <DialogContent dividers sx={{ display: "flex", flexDirection: "column", gap: 2.5 }}>
+            <Typography sx={{ fontSize: "0.8125rem", color: "text.secondary" }}>
+              Configure application parameters, runtime version, entrypoint, and isolated reverse proxy port.
+            </Typography>
+
+            {installedRuntimes.length === 0 && (
+              <Alert severity="warning">
+                No Node.js runtimes are currently installed. Please install a version from the <strong>Node Runtimes</strong> tab first before deploying an application.
+              </Alert>
+            )}
+
+            <Field label="Application Name" hint="Unique identifier, e.g. 'my-app' or 'api-service'">
+              <TextField
+                fullWidth
+                size="small"
+                placeholder="e.g. backend-api"
+                value={deployName}
+                onChange={(e) => {
+                  const val = e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, "");
+                  setDeployName(val);
+                  if (!deployDir || deployDir.startsWith("/opt/hostpanel/data/apps/")) {
+                    setDeployDir(`/opt/hostpanel/data/apps/${val}`);
+                  }
+                }}
+                required
+              />
+            </Field>
+
+            <Field label="Application Directory" hint="Root path containing package.json and entrypoint">
+              <TextField
+                fullWidth
+                size="small"
+                placeholder="/opt/hostpanel/data/apps/my-app"
+                value={deployDir}
+                onChange={(e) => setDeployDir(e.target.value)}
+                required
+              />
+            </Field>
+
+            <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+              <Field
+                label="Node.js Version"
+                hint={installedRuntimes.length > 0 ? "Target installed runtime" : "No runtimes installed"}
+                sx={{ flex: 1 }}
+              >
+                <Select
+                  fullWidth
+                  size="small"
+                  value={installedRuntimes.length > 0 ? deployVersion : ""}
+                  onChange={(e) => setDeployVersion(e.target.value)}
+                  disabled={installedRuntimes.length === 0}
+                  displayEmpty
+                >
+                  {installedRuntimes.length === 0 ? (
+                    <MenuItem value="" disabled>
+                      <em>No runtimes installed (install via Node Runtimes tab)</em>
+                    </MenuItem>
+                  ) : (
+                    installedRuntimes.map((rt) => {
+                      const meta = RUNTIME_METADATA[rt.major];
+                      const title = meta ? meta.title : `Node.js v${rt.major}`;
+                      return (
+                        <MenuItem key={rt.major} value={rt.major}>
+                          {title}
+                        </MenuItem>
+                      );
+                    })
+                  )}
+                </Select>
+              </Field>
+
+              <Field label="Start Script / Entrypoint" hint="e.g. index.js or dist/server.js" sx={{ flex: 1 }}>
+                <TextField
+                  fullWidth
+                  size="small"
+                  placeholder="index.js"
+                  value={deployScript}
+                  onChange={(e) => setDeployScript(e.target.value)}
+                  required
+                />
+              </Field>
+            </Stack>
+
+            <Field label="Port Assignment (31000–31999)" hint="Set to 0 for automatic port allocation">
+              <TextField
+                fullWidth
+                size="small"
+                placeholder="0 (Auto-allocate next free port in 31000-31999)"
+                value={deployPort}
+                onChange={(e) => setDeployPort(e.target.value)}
+              />
+            </Field>
+
+            <Field label="Environment Variables" hint="KEY=VALUE format, one per line">
+              <TextField
+                fullWidth
+                multiline
+                rows={4}
+                size="small"
+                value={deployEnv}
+                onChange={(e) => setDeployEnv(e.target.value)}
+                slotProps={{
+                  input: {
+                    sx: { fontFamily: MONO, fontSize: "0.8125rem" },
+                  },
+                }}
+              />
+            </Field>
+          </DialogContent>
+          <DialogActions sx={{ p: 2 }}>
+            <Button onClick={() => setDeployDialogOpen(false)} disabled={deployLoading}>
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              variant="contained"
+              color="primary"
+              disabled={deployLoading || !deployName || installedRuntimes.length === 0}
+              startIcon={deployLoading ? <CircularProgress size={16} /> : <CheckCircleIcon />}
+            >
+              {deployLoading ? "Deploying Application…" : "Deploy Application"}
+            </Button>
+          </DialogActions>
+        </Box>
+      </Dialog>
+
       {/* Runtime Install Dialog */}
       <Dialog
         open={runtimeDialogOpen}
@@ -1214,6 +1299,7 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
               onClick={() => {
                 setRuntimeDialogOpen(false);
                 setRuntimeCompleted(false);
+                setRuntimeLogs([]);
               }}
             >
               Done

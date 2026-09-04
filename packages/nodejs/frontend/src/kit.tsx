@@ -180,7 +180,12 @@ export function appendEvent(lines: Line[], event: any): Line[] {
   switch (event?.kind) {
     case "log": {
       const text = event.line ?? "";
-      if (text.trim().startsWith('{"version"') || text.trim().startsWith('{"ok"')) {
+      const trimmed = text.trim();
+      if (
+        (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+        trimmed.startsWith('{"version"') ||
+        trimmed.startsWith('{"ok"')
+      ) {
         return lines;
       }
       return [

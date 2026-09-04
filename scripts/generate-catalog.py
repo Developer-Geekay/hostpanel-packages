@@ -76,8 +76,8 @@ def main():
                 "has_service": (pkg_dir / "service").is_dir(),
                 "has_ops": (pkg_dir / "ops").is_dir(),
                 "manifest_path": f"packages/{pkg_name}/manifest.json",
-                "archive_url": f"https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/releases/{pkg_name}.tar.gz",
-                "raw_base_url": f"https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/main/packages/{pkg_name}"
+                "archive_url": f"https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/releases/{pkg_name}.tar.gz",
+                "raw_base_url": f"https://raw.githubusercontent.com/Developer-Geekay/hostpanel-packages/master/packages/{pkg_name}"
             })
             print(f"  [+] {pkg_name} ({version}) - {category}")
         except Exception as e:
