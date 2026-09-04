@@ -82,6 +82,13 @@ import { MONO, Panel } from "./kit";
 
 const DEFAULT_ROOT = "/opt/hostpanel/data/vhosts";
 
+interface QuickLocation {
+  id: string;
+  label: string;
+  path: string;
+  icon: string;
+}
+
 function formatBytes(bytes: number): string {
   if (!bytes || bytes === 0) return "0 B";
   const k = 1024;
@@ -168,6 +175,7 @@ function FileManagerBody({ ctx }: { ctx: PackageContext }) {
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const [quickLocations, setQuickLocations] = useState<QuickLocation[]>([]);
 
   // Editor Modal
   const [editorOpen, setEditorOpen] = useState(false);
@@ -226,6 +234,32 @@ function FileManagerBody({ ctx }: { ctx: PackageContext }) {
     [ctx]
   );
 
+  useEffect(() => {
+    let cancelled = false;
+    json("/quick-locations")
+      .then((data: any) => {
+        if (!cancelled && data?.locations) {
+          setQuickLocations(data.locations);
+          if (data.default_root && currentPath === DEFAULT_ROOT && data.default_root !== DEFAULT_ROOT) {
+            setCurrentPath(data.default_root);
+            setPathInput(data.default_root);
+          }
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setQuickLocations([
+            { id: "home", label: "Home (/home)", path: "/home", icon: "home" },
+            { id: "hostpanel", label: "HostPanel (/opt/hostpanel)", path: "/opt/hostpanel", icon: "settings" },
+            { id: "root", label: "Root (/)", path: "/", icon: "folder" },
+          ]);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [json]);
+
   const loadDirectory = useCallback(
     async (dirPath: string) => {
       setLoading(true);
@@ -237,12 +271,40 @@ function FileManagerBody({ ctx }: { ctx: PackageContext }) {
         setPathInput(cleaned);
       } catch (err: any) {
         showToast(err.message || "Failed to load directory", "error");
+        if (dirPath === DEFAULT_ROOT) {
+          try {
+            const fallbackData = await json("/list");
+            if (fallbackData?.entries) {
+              setEntries(fallbackData.entries);
+              const fallbackPath = fallbackData.path || "/opt/hostpanel";
+              setCurrentPath(fallbackPath);
+              setPathInput(fallbackPath);
+            }
+          } catch {
+            // ignore fallback error
+          }
+        }
       } finally {
         setLoading(false);
       }
     },
     [json]
   );
+
+  const renderLocationIcon = (iconName: string) => {
+    switch (iconName) {
+      case "language":
+        return <LanguageIcon sx={{ fontSize: 16 }} />;
+      case "home":
+        return <HomeIcon sx={{ fontSize: 16 }} />;
+      case "settings":
+        return <SettingsIcon sx={{ fontSize: 16 }} />;
+      case "storage":
+        return <StorageIcon sx={{ fontSize: 16 }} />;
+      default:
+        return <FolderIcon sx={{ fontSize: 16 }} />;
+    }
+  };
 
   useEffect(() => {
     loadDirectory(currentPath);
@@ -512,55 +574,25 @@ function FileManagerBody({ ctx }: { ctx: PackageContext }) {
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
       {/* QUICK LOCATIONS JUMP BAR */}
-      <Stack direction="row" spacing={1} sx={{ alignItems: "center", flexWrap: "wrap" }}>
-        <Typography sx={{ fontSize: "0.75rem", fontWeight: 600, color: "text.secondary", mr: 0.5 }}>
-          Quick Jump:
-        </Typography>
-        <Chip
-          icon={<LanguageIcon sx={{ fontSize: 16 }} />}
-          label="Websites (/opt/hostpanel/data/vhosts)"
-          size="small"
-          clickable
-          variant={currentPath === DEFAULT_ROOT ? "filled" : "outlined"}
-          color={currentPath === DEFAULT_ROOT ? "primary" : "default"}
-          onClick={() => loadDirectory(DEFAULT_ROOT)}
-        />
-        <Chip
-          icon={<HomeIcon sx={{ fontSize: 16 }} />}
-          label="Home (/home)"
-          size="small"
-          clickable
-          variant={currentPath === "/home" ? "filled" : "outlined"}
-          color={currentPath === "/home" ? "primary" : "default"}
-          onClick={() => loadDirectory("/home")}
-        />
-        <Chip
-          icon={<SettingsIcon sx={{ fontSize: 16 }} />}
-          label="HostPanel (/opt/hostpanel)"
-          size="small"
-          clickable
-          variant={currentPath === "/opt/hostpanel" ? "filled" : "outlined"}
-          color={currentPath === "/opt/hostpanel" ? "primary" : "default"}
-          onClick={() => loadDirectory("/opt/hostpanel")}
-        />
-        <Chip
-          icon={<StorageIcon sx={{ fontSize: 16 }} />}
-          label="Mounts (/mnt & /media)"
-          size="small"
-          clickable
-          variant={currentPath === "/mnt" ? "filled" : "outlined"}
-          color={currentPath === "/mnt" ? "primary" : "default"}
-          onClick={() => loadDirectory("/mnt")}
-        />
-        <Chip
-          label="Root (/)"
-          size="small"
-          clickable
-          variant={currentPath === "/" ? "filled" : "outlined"}
-          color={currentPath === "/" ? "primary" : "default"}
-          onClick={() => loadDirectory("/")}
-        />
-      </Stack>
+      {quickLocations.length > 0 && (
+        <Stack direction="row" spacing={1} sx={{ alignItems: "center", flexWrap: "wrap" }}>
+          <Typography sx={{ fontSize: "0.75rem", fontWeight: 600, color: "text.secondary", mr: 0.5 }}>
+            Quick Jump:
+          </Typography>
+          {quickLocations.map((loc) => (
+            <Chip
+              key={loc.id || loc.path}
+              icon={renderLocationIcon(loc.icon)}
+              label={loc.label}
+              size="small"
+              clickable
+              variant={currentPath === loc.path ? "filled" : "outlined"}
+              color={currentPath === loc.path ? "primary" : "default"}
+              onClick={() => loadDirectory(loc.path)}
+            />
+          ))}
+        </Stack>
+      )}
 
       {/* TOP TOOLBAR & DIRECT PATH INPUT */}
       <Stack
