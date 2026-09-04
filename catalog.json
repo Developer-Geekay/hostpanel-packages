@@ -97,7 +97,7 @@
     {
       "name": "nginx",
       "label": "Nginx Web Server",
-      "version": "3.0.0",
+      "version": "3.0.1",
       "category": "Web Server",
       "description": "Production-grade Nginx Web Server web server package",
       "unit": "hostpanel-nginxd.service",

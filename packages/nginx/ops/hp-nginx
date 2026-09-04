@@ -463,16 +463,23 @@ cmd_vhost_disable() {
 cmd_module_list() {
   local bin="${NGINX_BIN:-nginx}"
   python3 -c '
-import subprocess, json, sys
+import subprocess, json, sys, re, os, shutil
+
 modules = []
 seen = set()
-bin_path = sys.argv[1]
+bin_arg = sys.argv[1]
+real_bin = shutil.which(bin_arg) if not os.path.isabs(bin_arg) else bin_arg
+if not real_bin:
+    real_bin = bin_arg
+
+# 1. Parse nginx -V configure arguments
 try:
-    out = subprocess.check_output([bin_path, "-V"], stderr=subprocess.STDOUT).decode("utf-8", errors="ignore")
+    out = subprocess.check_output([real_bin, "-V"], stderr=subprocess.STDOUT).decode("utf-8", errors="ignore")
     for part in out.split():
         if part.startswith("--with-"):
             raw = part[7:]
-            if any(raw.startswith(p) for p in ["cc-opt", "ld-opt", "pcre", "zlib", "openssl"]): continue
+            if any(raw.startswith(p) for p in ["cc-opt", "ld-opt", "pcre", "zlib", "openssl"]):
+                continue
             is_dynamic = "=dynamic" in raw
             name = raw.split("=")[0]
             if not name.endswith("_module") and (name.startswith("http_") or name.startswith("mail_") or name.startswith("stream_")):
@@ -485,7 +492,76 @@ try:
             if name not in seen:
                 seen.add(name)
                 modules.append({"name": name, "builtin": not part.startswith("--add-dynamic-")})
-except Exception: pass
+except Exception:
+    pass
+
+# 2. Extract compiled-in ngx_http_*, ngx_stream_*, ngx_mail_* module names from binary strings
+try:
+    if os.path.exists(real_bin):
+        with open(real_bin, "rb") as f:
+            data = f.read()
+        raw_mods = re.findall(rb"ngx_((?:http|stream|mail)_[a-zA-Z0-9_]+_module)", data)
+        for m in sorted(set(raw_mods)):
+            mod_name = m.decode("ascii", errors="ignore")
+            if mod_name not in seen:
+                seen.add(mod_name)
+                modules.append({"name": mod_name, "builtin": True})
+except Exception:
+    pass
+
+# 3. Always ensure standard Nginx core modules are listed
+standard_core = [
+    "http_core_module", "http_proxy_module", "http_rewrite_module", "http_gzip_module",
+    "http_fastcgi_module", "http_headers_module", "http_access_module", "http_auth_basic_module",
+    "http_log_module", "http_upstream_module", "http_limit_req_module", "http_limit_conn_module",
+    "http_autoindex_module", "http_index_module", "http_static_module"
+]
+for m in standard_core:
+    if m not in seen:
+        seen.add(m)
+        modules.append({"name": m, "builtin": True})
+
+# 4. Check for dynamically loaded modules in config (load_module directives)
+conf_paths = ["/opt/hostpanel/etc/nginx/nginx.conf", "/opt/hostpanel/etc/nginx/modules-enabled"]
+for cp in conf_paths:
+    if os.path.isdir(cp):
+        try:
+            for fname in os.listdir(cp):
+                if fname.endswith(".conf"):
+                    with open(os.path.join(cp, fname), "r", errors="ignore") as f:
+                        for line in f:
+                            line = line.strip()
+                            if line.startswith("load_module") and line.endswith(";"):
+                                m_path = line.split()[1].rstrip(";")
+                                m_name = os.path.basename(m_path).replace(".so", "")
+                                if m_name.startswith("ngx_"):
+                                    m_name = m_name[4:]
+                                if not m_name.endswith("_module"):
+                                    m_name += "_module"
+                                if m_name not in seen:
+                                    seen.add(m_name)
+                                    modules.append({"name": m_name, "builtin": False})
+        except Exception:
+            pass
+    elif os.path.isfile(cp):
+        try:
+            with open(cp, "r", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("load_module") and line.endswith(";"):
+                        m_path = line.split()[1].rstrip(";")
+                        m_name = os.path.basename(m_path).replace(".so", "")
+                        if m_name.startswith("ngx_"):
+                            m_name = m_name[4:]
+                        if not m_name.endswith("_module"):
+                            m_name += "_module"
+                        if m_name not in seen:
+                            seen.add(m_name)
+                            modules.append({"name": m_name, "builtin": False})
+        except Exception:
+            pass
+
+modules.sort(key=lambda x: x["name"])
 print(json.dumps({"ok": True, "modules": modules}))
 ' "$bin"
 }
