@@ -93,6 +93,7 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
   const [runtimeDialogOpen, setRuntimeDialogOpen] = useState(false);
   const [installVer, setInstallVer] = useState("22");
   const [runtimeInstalling, setRuntimeInstalling] = useState(false);
+  const [runtimeCompleted, setRuntimeCompleted] = useState(false);
   const [runtimeLogs, setRuntimeLogs] = useState<Line[]>([]);
 
   // Environment Editor Drawer
@@ -332,14 +333,17 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
   };
 
   // Install Node Runtime
-  const handleInstallRuntime = async () => {
+  const handleInstallRuntime = async (targetVer?: string) => {
+    const v = targetVer || installVer;
+    setInstallVer(v);
     setRuntimeInstalling(true);
+    setRuntimeCompleted(false);
     setRuntimeLogs([]);
     try {
       if (ctx.run) {
         for await (const ev of ctx.run("/runtimes/install", {
           method: "POST",
-          body: { version: installVer },
+          body: { version: v },
         })) {
           setRuntimeLogs((prev) => appendEvent(prev, ev));
         }
@@ -347,13 +351,14 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
         await json("/runtimes/install", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ version: installVer }),
+          body: JSON.stringify({ version: v }),
         });
       }
-      showToast(`Node.js v${installVer} installed successfully!`, "success");
+      setRuntimeCompleted(true);
+      showToast(`Node.js v${v} installed successfully!`, "success");
       refresh();
     } catch (err: any) {
-      showToast(err.message || `Failed to install Node.js v${installVer}`, "error");
+      showToast(err.message || `Failed to install Node.js v${v}`, "error");
     } finally {
       setRuntimeInstalling(false);
     }
@@ -907,14 +912,6 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
                   Isolated standalone binaries under /opt/hostpanel/runtimes/node/
                 </Typography>
               </Box>
-              <Button
-                variant="contained"
-                size="small"
-                startIcon={<AddIcon />}
-                onClick={() => setRuntimeDialogOpen(true)}
-              >
-                Install New Version
-              </Button>
             </Stack>
 
             <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" }, gap: 2.5 }}>
@@ -925,7 +922,7 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
                 { major: "24", title: "Node.js 24 (Current)", status: "Current", desc: "Cutting edge features and latest ECMAScript syntax" },
               ].map((ver) => {
                 const rt = runtimes.find((r) => r.major === ver.major);
-                const isInstalled = rt ? rt.installed : true;
+                const isInstalled = rt ? Boolean(rt.installed) : false;
                 const appsUsing = apps.filter((a) => a.node_version === ver.major).length;
 
                 return (
@@ -972,6 +969,8 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
                             variant="contained"
                             onClick={() => {
                               setInstallVer(ver.major);
+                              setRuntimeCompleted(false);
+                              setRuntimeLogs([]);
                               setRuntimeDialogOpen(true);
                             }}
                           >
@@ -1164,52 +1163,77 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
         fullWidth
       >
         <DialogTitle sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <Typography sx={{ fontWeight: 700, fontSize: "1.125rem" }}>
-            Install Node.js Runtime Version
-          </Typography>
+          <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+            <MemoryIcon sx={{ color: "primary.main" }} />
+            <Typography sx={{ fontWeight: 700, fontSize: "1.125rem" }}>
+              Install Node.js v{installVer} Runtime
+            </Typography>
+          </Stack>
           <IconButton size="small" onClick={() => setRuntimeDialogOpen(false)} disabled={runtimeInstalling}>
             <CloseIcon sx={{ fontSize: 18 }} />
           </IconButton>
         </DialogTitle>
         <DialogContent dividers>
           <Typography sx={{ fontSize: "0.8125rem", color: "text.secondary", mb: 2 }}>
-            Installs isolated standalone Node.js and NPM binaries into /opt/hostpanel/runtimes/node/.
+            Downloads and provisions standalone Node.js and NPM binaries into <code>/opt/hostpanel/runtimes/node/v{installVer}/</code>.
           </Typography>
 
-          <Field label="Select Node.js Version">
-            <Select
-              fullWidth
-              size="small"
-              value={installVer}
-              onChange={(e) => setInstallVer(e.target.value)}
-              disabled={runtimeInstalling}
-            >
-              <MenuItem value="18">Node.js 18 LTS (Hydrogen)</MenuItem>
-              <MenuItem value="20">Node.js 20 LTS (Iron)</MenuItem>
-              <MenuItem value="22">Node.js 22 LTS (Jod)</MenuItem>
-              <MenuItem value="24">Node.js 24 (Current)</MenuItem>
-            </Select>
-          </Field>
+          <Stack direction="row" spacing={1} sx={{ alignItems: "center", mb: 2 }}>
+            <Chip
+              icon={<MemoryIcon sx={{ fontSize: 16 }} />}
+              label={`Target Runtime: Node.js v${installVer}`}
+              color="primary"
+              variant="outlined"
+              sx={{ fontWeight: 600 }}
+            />
+          </Stack>
 
-          {runtimeLogs.length > 0 && (
-            <Box sx={{ mt: 2 }}>
+          {runtimeCompleted && (
+            <Alert severity="success" sx={{ mb: 2 }}>
+              Node.js v{installVer} runtime was successfully installed and verified!
+            </Alert>
+          )}
+
+          {runtimeLogs.length > 0 ? (
+            <Box sx={{ mt: 1 }}>
               <LogPane lines={runtimeLogs} running={runtimeInstalling} />
+            </Box>
+          ) : (
+            <Box sx={{ p: 2.5, bgcolor: "background.default", borderRadius: 1.5, textAlign: "center" }}>
+              <Typography sx={{ fontSize: "0.875rem", color: "text.secondary" }}>
+                Ready to download and install <strong>Node.js v{installVer}</strong>. Click below to begin live execution.
+              </Typography>
             </Box>
           )}
         </DialogContent>
         <DialogActions sx={{ p: 2 }}>
-          <Button onClick={() => setRuntimeDialogOpen(false)} disabled={runtimeInstalling}>
-            Close
-          </Button>
-          <Button
-            variant="contained"
-            color="primary"
-            onClick={handleInstallRuntime}
-            disabled={runtimeInstalling}
-            startIcon={runtimeInstalling ? <CircularProgress size={16} /> : <CloudUploadIcon />}
-          >
-            {runtimeInstalling ? "Installing…" : `Install Node ${installVer}`}
-          </Button>
+          {runtimeCompleted ? (
+            <Button
+              variant="contained"
+              color="primary"
+              onClick={() => {
+                setRuntimeDialogOpen(false);
+                setRuntimeCompleted(false);
+              }}
+            >
+              Done
+            </Button>
+          ) : (
+            <>
+              <Button onClick={() => setRuntimeDialogOpen(false)} disabled={runtimeInstalling}>
+                Cancel
+              </Button>
+              <Button
+                variant="contained"
+                color="primary"
+                onClick={() => handleInstallRuntime(installVer)}
+                disabled={runtimeInstalling}
+                startIcon={runtimeInstalling ? <CircularProgress size={16} /> : <CloudUploadIcon />}
+              >
+                {runtimeInstalling ? "Installing…" : `Start Installation (Node ${installVer})`}
+              </Button>
+            </>
+          )}
         </DialogActions>
       </Dialog>
 

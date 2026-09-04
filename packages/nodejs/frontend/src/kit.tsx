@@ -178,11 +178,16 @@ export interface Line {
 /** Fold a stream event into the line list. */
 export function appendEvent(lines: Line[], event: any): Line[] {
   switch (event?.kind) {
-    case "log":
+    case "log": {
+      const text = event.line ?? "";
+      if (text.trim().startsWith('{"version"') || text.trim().startsWith('{"ok"')) {
+        return lines;
+      }
       return [
         ...lines,
-        { stream: event.stream ?? "stdout", text: event.line ?? "" },
+        { stream: event.stream ?? "stdout", text },
       ];
+    }
     case "error":
       return [...lines, { stream: "stderr", text: event.message ?? "failed" }];
     case "result":

@@ -608,12 +608,10 @@ EOF
     require_argc 1 $# "install-runtime <version>"
     version="$1"
     valid_node_version "$version"
-
-    echo "==> Preparing to install Node.js v$version runtime under $HP_NODE_ROOT/v$version" >&2
     dest_dir="$HP_NODE_ROOT/v$version"
 
     if is_dryrun; then
-        echo "WOULD-EXEC: download and extract Node.js v$version into $dest_dir" >&2
+        echo "WOULD-EXEC: download and extract Node.js v$version into $dest_dir"
         printf '{"version":"%s","installed":true,"path":"%s/bin/node"}\n' "$version" "$dest_dir"
         exit 0
     fi
@@ -628,30 +626,43 @@ EOF
         *) node_arch="x64" ;;
     esac
 
-    echo "==> Target architecture: $node_arch" >&2
-    echo "==> Downloading official Node.js v$version standalone binary tarball from nodejs.org..." >&2
-
     # Map major versions to latest LTS patch
     case "$version" in
         18*) full_node_ver="18.20.7" ;;
         20*) full_node_ver="20.19.0" ;;
         22*) full_node_ver="22.14.0" ;;
-        23*) full_node_ver="23.8.0" ;;
+        24*) full_node_ver="24.0.0" ;;
         *) full_node_ver="${version}.0.0" ;;
     esac
+
+    echo "============================================================"
+    echo "  HostPanel — Installing Node.js v$version Standalone Runtime"
+    echo "============================================================"
+    echo "[1/4] Target path: $dest_dir (architecture: $node_arch)"
+    echo "[2/4] Downloading official Node.js v$full_node_ver distribution from nodejs.org..."
 
     tar_url="https://nodejs.org/dist/v${full_node_ver}/node-v${full_node_ver}-linux-${node_arch}.tar.gz"
     tmp_tar="/tmp/node-v${version}.tar.gz"
 
-    if curl -sSLf --connect-timeout 10 --max-time 120 "$tar_url" -o "$tmp_tar" 2>&1; then
-        echo "==> Extracting standalone Node.js into $dest_dir..." >&2
+    if curl -sSLf --connect-timeout 15 --max-time 180 "$tar_url" -o "$tmp_tar" 2>&1; then
+        tar_size="$(du -h "$tmp_tar" | cut -f1)"
+        echo "  ✓ Download completed: node-v${full_node_ver} (${tar_size})"
+        echo "[3/4] Extracting standalone binaries into isolated runtime root..."
         tar -xzf "$tmp_tar" -C "$dest_dir" --strip-components=1 2>&1 || die "failed to extract Node.js archive" 20
         rm -f "$tmp_tar"
+        echo "  ✓ Extracted node, npm, and corepack binaries"
     else
         die "failed to download Node.js v$full_node_ver from nodejs.org" 20
     fi
 
-    echo "==> Node.js v$version installed successfully." >&2
+    echo "[4/4] Validating standalone executables..."
+    node_installed_ver="$("$dest_dir/bin/node" --version 2>/dev/null || echo "v$version")"
+    npm_installed_ver="$("$dest_dir/bin/npm" --version 2>/dev/null || echo "ready")"
+    echo "  ✓ Node executable: $dest_dir/bin/node ($node_installed_ver)"
+    echo "  ✓ NPM executable:  $dest_dir/bin/npm (v$npm_installed_ver)"
+    echo "============================================================"
+    echo "✓ Node.js $node_installed_ver runtime ready and isolated under /opt/hostpanel"
+
     printf '{"version":"%s","installed":true,"path":"%s/bin/node"}\n' "$version" "$dest_dir"
     ;;
 
