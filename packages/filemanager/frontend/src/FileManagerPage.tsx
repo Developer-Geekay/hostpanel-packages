@@ -80,7 +80,7 @@ import "ace-builds/src-noconflict/ext-searchbox";
 import type { PackageContext, FileEntry } from "./types";
 import { MONO, Panel } from "./kit";
 
-const DEFAULT_ROOT = "/opt/hostpanel/data/vhosts";
+const DEFAULT_ROOT = "/opt/hostpanel";
 
 interface QuickLocation {
   id: string;
@@ -175,7 +175,11 @@ function FileManagerBody({ ctx }: { ctx: PackageContext }) {
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
-  const [quickLocations, setQuickLocations] = useState<QuickLocation[]>([]);
+  const [quickLocations, setQuickLocations] = useState<QuickLocation[]>([
+    { id: "hostpanel", label: "HostPanel (/opt/hostpanel)", path: "/opt/hostpanel", icon: "settings" },
+    { id: "home", label: "Home (/home)", path: "/home", icon: "home" },
+    { id: "root", label: "Root (/)", path: "/", icon: "folder" },
+  ]);
 
   // Editor Modal
   const [editorOpen, setEditorOpen] = useState(false);

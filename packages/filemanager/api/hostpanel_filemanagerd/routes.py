@@ -150,21 +150,21 @@ def build_router(manifest: M.Manifest, ops_script: str, *,
     async def quick_locations():
         """Return list of existing quick jump locations, filtering out any that do not exist."""
         candidates = [
+            {"id": "hostpanel", "label": "HostPanel (/opt/hostpanel)", "path": "/opt/hostpanel", "icon": "settings"},
             {"id": "vhosts", "label": "Websites (/opt/hostpanel/data/vhosts)", "path": "/opt/hostpanel/data/vhosts", "icon": "language"},
             {"id": "home", "label": "Home (/home)", "path": "/home", "icon": "home"},
-            {"id": "hostpanel", "label": "HostPanel (/opt/hostpanel)", "path": "/opt/hostpanel", "icon": "settings"},
             {"id": "mnt", "label": "Mounts (/mnt)", "path": "/mnt", "icon": "storage"},
             {"id": "media", "label": "Media (/media)", "path": "/media", "icon": "storage"},
             {"id": "root", "label": "Root (/)", "path": "/", "icon": "folder"},
         ]
         active = [c for c in candidates if os.path.isdir(c["path"])]
-        default_root = "/opt/hostpanel/data/vhosts" if os.path.isdir("/opt/hostpanel/data/vhosts") else (active[0]["path"] if active else "/")
+        default_root = "/opt/hostpanel" if os.path.isdir("/opt/hostpanel") else (active[0]["path"] if active else "/")
         return {"locations": active, "default_root": default_root}
 
     @router.get("/list")
     async def list_files(path: str | None = Query(None)):
-        target_path = path or "/opt/hostpanel/data/vhosts"
-        if target_path == "/opt/hostpanel/data/vhosts" and not os.path.exists(target_path):
+        target_path = path or "/opt/hostpanel"
+        if not os.path.exists(target_path):
             for fallback in ("/opt/hostpanel", "/home", "/"):
                 if os.path.isdir(fallback):
                     target_path = fallback

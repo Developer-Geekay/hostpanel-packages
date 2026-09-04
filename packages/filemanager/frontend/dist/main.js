@@ -62672,7 +62672,7 @@ function LD({
     /* @__PURE__ */ P.jsx(Ln, { sx: r ? { p: 2 } : void 0, children: n })
   ] });
 }
-const Ds = "/opt/hostpanel/data/vhosts";
+const Ds = "/opt/hostpanel";
 function ID(e) {
   if (!e || e === 0) return "0 B";
   const t = 1024, r = ["B", "KB", "MB", "GB", "TB"], n = Math.floor(Math.log(e) / Math.log(t));
@@ -62735,7 +62735,11 @@ function OD({ ctx: e }) {
   return /* @__PURE__ */ P.jsx(W$, { theme: t, children: /* @__PURE__ */ P.jsx(DD, { ctx: e }) });
 }
 function DD({ ctx: e }) {
-  const [t, r] = z.useState(Ds), [n, f] = z.useState(Ds), [u, g] = z.useState([]), [_, c] = z.useState(!0), [p, a] = z.useState(""), [s, l] = z.useState([]), [o, i] = z.useState(!1), [d, h] = z.useState(""), [m, v] = z.useState(""), [b, w] = z.useState(!1), [x, y] = z.useState(!1), [C, T] = z.useState(""), [M, E] = z.useState(!1), [L, k] = z.useState(""), [$, R] = z.useState(!1), [S, A] = z.useState(null), [I, O] = z.useState(""), [D, F] = z.useState(!1), [N, H] = z.useState(null), [B, W] = z.useState({
+  const [t, r] = z.useState(Ds), [n, f] = z.useState(Ds), [u, g] = z.useState([]), [_, c] = z.useState(!0), [p, a] = z.useState(""), [s, l] = z.useState([
+    { id: "hostpanel", label: "HostPanel (/opt/hostpanel)", path: "/opt/hostpanel", icon: "settings" },
+    { id: "home", label: "Home (/home)", path: "/home", icon: "home" },
+    { id: "root", label: "Root (/)", path: "/", icon: "folder" }
+  ]), [o, i] = z.useState(!1), [d, h] = z.useState(""), [m, v] = z.useState(""), [b, w] = z.useState(!1), [x, y] = z.useState(!1), [C, T] = z.useState(""), [M, E] = z.useState(!1), [L, k] = z.useState(""), [$, R] = z.useState(!1), [S, A] = z.useState(null), [I, O] = z.useState(""), [D, F] = z.useState(!1), [N, H] = z.useState(null), [B, W] = z.useState({
     uR: !0,
     uW: !0,
     uX: !1,

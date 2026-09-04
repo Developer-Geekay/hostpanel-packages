@@ -64,11 +64,44 @@ def pack_package(pkg_dir: Path, output_tar: Path):
                     rel_path = full_path.relative_to(pkg_dir)
                     tar.add(full_path, arcname=str(rel_path).replace("\\", "/"))
 
+def sync_catalog():
+    catalog_path = ROOT_DIR / "catalog.json"
+    if not catalog_path.is_file():
+        return
+    import json
+    with open(catalog_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    pkg_map = {p["name"]: p for p in data.get("packages", [])}
+    for pkg_dir in sorted(PACKAGES_DIR.iterdir()):
+        if not pkg_dir.is_dir():
+            continue
+        mfile = pkg_dir / "manifest.json"
+        if not mfile.is_file():
+            continue
+        try:
+            with open(mfile, "r", encoding="utf-8") as mf:
+                mdata = json.load(mf)
+            pname = mdata.get("feature") or pkg_dir.name
+            if pname in pkg_map:
+                if "version" in mdata:
+                    pkg_map[pname]["version"] = mdata["version"]
+                if "label" in mdata:
+                    pkg_map[pname]["label"] = mdata["label"]
+        except Exception:
+            pass
+
+    with open(catalog_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    print("  [+] Synchronized manifest versions into catalog.json")
+
 def main():
     RELEASES_DIR.mkdir(parents=True, exist_ok=True)
     count = 0
 
-    print("Building package release archives:")
+    print("Synchronizing catalog metadata and building package release archives:")
+    sync_catalog()
     for pkg_dir in sorted(PACKAGES_DIR.iterdir()):
         if not pkg_dir.is_dir():
             continue
