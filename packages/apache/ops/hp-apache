@@ -45,20 +45,20 @@ ensure_apr_libraries() {
   # 1. Install missing system APR packages via package manager if available
   if command -v apt-get >/dev/null 2>&1; then
     echo "  Installing libapr1 and libaprutil1 system packages..." >&2
-    DEBIAN_FRONTEND=noninteractive apt-get update -y >&2 || true
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      libapr1 libaprutil1 libapr1t64 libaprutil1t64 libaprutil1-dbd-sqlite3 libaprutil1-ldap libbrotli1 libnghttp2-14 >&2 || true
+    env -u LD_PRELOAD -u LD_LIBRARY_PATH DEBIAN_FRONTEND=noninteractive apt-get update -y >&2 || true
+    env -u LD_PRELOAD -u LD_LIBRARY_PATH DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      libapr1 libaprutil1 libapr1t64 libaprutil1t64 libaprutil1-dbd-sqlite3 libaprutil1-ldap >&2 || true
   elif command -v apk >/dev/null 2>&1; then
-    apk add --no-cache apr apr-util >&2 || true
+    env -u LD_PRELOAD -u LD_LIBRARY_PATH apk add --no-cache apr apr-util >&2 || true
   elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y apr apr-util >&2 || true
+    env -u LD_PRELOAD -u LD_LIBRARY_PATH dnf install -y apr apr-util >&2 || true
   fi
 
-  # 2. Copy libraries into isolated /opt/hostpanel/runtimes/apache/lib
+  # 2. Copy APR libraries into isolated /opt/hostpanel/runtimes/apache/lib
   for p in /usr/lib/*-linux-gnu /usr/lib64 /usr/lib /lib/*-linux-gnu /lib; do
     [ -d "$p" ] || continue
-    for f in "$p"/libapr-1.so* "$p"/libaprutil-1.so* "$p"/libpcre2-8.so* "$p"/libbrotlienc.so* "$p"/libnghttp2.so*; do
-      [ -e "$f" ] && cp -a "$f" "${LIB_DIR}/" 2>/dev/null || true
+    for f in "$p"/libapr-1.so* "$p"/libaprutil-1.so*; do
+      [ -e "$f" ] && env -u LD_PRELOAD -u LD_LIBRARY_PATH cp -a "$f" "${LIB_DIR}/" 2>/dev/null || true
     done
   done
 
