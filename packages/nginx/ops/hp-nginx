@@ -127,8 +127,10 @@ cmd_engine_status() {
 
 cmd_engine_start() {
   mkdir -p "$LOG_DIR" "$RUN_DIR"
-  if systemctl is-active --quiet apache2 2>/dev/null || pgrep -f "apache2|httpd" >/dev/null 2>&1; then
-    echo '{"ok":false,"error":"Cannot start Nginx: Apache is currently running on port 80/443. Stop Apache first.","code":"PORT_CONFLICT"}' >&2
+  local conflict_proc=""
+  conflict_proc="$(ss -tulpn 'sport = :80 or sport = :443' 2>/dev/null | grep LISTEN | grep -v nginx | awk '{print $NF}' | head -n 1 || true)"
+  if [ -n "$conflict_proc" ]; then
+    echo "{\"ok\":false,\"error\":\"Cannot start Nginx: Port 80 or 443 is already in use by $conflict_proc.\",\"code\":\"PORT_CONFLICT\"}" >&2
     return $EXIT_EXECUTION_FAILED
   fi
   if [ -n "$NGINX_BIN" ] && [ -f "$CONF_FILE" ]; then
