@@ -608,9 +608,17 @@ function FileManagerBody({ ctx }: { ctx: PackageContext }) {
         formData.append("path", currentPath);
         formData.append("file", file);
 
-        const res = await ctx.api("/upload", {
+        const token = sessionStorage.getItem("hp_token") || localStorage.getItem("hp_token");
+        const headers: Record<string, string> = {
+          Accept: "application/json",
+        };
+        if (token) headers["Authorization"] = `Bearer ${token}`;
+
+        const res = await fetch("/cpanelapi/pkg/filemanager/upload", {
           method: "POST",
+          headers,
           body: formData,
+          credentials: "same-origin",
         });
         if (!res.ok) {
           const errJson = await res.json().catch(() => ({}));

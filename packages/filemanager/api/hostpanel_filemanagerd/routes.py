@@ -11,7 +11,7 @@ import os
 import uuid
 from typing import Any, Mapping
 
-from fastapi import APIRouter, File, Form, Query, Request, Response, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -223,19 +223,63 @@ def build_router(manifest: M.Manifest, ops_script: str, *,
     # ── upload and download ───────────────────────────────────────────────────
 
     @router.post("/upload")
-    async def upload_file(path: str = Form(...), file: UploadFile = File(...)):
-        content_bytes = await file.read()
-        target_path = path.rstrip("/")
+    async def upload_file(
+        request: Request,
+        path: str | None = Form(default=None),
+        file: UploadFile | None = File(default=None),
+    ):
+        target_path = None
+        content_bytes = b""
+        filename = ""
+
+        # 1. Standard multipart form data
+        if file is not None and path is not None:
+            content_bytes = await file.read()
+            target_path = path
+            filename = file.filename or "uploaded_file"
+        else:
+            # 2. Fallback: Parse request form or JSON body
+            content_type = request.headers.get("content-type", "").lower()
+            if "application/json" in content_type:
+                try:
+                    data = await request.json()
+                    target_path = data.get("path")
+                    filename = data.get("filename", "uploaded_file")
+                    if "content_base64" in data:
+                        import base64
+                        content_bytes = base64.b64decode(data["content_base64"])
+                    elif "content" in data:
+                        content_bytes = data["content"].encode("utf-8")
+                except Exception as e:
+                    raise HTTPException(status_code=400, detail=f"Failed to parse JSON upload payload: {e}")
+            else:
+                try:
+                    form = await request.form()
+                    target_path = form.get("path")
+                    form_file = form.get("file")
+                    if hasattr(form_file, "read"):
+                        content_bytes = await form_file.read()
+                        filename = getattr(form_file, "filename", "uploaded_file")
+                except Exception:
+                    pass
+
+        if not target_path or (not content_bytes and file is None):
+            raise HTTPException(
+                status_code=400,
+                detail="Both 'path' and 'file' (or 'content') are required for upload."
+            )
+
+        target_path = str(target_path).rstrip("/")
         # If target path is a directory (or ends with slash), append filename
-        if path.endswith("/") or target_path in ("/opt/hostpanel/data", "/opt/hostpanel/data/vhosts", "/opt/hostpanel", "/home"):
-            target_path = f"{target_path}/{file.filename}"
+        if str(target_path).endswith("/") or target_path in ("/opt/hostpanel/data", "/opt/hostpanel/data/vhosts", "/opt/hostpanel", "/home"):
+            target_path = f"{target_path}/{filename}"
         else:
             # Check if target_path is an existing directory via stat
             try:
                 stat_spec, _ = spec_for("file.stat", {"path": target_path})
                 stat_res = await ops.run(stat_spec)
                 if stat_res.ok and stat_res.data().get("stat", {}).get("is_dir"):
-                    target_path = f"{target_path}/{file.filename}"
+                    target_path = f"{target_path}/{filename}"
             except Exception:
                 pass
 
