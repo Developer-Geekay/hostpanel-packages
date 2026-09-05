@@ -36,6 +36,13 @@ class CreateApp(BaseModel):
     port: int | str | None = 0
 
 
+class UpdateApp(BaseModel):
+    directory: str
+    node_version: str | None = "20"
+    script: str | None = "index.js"
+    port: int | str | None = 0
+
+
 class SetEnv(BaseModel):
     env: str
 
@@ -182,6 +189,18 @@ def build_router(
             "port": allocated_port,
         }
         return await run_json("nodejs.create-app", params)
+
+    @router.put("/apps/{name}")
+    @router.post("/apps/{name}/update")
+    async def update_app(name: str, body: UpdateApp):
+        params = {
+            "name": name,
+            "directory": body.directory,
+            "node_version": body.node_version or "20",
+            "script": body.script or "index.js",
+            "port": body.port or 0,
+        }
+        return await run_json("nodejs.update-app", params)
 
     @router.post("/apps/{name}/start")
     async def start_app(name: str):

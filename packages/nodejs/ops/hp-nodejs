@@ -254,6 +254,7 @@ usage: hp-nodejs <verb> [args]
   list-apps
   get-app         <name>
   create-app      <name> <directory> <node_version> <script> <port>
+  update-app      <name> <directory> <node_version> <script> <port>
   start-app       <name>
   stop-app        <name>
   restart-app     <name>
@@ -367,6 +368,54 @@ EOF
     env_file="$(app_env_file "$name")"
     if [ ! -f "$env_file" ]; then
         touch "$env_file"
+    fi
+
+    app_to_json "$name"
+    ;;
+
+  update-app)
+    require_argc 5 $# "update-app <name> <directory> <node_version> <script> <port>"
+    name="$1"; directory="$2"; node_version="$3"; script="$4"; port="$5"
+    valid_app_name "$name"
+    valid_abs_path "$directory"
+    no_traversal "$directory"
+    valid_node_version "$node_version"
+    valid_port "$port"
+    require_app_exists "$name"
+
+    was_running=0
+    if is_app_running "$name"; then
+        was_running=1
+    fi
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: update $(app_conf_file "$name")" >&2
+        printf '{"name":"%s","directory":"%s","node_version":"%s","script":"%s","port":%d,"updated":true}\n' \
+            "$name" "$directory" "$node_version" "$script" "$port"
+        exit 0
+    fi
+
+    mkdir -p "$directory" 2>/dev/null || true
+
+    conf="$(app_conf_file "$name")"
+    created_at="$(grep -o '"created_at"[^,]*' "$conf" 2>/dev/null | head -n 1 | cut -d':' -f2- | tr -d ' "' || echo "")"
+    [ -n "$created_at" ] || created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    cat > "$conf" <<EOF
+{
+  "name": "$(json_escape "$name")",
+  "directory": "$(json_escape "$directory")",
+  "node_version": "$(json_escape "$node_version")",
+  "script": "$(json_escape "$script")",
+  "port": $port,
+  "created_at": "$(json_escape "$created_at")",
+  "updated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+EOF
+
+    # If the app was running, hot-restart it to apply new settings
+    if [ "$was_running" = "1" ]; then
+        "$0" restart-app "$name" >/dev/null 2>&1 || true
     fi
 
     app_to_json "$name"

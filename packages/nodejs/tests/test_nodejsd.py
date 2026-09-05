@@ -44,6 +44,9 @@ case "$verb" in
   create-app)
     printf '{"name":"%s","directory":"%s","node_version":"%s","script":"%s","port":%s,"status":"stopped","created":true}\n' "$1" "$2" "$3" "$4" "$5"
     ;;
+  update-app)
+    printf '{"name":"%s","directory":"%s","node_version":"%s","script":"%s","port":%s,"status":"running","updated":true}\n' "$1" "$2" "$3" "$4" "$5"
+    ;;
   start-app)
     printf '{"name":"%s","status":"running","pid":5678,"started":true}\n' "$1"
     ;;
@@ -233,6 +236,24 @@ def test_create_app_custom_port(svc):
     assert r.status_code == 200
     assert r.json()["port"] == 31050
     assert "ARGV=custom_app /opt/hostpanel/data/apps/custom_app 22 app.js 31050" in ops_log(svc)
+
+
+def test_update_app(svc):
+    r = svc.client.put(
+        "/apps/custom_app",
+        json={
+            "directory": "/opt/hostpanel/data/apps/custom_app_v2",
+            "node_version": "24",
+            "script": "dist/index.js",
+            "port": 31055,
+        },
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["name"] == "custom_app"
+    assert data["updated"] is True
+    assert "VERB=update-app" in ops_log(svc)
+    assert "ARGV=custom_app /opt/hostpanel/data/apps/custom_app_v2 24 dist/index.js 31055" in ops_log(svc)
 
 
 def test_start_app(svc):

@@ -39,6 +39,7 @@ import PlayArrowIcon from "@mui/icons-material/PlayArrow";
 import StopIcon from "@mui/icons-material/Stop";
 import RestartAltIcon from "@mui/icons-material/RestartAlt";
 import DeleteIcon from "@mui/icons-material/Delete";
+import EditIcon from "@mui/icons-material/Edit";
 import ArticleIcon from "@mui/icons-material/Article";
 import SettingsIcon from "@mui/icons-material/Settings";
 import TerminalIcon from "@mui/icons-material/Terminal";
@@ -120,6 +121,24 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
   const [deployPort, setDeployPort] = useState("0");
   const [deployEnv, setDeployEnv] = useState("NODE_ENV=production\nPORT=31000\n");
   const [deployLoading, setDeployLoading] = useState(false);
+
+  // Edit App Form State
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [editAppTarget, setEditAppTarget] = useState<NodeApp | null>(null);
+  const [editDir, setEditDir] = useState("");
+  const [editVersion, setEditVersion] = useState("22");
+  const [editScript, setEditScript] = useState("index.js");
+  const [editPort, setEditPort] = useState("0");
+  const [editLoading, setEditLoading] = useState(false);
+
+  const handleOpenEdit = (app: NodeApp) => {
+    setEditAppTarget(app);
+    setEditDir(app.directory);
+    setEditVersion(app.node_version || (installedRuntimes[0]?.major ?? "22"));
+    setEditScript(app.script || "index.js");
+    setEditPort(String(app.port || "0"));
+    setEditDialogOpen(true);
+  };
 
   // Automatically update deployVersion when installed runtimes load or change
   useEffect(() => {
@@ -377,6 +396,33 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
       showToast(err.message || "Failed to create application", "error");
     } finally {
       setDeployLoading(false);
+    }
+  };
+
+  // Edit Existing Application
+  const handleEditAppSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editAppTarget) return;
+    setEditLoading(true);
+    try {
+      await json(`/apps/${encodeURIComponent(editAppTarget.name)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          directory: editDir.trim(),
+          node_version: editVersion,
+          script: editScript.trim() || "index.js",
+          port: parseInt(editPort, 10) || 0,
+        }),
+      });
+
+      showToast(`Application '${editAppTarget.name}' updated successfully!`, "success");
+      setEditDialogOpen(false);
+      refresh();
+    } catch (err: any) {
+      showToast(err.message || "Failed to update application", "error");
+    } finally {
+      setEditLoading(false);
     }
   };
 
@@ -789,6 +835,11 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
                                 </IconButton>
                               </Tooltip>
                             )}
+                            <Tooltip title="Edit Application">
+                              <IconButton size="small" onClick={() => handleOpenEdit(app)}>
+                                <EditIcon sx={{ fontSize: 18 }} />
+                              </IconButton>
+                            </Tooltip>
                             <Tooltip title="Environment Variables">
                               <IconButton size="small" onClick={() => handleOpenEnv(app.name)}>
                                 <SettingsIcon sx={{ fontSize: 18 }} />
@@ -1235,6 +1286,120 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
               startIcon={deployLoading ? <CircularProgress size={16} /> : <CheckCircleIcon />}
             >
               {deployLoading ? "Deploying Application…" : "Deploy Application"}
+            </Button>
+          </DialogActions>
+        </Box>
+      </Dialog>
+
+      {/* Edit Application Dialog */}
+      <Dialog
+        open={editDialogOpen}
+        onClose={() => !editLoading && setEditDialogOpen(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+            <EditIcon sx={{ color: "primary.main" }} />
+            <Typography sx={{ fontWeight: 700, fontSize: "1.125rem" }}>
+              Edit Application: {editAppTarget?.name}
+            </Typography>
+          </Stack>
+          <IconButton size="small" onClick={() => setEditDialogOpen(false)} disabled={editLoading}>
+            <CloseIcon sx={{ fontSize: 18 }} />
+          </IconButton>
+        </DialogTitle>
+        <Box component="form" onSubmit={handleEditAppSubmit}>
+          <DialogContent dividers sx={{ display: "flex", flexDirection: "column", gap: 2.5 }}>
+            <Typography sx={{ fontSize: "0.8125rem", color: "text.secondary" }}>
+              Modify application directory, runtime version, entrypoint script, and allocated reverse proxy port.
+              {editAppTarget?.status === "running" && (
+                <span style={{ color: "#38bdf8", display: "block", marginTop: 4 }}>
+                  ⚡ This application is currently running. Saving changes will automatically restart the process to apply the new configuration.
+                </span>
+              )}
+            </Typography>
+
+            <Field label="Application Name" hint="Unique identifier cannot be modified">
+              <TextField
+                fullWidth
+                size="small"
+                value={editAppTarget?.name || ""}
+                disabled
+              />
+            </Field>
+
+            <Field label="Application Directory" hint="Root path containing package.json and entrypoint">
+              <TextField
+                fullWidth
+                size="small"
+                placeholder="/opt/hostpanel/data/apps/my-app"
+                value={editDir}
+                onChange={(e) => setEditDir(e.target.value)}
+                required
+              />
+            </Field>
+
+            <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+              <Field
+                label="Node.js Version"
+                hint={installedRuntimes.length > 0 ? "Target installed runtime" : "No runtimes installed"}
+                sx={{ flex: 1 }}
+              >
+                <Select
+                  fullWidth
+                  size="small"
+                  value={editVersion}
+                  onChange={(e) => setEditVersion(e.target.value)}
+                  disabled={installedRuntimes.length === 0}
+                >
+                  {installedRuntimes.map((rt) => {
+                    const meta = RUNTIME_METADATA[rt.major];
+                    const title = meta ? meta.title : `Node.js v${rt.major}`;
+                    return (
+                      <MenuItem key={rt.major} value={rt.major}>
+                        {title}
+                      </MenuItem>
+                    );
+                  })}
+                </Select>
+              </Field>
+
+              <Field label="Start Script / Entrypoint" hint="e.g. index.js or dist/server.js" sx={{ flex: 1 }}>
+                <TextField
+                  fullWidth
+                  size="small"
+                  placeholder="index.js"
+                  value={editScript}
+                  onChange={(e) => setEditScript(e.target.value)}
+                  required
+                />
+              </Field>
+            </Stack>
+
+            <Field label="Assigned Port (31000–31999)" hint="Reverse proxy port for this application">
+              <TextField
+                fullWidth
+                size="small"
+                placeholder="31000"
+                value={editPort}
+                onChange={(e) => setEditPort(e.target.value)}
+                required
+              />
+            </Field>
+          </DialogContent>
+          <DialogActions sx={{ p: 2 }}>
+            <Button onClick={() => setEditDialogOpen(false)} disabled={editLoading}>
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              variant="contained"
+              color="primary"
+              disabled={editLoading || !editDir}
+              startIcon={editLoading ? <CircularProgress size={16} /> : <CheckCircleIcon />}
+            >
+              {editLoading ? "Saving Changes…" : "Save Changes"}
             </Button>
           </DialogActions>
         </Box>

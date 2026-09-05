@@ -16,6 +16,7 @@ _ARGV: dict[str, tuple[str, tuple[str, ...]]] = {
     "nodejs.list-apps":       ("list-apps",       ()),
     "nodejs.get-app":         ("get-app",         ("name",)),
     "nodejs.create-app":      ("create-app",      ("name", "directory", "node_version", "script", "port")),
+    "nodejs.update-app":      ("update-app",      ("name", "directory", "node_version", "script", "port")),
     "nodejs.start-app":       ("start-app",       ("name",)),
     "nodejs.stop-app":        ("stop-app",        ("name",)),
     "nodejs.restart-app":     ("restart-app",     ("name",)),
