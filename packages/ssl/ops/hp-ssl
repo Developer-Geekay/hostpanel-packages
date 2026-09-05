@@ -94,6 +94,108 @@ for _py in python3 python /usr/bin/python3; do
     fi
 done
 
+ensure_acme_challenge_route() {
+    local d="$1"
+    local nginx_vhost="/opt/hostpanel/etc/nginx/vhosts/${d}.conf"
+    local nginx_temp_conf="/opt/hostpanel/etc/nginx/conf.d/acme_${d}.conf"
+    local modified=false
+
+    # If Nginx vhost exists, inject the ACME challenge rule if missing
+    if [ -f "$nginx_vhost" ]; then
+        if ! grep -q "acme-challenge" "$nginx_vhost" 2>/dev/null; then
+            "$PYTHON_BIN" -c '
+import sys, re
+path = sys.argv[1]
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+    if "acme-challenge" in content:
+        sys.exit(0)
+    rule = """
+    # HostPanel ACME HTTP-01 Challenge Rule
+    location ^~ /.well-known/acme-challenge/ {
+        root /opt/hostpanel/data/acme/challenge;
+        default_type "text/plain";
+        try_files $uri =404;
+    }
+"""
+    m = re.search(r"server\s*\{", content)
+    if m:
+        idx = m.end()
+        new_c = content[:idx] + rule + content[idx:]
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(new_c)
+except Exception: pass
+' "$nginx_vhost" 2>/dev/null && modified=true
+        fi
+    else
+        # If no dedicated vhost file exists, create a temporary ACME server block in conf.d
+        if [ -d "/opt/hostpanel/etc/nginx/conf.d" ]; then
+            cat << EOF > "$nginx_temp_conf"
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${d} www.${d};
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /opt/hostpanel/data/acme/challenge;
+        default_type "text/plain";
+        try_files \$uri =404;
+    }
+}
+EOF
+            modified=true
+        fi
+    fi
+
+    # Apache support
+    local apache_vhost="/opt/hostpanel/etc/apache/sites-available/${d}.conf"
+    if [ -f "$apache_vhost" ] && ! grep -q "acme-challenge" "$apache_vhost" 2>/dev/null; then
+        "$PYTHON_BIN" -c '
+import sys
+path = sys.argv[1]
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+    rule = """
+    Alias /.well-known/acme-challenge/ /opt/hostpanel/data/acme/challenge/.well-known/acme-challenge/
+    <Directory "/opt/hostpanel/data/acme/challenge/.well-known/acme-challenge/">
+        Options None
+        AllowOverride None
+        Require all granted
+    </Directory>
+"""
+    if "<VirtualHost" in content and "acme-challenge" not in content:
+        idx = content.find(">") + 1
+        new_c = content[:idx] + rule + content[idx:]
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(new_c)
+except Exception: pass
+' "$apache_vhost" 2>/dev/null && modified=true
+    fi
+
+    if [ "$modified" = true ]; then
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl reload nginx 2>/dev/null || true
+            systemctl reload hostpanel-nginxd 2>/dev/null || true
+            systemctl reload apache2 2>/dev/null || true
+            systemctl reload hostpanel-apached 2>/dev/null || true
+        fi
+    fi
+}
+
+cleanup_temp_acme_route() {
+    local d="$1"
+    local nginx_temp_conf="/opt/hostpanel/etc/nginx/conf.d/acme_${d}.conf"
+    if [ -f "$nginx_temp_conf" ]; then
+        rm -f "$nginx_temp_conf" 2>/dev/null || true
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl reload nginx 2>/dev/null || true
+            systemctl reload hostpanel-nginxd 2>/dev/null || true
+        fi
+    fi
+}
+
 usage() {
     cat >&2 <<'EOF'
 usage: hp-ssl <verb> [args]
@@ -299,6 +401,10 @@ print(json.dumps({
     fi
 
     echo "[3/5] Requesting certificate issuance and solving ${challenge_type} challenge..."
+    if [ "$challenge_type" = "http-01" ]; then
+        ensure_acme_challenge_route "$domain"
+    fi
+
     cert_file="${CERTS_DIR}/${domain}.crt"
     key_file="${KEYS_DIR}/${domain}.key"
     bundle_file="${CERTS_DIR}/${domain}.bundle.crt"
@@ -319,12 +425,14 @@ print(json.dumps({
             --force
         )
         if ! "$ACME_BIN" "${acme_opts[@]}"; then
+            cleanup_temp_acme_route "$domain"
             echo "" >&2
             echo "  ! Let's Encrypt ACME challenge failed for ${domain}." >&2
             echo "  ! Ensure your domain DNS (A record) points to this server's public IP" >&2
             echo "  ! and HTTP port 80 is open to the internet to allow ACME verification." >&2
             die "ACME challenge failed for ${domain} — check DNS and port 80" 11
         fi
+        cleanup_temp_acme_route "$domain"
     else
         die "acme.sh client not found at $ACME_BIN" 20
     fi
@@ -500,6 +608,7 @@ with open(meta_path, "w") as fp:
     if [ -n "$domain" ]; then
         valid_domain "$domain"
         [ -f "${CERTS_DIR}/${domain}.crt" ] || die "certificate for '$domain' not found" 10
+        ensure_acme_challenge_route "$domain"
         echo "[1/2] Checking certificate renewal for ${domain}..."
         if [ -x "$ACME_BIN" ] && ! is_dryrun; then
             "$ACME_BIN" --renew -d "$domain" \
@@ -509,6 +618,7 @@ with open(meta_path, "w") as fp:
                 --key-file "${KEYS_DIR}/${domain}.key" \
                 --ca-file "${CERTS_DIR}/${domain}.bundle.crt" 2>&1 || true
         fi
+        cleanup_temp_acme_route "$domain"
         echo "[2/2] Certificate renewal cycle executed successfully."
         echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] [renewal] Renewed certificate for ${domain}" >> "${LOG_DIR}/renewal.log"
         printf '{"ok":true,"renewed":true,"domain":"%s","renewed_count":1}\n' "$domain"

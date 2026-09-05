@@ -281,6 +281,7 @@ function SslPageBody({ ctx }: { ctx: PackageContext }) {
 
     setIssuing(true);
     setIssueLogs([]);
+    setLastIssuedDomain(null);
 
     const payload = {
       domain: issueDomain.trim(),
@@ -290,6 +291,8 @@ function SslPageBody({ ctx }: { ctx: PackageContext }) {
       agree_tos: agreeTos,
     };
 
+    let succeeded = false;
+
     try {
       if (ctx.run) {
         for await (const event of ctx.run("/certs/issue", {
@@ -297,6 +300,11 @@ function SslPageBody({ ctx }: { ctx: PackageContext }) {
           body: payload,
         })) {
           setIssueLogs((prev) => appendEvent(prev, event));
+          if (event.kind === "result") {
+            if (event.ok || event.exit_code === 0) {
+              succeeded = true;
+            }
+          }
         }
       } else {
         const res = await apiFetch("/certs/issue", {
@@ -304,17 +312,25 @@ function SslPageBody({ ctx }: { ctx: PackageContext }) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         });
-        if (res.ok) {
+        if (res && (res.ok || res.issued)) {
+          succeeded = true;
           setIssueLogs([
             { stream: "stdout", text: `✓ Certificate issued for ${issueDomain}` },
             { stream: "meta", text: "✓ completed" },
           ]);
         }
       }
-      setToast(`Let's Encrypt certificate issued for ${issueDomain}!`);
-      setLastIssuedDomain(issueDomain.trim());
-      await refreshAll();
+
+      if (succeeded) {
+        setToast(`Let's Encrypt certificate issued for ${issueDomain}!`);
+        setLastIssuedDomain(issueDomain.trim());
+        await refreshAll();
+      } else {
+        setLastIssuedDomain(null);
+        setToast(`Let's Encrypt issuance failed for ${issueDomain}.`);
+      }
     } catch (e: any) {
+      setLastIssuedDomain(null);
       setIssueLogs((prev) => [
         ...prev,
         { stream: "stderr", text: `Error: ${e.message}` },
