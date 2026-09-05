@@ -96,22 +96,22 @@ done
 
 ensure_acme_challenge_route() {
     local d="$1"
-    local nginx_vhost="/opt/hostpanel/etc/nginx/vhosts/${d}.conf"
-    local nginx_temp_conf="/opt/hostpanel/etc/nginx/conf.d/acme_${d}.conf"
-    local modified=false
 
-    # If Nginx vhost exists, inject the ACME challenge rule if missing
-    if [ -f "$nginx_vhost" ]; then
-        if ! grep -q "acme-challenge" "$nginx_vhost" 2>/dev/null; then
-            "$PYTHON_BIN" -c '
-import sys, re
-path = sys.argv[1]
-try:
-    with open(path, "r", encoding="utf-8") as f:
-        content = f.read()
-    if "acme-challenge" in content:
-        sys.exit(0)
-    rule = """
+    # Scan and inject into any Nginx config file that declares this domain in server_name
+    "$PYTHON_BIN" -c '
+import os, sys, re
+
+domain = sys.argv[1]
+search_dirs = [
+    "/opt/hostpanel/etc/nginx/vhosts",
+    "/opt/hostpanel/etc/nginx/conf.d",
+    "/opt/hostpanel/plugins/nginx/vhosts",
+    "/etc/nginx/sites-available",
+    "/etc/nginx/sites-enabled",
+    "/etc/nginx/conf.d"
+]
+
+rule = """
     # HostPanel ACME HTTP-01 Challenge Rule
     location ^~ /.well-known/acme-challenge/ {
         root /opt/hostpanel/data/acme/challenge;
@@ -119,34 +119,57 @@ try:
         try_files $uri =404;
     }
 """
-    m = re.search(r"server\s*\{", content)
-    if m:
-        idx = m.end()
-        new_c = content[:idx] + rule + content[idx:]
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(new_c)
-except Exception: pass
-' "$nginx_vhost" 2>/dev/null && modified=true
-        fi
-    else
-        # If no dedicated vhost file exists, create a temporary ACME server block in conf.d
-        if [ -d "/opt/hostpanel/etc/nginx/conf.d" ]; then
-            cat << EOF > "$nginx_temp_conf"
-server {
+
+found = False
+for sdir in search_dirs:
+    if not os.path.isdir(sdir):
+        continue
+    for fname in sorted(os.listdir(sdir)):
+        if not fname.endswith(".conf"):
+            continue
+        fpath = os.path.join(sdir, fname)
+        try:
+            with open(fpath, "r", encoding="utf-8", errors="ignore") as fp:
+                content = fp.read()
+            if domain in content and re.search(r"\bserver_name\b[^;]*\b" + re.escape(domain) + r"\b", content):
+                if "acme-challenge" not in content:
+                    m = re.search(r"server\s*\{", content)
+                    if m:
+                        idx = m.end()
+                        new_content = content[:idx] + rule + content[idx:]
+                        with open(fpath, "w", encoding="utf-8") as fp:
+                            fp.write(new_content)
+                        found = True
+                        print("INJECTED into", fpath)
+                else:
+                    found = True
+        except Exception: pass
+
+# If no existing vhost with server_name matched, create fallback drop-in
+if not found:
+    dropin_dir = "/opt/hostpanel/etc/nginx/conf.d"
+    if not os.path.isdir(dropin_dir):
+        dropin_dir = "/opt/hostpanel/etc/nginx/vhosts"
+    if os.path.isdir(dropin_dir):
+        dropin_path = os.path.join(dropin_dir, f"acme_{domain}.conf")
+        vhost_text = f"""server {{
     listen 80;
     listen [::]:80;
-    server_name ${d} www.${d};
+    server_name {domain} www.{domain};
 
-    location ^~ /.well-known/acme-challenge/ {
+    location ^~ /.well-known/acme-challenge/ {{
         root /opt/hostpanel/data/acme/challenge;
         default_type "text/plain";
-        try_files \$uri =404;
-    }
-}
-EOF
-            modified=true
-        fi
-    fi
+        try_files $uri =404;
+    }}
+}}
+"""
+        try:
+            with open(dropin_path, "w", encoding="utf-8") as fp:
+                fp.write(vhost_text)
+            print("CREATED_FALLBACK", dropin_path)
+        except Exception: pass
+' "$d" 2>/dev/null || true
 
     # Apache support
     local apache_vhost="/opt/hostpanel/etc/apache/sites-available/${d}.conf"
@@ -171,28 +194,24 @@ try:
         with open(path, "w", encoding="utf-8") as f:
             f.write(new_c)
 except Exception: pass
-' "$apache_vhost" 2>/dev/null && modified=true
+' "$apache_vhost" 2>/dev/null || true
     fi
 
-    if [ "$modified" = true ]; then
-        if command -v systemctl >/dev/null 2>&1; then
-            systemctl reload nginx 2>/dev/null || true
-            systemctl reload hostpanel-nginxd 2>/dev/null || true
-            systemctl reload apache2 2>/dev/null || true
-            systemctl reload hostpanel-apached 2>/dev/null || true
-        fi
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl reload nginx 2>/dev/null || true
+        systemctl reload hostpanel-nginxd 2>/dev/null || true
+        systemctl reload apache2 2>/dev/null || true
+        systemctl reload hostpanel-apached 2>/dev/null || true
     fi
 }
 
 cleanup_temp_acme_route() {
     local d="$1"
-    local nginx_temp_conf="/opt/hostpanel/etc/nginx/conf.d/acme_${d}.conf"
-    if [ -f "$nginx_temp_conf" ]; then
-        rm -f "$nginx_temp_conf" 2>/dev/null || true
-        if command -v systemctl >/dev/null 2>&1; then
-            systemctl reload nginx 2>/dev/null || true
-            systemctl reload hostpanel-nginxd 2>/dev/null || true
-        fi
+    rm -f "/opt/hostpanel/etc/nginx/conf.d/acme_${d}.conf" \
+          "/opt/hostpanel/etc/nginx/vhosts/acme_${d}.conf" 2>/dev/null || true
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl reload nginx 2>/dev/null || true
+        systemctl reload hostpanel-nginxd 2>/dev/null || true
     fi
 }
 
@@ -400,10 +419,8 @@ print(json.dumps({
         "$ACME_BIN" --register-account -m "$email" --server "$server_param" --config-home "$ACME_CONF_DIR" 2>&1 || true
     fi
 
-    echo "[3/5] Requesting certificate issuance and solving ${challenge_type} challenge..."
-    if [ "$challenge_type" = "http-01" ]; then
-        ensure_acme_challenge_route "$domain"
-    fi
+    echo "[3/5] Requesting certificate issuance and solving challenge..."
+    ensure_acme_challenge_route "$domain"
 
     cert_file="${CERTS_DIR}/${domain}.crt"
     key_file="${KEYS_DIR}/${domain}.key"

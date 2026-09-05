@@ -754,8 +754,8 @@ function SslPageBody({ ctx }: { ctx: PackageContext }) {
                   fullWidth
                   disabled={issuing}
                 >
-                  <MenuItem value="http-01">HTTP-01 Challenge (Webroot /.well-known/acme-challenge)</MenuItem>
-                  <MenuItem value="dns-01">DNS-01 Challenge (DNS TXT Record validation)</MenuItem>
+                  <MenuItem value="http-01">HTTP-01 Challenge (Automatic Webroot Validation - Recommended)</MenuItem>
+                  <MenuItem value="dns-01" disabled>DNS-01 Challenge (DNS TXT Validation - Coming Soon)</MenuItem>
                 </Select>
               </Field>
 

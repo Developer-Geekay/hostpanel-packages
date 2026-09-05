@@ -23525,8 +23525,8 @@ function K$({ ctx: e }) {
               fullWidth: !0,
               disabled: I,
               children: [
-                /* @__PURE__ */ d.jsx(cn, { value: "http-01", children: "HTTP-01 Challenge (Webroot /.well-known/acme-challenge)" }),
-                /* @__PURE__ */ d.jsx(cn, { value: "dns-01", children: "DNS-01 Challenge (DNS TXT Record validation)" })
+                /* @__PURE__ */ d.jsx(cn, { value: "http-01", children: "HTTP-01 Challenge (Automatic Webroot Validation - Recommended)" }),
+                /* @__PURE__ */ d.jsx(cn, { value: "dns-01", disabled: !0, children: "DNS-01 Challenge (DNS TXT Validation - Coming Soon)" })
               ]
             }
           ) }),
