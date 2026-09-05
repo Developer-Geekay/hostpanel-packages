@@ -88,7 +88,7 @@ def test_health_needs_no_token(svc):
     del client.headers[tokenlib.HEADER]
     resp = client.get("/health")
     assert resp.status_code == 200
-    assert resp.json() == {"package": "mongodb", "version": "3.0.0", "ok": True}
+    assert resp.json() == {"package": "mongodb", "version": "3.0.1", "ok": True}
 
 
 def test_routes_reject_missing_token(svc):

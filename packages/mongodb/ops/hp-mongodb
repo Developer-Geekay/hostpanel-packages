@@ -73,6 +73,99 @@ is_protected_user() {
   return 1
 }
 
+ensure_mongodb_user() {
+  if ! getent group mongodb >/dev/null 2>&1; then
+    groupadd -r mongodb 2>/dev/null || true
+  fi
+  if ! getent passwd mongodb >/dev/null 2>&1; then
+    useradd -r -g mongodb -s /bin/false -M -d "$DATA_DIR" mongodb 2>/dev/null || true
+  fi
+  usermod -aG mongodb mongodb 2>/dev/null || true
+}
+
+ensure_mongodb_service() {
+  # Stop and disable system mongod.service if present to avoid port 27017 conflict
+  if systemctl list-unit-files 2>/dev/null | grep -q "^mongod\.service"; then
+    if systemctl is-active --quiet mongod.service 2>/dev/null; then
+      systemctl stop mongod.service 2>/dev/null || true
+    fi
+    systemctl disable mongod.service 2>/dev/null || true
+  fi
+
+  local mongod_exec="${RUNTIME_DIR}/bin/mongod"
+  if [[ ! -x "$mongod_exec" ]]; then
+    mongod_exec="$(command -v mongod || echo "/usr/local/bin/mongod")"
+  fi
+
+  local svc_file="/etc/systemd/system/mongodb.service"
+  cat > "$svc_file" <<EOF
+[Unit]
+Description=MongoDB Database Server (HostPanel Isolated)
+Documentation=https://docs.mongodb.org/manual
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=mongodb
+Group=mongodb
+Type=simple
+ExecStart=$mongod_exec --config $CONF_FILE
+PIDFile=$RUN_DIR/mongod.pid
+Restart=always
+RestartSec=2
+TimeoutSec=30
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=$DATA_DIR $LOG_DIR $RUN_DIR $CONF_DIR /tmp
+LimitNOFILE=64000
+LimitNPROC=64000
+TasksMax=infinity
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  chmod 0644 "$svc_file"
+  systemctl daemon-reload 2>/dev/null || true
+}
+
+ensure_mongodb_config() {
+  mkdir -p "$CONF_DIR" "$DATA_DIR" "$LOG_DIR" "$RUN_DIR"
+  if [[ -d "$RUNTIME_DIR" ]]; then
+    chmod -R a+rX "$RUNTIME_DIR" 2>/dev/null || true
+  fi
+
+  if [[ ! -f "$CONF_FILE" ]]; then
+    cat > "$CONF_FILE" <<EOF
+storage:
+  dbPath: $DATA_DIR
+
+systemLog:
+  destination: file
+  path: $LOG_DIR/mongod.log
+  logAppend: true
+
+net:
+  port: 27017
+  bindIp: 127.0.0.1
+  unixDomainSocket:
+    enabled: true
+    pathPrefix: $RUN_DIR
+
+processManagement:
+  pidFilePath: $RUN_DIR/mongod.pid
+EOF
+    chmod 0644 "$CONF_FILE"
+  fi
+
+  # If an existing config has timeZoneInfo pointing to missing tzdata, comment it out
+  if [[ -f "$CONF_FILE" ]] && ! [[ -d "/usr/share/zoneinfo" ]]; then
+    sed -i 's/^[[:space:]]*timeZoneInfo:[[:space:]]*\/usr\/share\/zoneinfo/# timeZoneInfo: \/usr\/share\/zoneinfo/' "$CONF_FILE" 2>/dev/null || true
+  fi
+
+  chown -R mongodb:mongodb "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" "$CONF_DIR" 2>/dev/null || true
+  chmod 0755 "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" "$CONF_DIR" 2>/dev/null || true
+}
+
 find_mongo_socket() {
   local candidates=(
     "${RUN_DIR}/mongodb-27017.sock"
@@ -644,29 +737,46 @@ cmd_engine_status() {
 }
 
 cmd_engine_start() {
-  echo "[1/3] Preparing /opt/hostpanel isolated directories..."
-  mkdir -p "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" "$CONF_DIR"
-  chown -R mongodb:mongodb "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" "$CONF_DIR" 2>/dev/null || true
-  chmod 0755 "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" "$CONF_DIR" 2>/dev/null || true
+  echo "[1/3] Preparing /opt/hostpanel isolated directories, user and unit..."
+  ensure_mongodb_user
+  ensure_mongodb_config
+  ensure_mongodb_service
 
   echo "[2/3] Starting MongoDB 8.0 service..."
-  systemctl start mongodb.service 2>/dev/null || systemctl start mongod.service 2>/dev/null || true
+  systemctl daemon-reload 2>/dev/null || true
+  systemctl start mongodb.service 2>&1 || true
 
   echo "[3/3] Checking MongoDB socket and daemon listener..."
-  sleep 0.5
-  local pid
-  pid="$(systemctl show -p MainPID --value mongodb.service 2>/dev/null || echo "0")"
-  echo "✓ MongoDB 8.0 daemon is active (PID $pid, port 27017)."
-  echo '{"ok":true,"action":"start","status":"active"}'
-  return $EXIT_SUCCESS
+  local running=false
+  for i in {1..10}; do
+    if systemctl is-active --quiet mongodb.service 2>/dev/null; then
+      running=true
+      break
+    fi
+    sleep 0.3
+  done
+
+  if [[ "$running" == "true" ]]; then
+    local pid
+    pid="$(systemctl show -p MainPID --value mongodb.service 2>/dev/null || echo "0")"
+    echo "✓ MongoDB 8.0 daemon is active (PID $pid, port 27017)."
+    echo '{"ok":true,"action":"start","status":"active"}'
+    return $EXIT_SUCCESS
+  else
+    echo "✗ MongoDB service failed to start!" >&2
+    echo "--- Systemd Journal Logs (last 25 lines) ---" >&2
+    journalctl -u mongodb.service -n 25 --no-pager >&2 || true
+    echo '{"ok":false,"action":"start","error":"MongoDB service failed to start","code":"START_FAILED"}' >&2
+    return $EXIT_EXECUTION_FAILED
+  fi
 }
 
 cmd_engine_stop() {
   echo "[1/2] Sending termination signal to MongoDB 8.0 service..."
   systemctl stop mongodb.service 2>/dev/null || systemctl stop mongod.service 2>/dev/null || true
 
-  echo "[2/2] Verifying process termination and cleaning locks..."
-  sleep 0.3
+  echo "[2/2] Verifying process termination..."
+  sleep 0.5
   echo "✓ MongoDB service stopped."
   echo '{"ok":true,"action":"stop","status":"inactive"}'
   return $EXIT_SUCCESS
@@ -676,34 +786,43 @@ cmd_engine_restart() {
   echo "[1/4] Stopping active MongoDB daemon..."
   systemctl stop mongodb.service 2>/dev/null || systemctl stop mongod.service 2>/dev/null || true
 
-  echo "[2/4] Verifying isolated directories and runtime permissions..."
-  mkdir -p "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" "$CONF_DIR"
-  chown -R mongodb:mongodb "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" "$CONF_DIR" 2>/dev/null || true
-  chmod 0755 "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" "$CONF_DIR" 2>/dev/null || true
+  echo "[2/4] Verifying isolated directories, user and permissions..."
+  ensure_mongodb_user
+  ensure_mongodb_config
+  ensure_mongodb_service
 
   echo "[3/4] Starting MongoDB 8.0 service..."
-  systemctl start mongodb.service 2>/dev/null || systemctl start mongod.service 2>/dev/null || true
+  systemctl daemon-reload 2>/dev/null || true
+  systemctl start mongodb.service 2>&1 || true
 
-  echo "[4/4] Verifying MongoDB socket and connection health..."
-  sleep 0.5
-  local pid
-  pid="$(systemctl show -p MainPID --value mongodb.service 2>/dev/null || echo "0")"
-  echo "✓ MongoDB 8.0 restarted successfully (PID $pid, port 27017)."
-  echo '{"ok":true,"action":"restart","status":"active"}'
-  return $EXIT_SUCCESS
+  echo "[4/4] Verifying MongoDB daemon health..."
+  local running=false
+  for i in {1..10}; do
+    if systemctl is-active --quiet mongodb.service 2>/dev/null; then
+      running=true
+      break
+    fi
+    sleep 0.3
+  done
+
+  if [[ "$running" == "true" ]]; then
+    local pid
+    pid="$(systemctl show -p MainPID --value mongodb.service 2>/dev/null || echo "0")"
+    echo "✓ MongoDB 8.0 restarted successfully (PID $pid, port 27017)."
+    echo '{"ok":true,"action":"restart","status":"active"}'
+    return $EXIT_SUCCESS
+  else
+    echo "✗ MongoDB service failed to restart!" >&2
+    echo "--- Systemd Journal Logs (last 25 lines) ---" >&2
+    journalctl -u mongodb.service -n 25 --no-pager >&2 || true
+    echo '{"ok":false,"action":"restart","error":"MongoDB service failed to restart","code":"RESTART_FAILED"}' >&2
+    return $EXIT_EXECUTION_FAILED
+  fi
 }
 
 cmd_engine_reload() {
-  echo "[1/2] Reloading MongoDB configuration ($CONF_FILE)..."
-  systemctl restart mongodb.service 2>/dev/null || systemctl restart mongod.service 2>/dev/null || true
-
-  echo "[2/2] Validating daemon health status..."
-  sleep 0.5
-  local pid
-  pid="$(systemctl show -p MainPID --value mongodb.service 2>/dev/null || echo "0")"
-  echo "✓ MongoDB service reloaded (PID $pid)."
-  echo '{"ok":true,"action":"reload","status":"active"}'
-  return $EXIT_SUCCESS
+  echo "[1/2] Reloading MongoDB service..."
+  cmd_engine_restart
 }
 
 cmd_engine_config_get() {
@@ -754,8 +873,10 @@ cmd_engine_logs() {
   fi
   local out=""
   for u in "mongodb.service" "mongod.service"; do
-    if systemctl is-active --quiet "$u" 2>/dev/null; then
-      out="$(journalctl -u "$u" -n "$lines" --no-pager 2>/dev/null || true)"
+    local j
+    j="$(journalctl -u "$u" -n "$lines" --no-pager 2>/dev/null || true)"
+    if [[ -n "$j" && "$j" != *"-- No entries --"* ]]; then
+      out="$j"
       break
     fi
   done
@@ -776,8 +897,8 @@ cmd_engine_install() {
   echo
 
   mkdir -p "$CONF_DIR" "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" "$RUNTIME_DIR"
-  chown -R mongodb:mongodb "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" "$CONF_DIR" 2>/dev/null || true
-  chmod 0755 "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" "$CONF_DIR" 2>/dev/null || true
+  ensure_mongodb_user
+  ensure_mongodb_config
 
   echo "[1/4] Checking / Provisioning MongoDB 8.0 runtime..."
   local arch; arch="$(uname -m)"
@@ -824,80 +945,44 @@ cmd_engine_install() {
   rm -rf "${RUNTIME_DIR}/tmp"
 
   echo
-  echo "[2/4] Initializing /opt/hostpanel isolated directories..."
-  mkdir -p "$CONF_DIR" "$DATA_DIR" "$LOG_DIR" "$RUN_DIR"
-  chown -R mongodb:mongodb "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" "$CONF_DIR" 2>/dev/null || true
-  chmod 0755 "$DATA_DIR" "$LOG_DIR" "$RUN_DIR" "$CONF_DIR" 2>/dev/null || true
+  echo "[2/4] Setting up isolated database paths, user and permissions..."
+  ensure_mongodb_user
+  ensure_mongodb_config
 
   echo
-  echo "[3/4] Configuring isolated MongoDB parameters & systemd unit..."
-  if [[ ! -f "$CONF_FILE" ]]; then
-    cat > "$CONF_FILE" <<EOF
-storage:
-  dbPath: $DATA_DIR
-
-systemLog:
-  destination: file
-  path: $LOG_DIR/mongod.log
-  logAppend: true
-
-net:
-  port: 27017
-  bindIp: 127.0.0.1
-  unixDomainSocket:
-    enabled: true
-    pathPrefix: $RUN_DIR
-
-processManagement:
-  timeZoneInfo: /usr/share/zoneinfo
-  pidFilePath: $RUN_DIR/mongod.pid
-EOF
-    chmod 0644 "$CONF_FILE"
-    chown mongodb:mongodb "$CONF_FILE" 2>/dev/null || true
-    echo "  Created configuration: $CONF_FILE"
-  fi
-
-  local mongod_exec="${RUNTIME_DIR}/bin/mongod"
-  if [[ ! -x "$mongod_exec" ]]; then
-    mongod_exec="$(command -v mongod || echo "/usr/local/bin/mongod")"
-  fi
-
-  cat > "/etc/systemd/system/mongodb.service" <<EOF
-[Unit]
-Description=MongoDB Database Server (HostPanel Isolated)
-Documentation=https://docs.mongodb.org/manual
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-User=mongodb
-Group=mongodb
-ExecStart=$mongod_exec --config $CONF_FILE
-PIDFile=$RUN_DIR/mongod.pid
-Restart=always
-RestartSec=2
-TimeoutSec=30
-ProtectSystem=strict
-ReadWritePaths=-$DATA_DIR -/opt/hostpanel/data/database/mongodb -$LOG_DIR -/opt/hostpanel/logs/database -$RUN_DIR -$CONF_DIR
-LimitNOFILE=64000
-LimitNPROC=64000
-TasksMax=infinity
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  chmod 0644 "/etc/systemd/system/mongodb.service"
-  systemctl daemon-reload
+  echo "[3/4] Configuring isolated MongoDB systemd unit..."
+  ensure_mongodb_service
 
   echo
   echo "[4/4] Starting service and validating engine..."
-  systemctl enable --now mongodb.service 2>/dev/null || true
-  sleep 1
+  systemctl daemon-reload
+  systemctl enable mongodb.service 2>/dev/null || true
+  systemctl restart mongodb.service 2>&1 || true
 
-  echo
-  echo "✓ MongoDB engine ready and isolated under /opt/hostpanel"
-  echo '{"ok":true,"engine":"mongodb","status":"installed"}'
-  return $EXIT_SUCCESS
+  local running=false
+  for i in {1..10}; do
+    if systemctl is-active --quiet mongodb.service 2>/dev/null; then
+      running=true
+      break
+    fi
+    sleep 0.3
+  done
+
+  if [[ "$running" == "true" ]]; then
+    local pid
+    pid="$(systemctl show -p MainPID --value mongodb.service 2>/dev/null || echo "0")"
+    echo
+    echo "✓ MongoDB engine ready and isolated under /opt/hostpanel (PID $pid, port 27017)"
+    echo '{"ok":true,"engine":"mongodb","status":"installed"}'
+    return $EXIT_SUCCESS
+  else
+    echo
+    echo "✗ MongoDB service failed to start after install!" >&2
+    echo "--- Systemd Journal Logs (last 25 lines) ---" >&2
+    journalctl -u mongodb.service -n 25 --no-pager >&2 || true
+    echo '{"ok":false,"engine":"mongodb","status":"failed","error":"MongoDB service failed to start"}' >&2
+    return $EXIT_EXECUTION_FAILED
+  fi
 }
 
 # ==================== MAIN DISPATCHER ====================
