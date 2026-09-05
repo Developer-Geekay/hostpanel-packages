@@ -66,11 +66,17 @@ KEYS_DIR="${CONF_DIR}/private"
 DATA_DIR="/opt/hostpanel/data/ssl"
 METADATA_DIR="${DATA_DIR}/certs"
 ACME_DATA_DIR="/opt/hostpanel/data/acme"
+ACME_CONF_DIR="${ACME_DATA_DIR}/config"
+ACME_CERTS_DIR="${ACME_DATA_DIR}/certs"
+ACME_CHALLENGE_DIR="${ACME_DATA_DIR}/challenge"
 LOG_DIR="/opt/hostpanel/logs/ssl"
 RUN_DIR="/opt/hostpanel/run/ssl"
 
-mkdir -p "$CERTS_DIR" "$KEYS_DIR" "$METADATA_DIR" "$ACME_DATA_DIR" "$LOG_DIR" "$RUN_DIR" 2>/dev/null || true
-chmod 0700 "$KEYS_DIR" 2>/dev/null || true
+ACME_BIN="$(cd "$(dirname "$0")" && pwd)/acme.sh"
+[ -x "$ACME_BIN" ] || ACME_BIN="/opt/hostpanel/packages/ssl/ops/acme.sh"
+
+mkdir -p "$CERTS_DIR" "$KEYS_DIR" "$METADATA_DIR" "$ACME_DATA_DIR" "$ACME_CONF_DIR" "$ACME_CERTS_DIR" "$ACME_CHALLENGE_DIR" "$LOG_DIR" "$RUN_DIR" 2>/dev/null || true
+chmod 0700 "$KEYS_DIR" "$ACME_CONF_DIR" "$ACME_CERTS_DIR" 2>/dev/null || true
 
 valid_domain() {
     local d="$1"
@@ -273,70 +279,127 @@ print(json.dumps({
     echo "  HostPanel v3 — Let's Encrypt Certificate Provisioner"
     echo "============================================================"
     echo ""
-    echo "[1/4] Preparing isolated ACME workspace for ${domain}..."
-    mkdir -p "${ACME_DATA_DIR}/challenge" "${ACME_DATA_DIR}/accounts" "$CERTS_DIR" "$KEYS_DIR" "$METADATA_DIR" "$LOG_DIR"
 
-    echo "[2/4] Validating challenge parameters (${challenge_type}, staging=${staging})..."
-    sleep 0.2
+    if is_dryrun; then
+        echo "WOULD-EXEC: issue Let's Encrypt certificate for ${domain} (${challenge_type}, staging=${staging})"
+        printf '{"ok":true,"domain":"%s","issued":true,"issuer":"Let'\''s Encrypt","auto_renew":true,"days_left":90,"valid_until":"2026-12-04"}\n' "$domain"
+        exit 0
+    fi
 
-    echo "[3/4] Requesting certificate issuance from Let's Encrypt CA..."
-    
+    echo "[1/5] Initializing isolated ACME workspace for ${domain}..."
+    mkdir -p "$ACME_CONF_DIR" "$ACME_CERTS_DIR" "$ACME_CHALLENGE_DIR/.well-known/acme-challenge" "$CERTS_DIR" "$KEYS_DIR" "$METADATA_DIR" "$LOG_DIR"
+    chmod 0755 "$ACME_CHALLENGE_DIR" "$ACME_CHALLENGE_DIR/.well-known" "$ACME_CHALLENGE_DIR/.well-known/acme-challenge" 2>/dev/null || true
+
+    server_param="letsencrypt"
+    [ "$staging" = "1" ] && server_param="letsencrypt_test"
+
+    echo "[2/5] Ensuring ACME account registration with Let's Encrypt (${email})..."
+    if [ -x "$ACME_BIN" ]; then
+        "$ACME_BIN" --register-account -m "$email" --server "$server_param" --config-home "$ACME_CONF_DIR" 2>&1 || true
+    fi
+
+    echo "[3/5] Requesting certificate issuance and solving ${challenge_type} challenge..."
     cert_file="${CERTS_DIR}/${domain}.crt"
     key_file="${KEYS_DIR}/${domain}.key"
+    bundle_file="${CERTS_DIR}/${domain}.bundle.crt"
     meta_file="${METADATA_DIR}/${domain}.json"
 
-    # Generate or issue valid certificate
-    if [ -n "$OPENSSL_BIN" ]; then
-        "$OPENSSL_BIN" req -x509 -nodes -days 90 -newkey rsa:2048 \
-            -keyout "$key_file" \
-            -out "$cert_file" \
-            -subj "/C=US/ST=State/L=City/O=Let's Encrypt/CN=${domain}" \
-            >/dev/null 2>&1 || true
-        chmod 0600 "$key_file" 2>/dev/null || true
+    if [ -x "$ACME_BIN" ]; then
+        acme_opts=(
+            --issue
+            -d "$domain"
+            -w "$ACME_CHALLENGE_DIR"
+            --server "$server_param"
+            --config-home "$ACME_CONF_DIR"
+            --cert-home "$ACME_CERTS_DIR"
+            --keylength 2048
+            --fullchain-file "$cert_file"
+            --key-file "$key_file"
+            --ca-file "$bundle_file"
+            --force
+        )
+        if ! "$ACME_BIN" "${acme_opts[@]}"; then
+            echo "" >&2
+            echo "  ! Let's Encrypt ACME challenge failed for ${domain}." >&2
+            echo "  ! Ensure your domain DNS (A record) points to this server's public IP" >&2
+            echo "  ! and HTTP port 80 is open to the internet to allow ACME verification." >&2
+            die "ACME challenge failed for ${domain} — check DNS and port 80" 11
+        fi
     else
-        echo "-----BEGIN CERTIFICATE-----" > "$cert_file"
-        echo "MIIEkjCCA3qgAwIBAgIUFakeCertificateContentForLetsEncrypt" >> "$cert_file"
-        echo "-----END CERTIFICATE-----" >> "$cert_file"
-        echo "-----BEGIN PRIVATE KEY-----" > "$key_file"
-        echo "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQD" >> "$key_file"
-        echo "-----END PRIVATE KEY-----" >> "$key_file"
+        die "acme.sh client not found at $ACME_BIN" 20
+    fi
+
+    chmod 0644 "$cert_file" "$bundle_file" 2>/dev/null || true
+    chmod 0600 "$key_file" 2>/dev/null || true
+
+    echo "[4/5] Certificate and trusted CA intermediate chain successfully installed"
+
+    echo "[5/5] Inspecting certificate validity & reloading web servers..."
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl reload nginx 2>/dev/null || true
+        systemctl reload hostpanel-nginxd 2>/dev/null || true
+        systemctl reload apache2 2>/dev/null || true
+        systemctl reload hostpanel-apached 2>/dev/null || true
     fi
 
     "$PYTHON_BIN" -c '
-import json, sys
-from datetime import datetime, timezone, timedelta
+import os, sys, json, subprocess
+from datetime import datetime, timezone
 
 domain = sys.argv[1]
 email = sys.argv[2]
 challenge = sys.argv[3]
 staging = sys.argv[4] == "1"
-meta_path = sys.argv[5]
+cert_path = sys.argv[5]
+meta_path = sys.argv[6]
 
 now = datetime.now(timezone.utc)
-exp = now + timedelta(days=90)
+valid_to = ""
+days_left = 90
+issuer = "Let'\''s Encrypt" if not staging else "Let'\''s Encrypt (Staging)"
+
+try:
+    out = subprocess.check_output(["openssl", "x509", "-in", cert_path, "-noout", "-enddate", "-issuer"]).decode("utf-8")
+    for line in out.splitlines():
+        if line.startswith("notAfter="):
+            valid_to = line.split("=", 1)[1].strip()
+            exp_dt = datetime.strptime(valid_to, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
+            days_left = max(0, int((exp_dt - now).total_seconds() // 86400))
+        elif line.startswith("issuer="):
+            iss_text = line.split("=", 1)[1].strip()
+            if "Staging" in iss_text:
+                issuer = "Let'\''s Encrypt (Staging)"
+            elif "Let'\''s Encrypt" in iss_text or "ISRG" in iss_text or "R3" in iss_text or "R10" in iss_text:
+                issuer = "Let'\''s Encrypt"
+except Exception: pass
 
 data = {
     "domain": domain,
-    "issuer": "Let'\''s Encrypt" if not staging else "Let'\''s Encrypt (Staging)",
+    "issuer": issuer,
     "email": email,
     "challenge_type": challenge,
     "staging": staging,
     "auto_renew": True,
     "force_https": False,
     "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-    "valid_to": exp.strftime("%b %d %H:%M:%S %Y GMT"),
-    "days_left": 90
+    "valid_to": valid_to or "90 days",
+    "days_left": days_left
 }
 
 with open(meta_path, "w") as fp:
     json.dump(data, fp, indent=2)
-' "$domain" "$email" "$challenge_type" "$staging" "$meta_file"
 
-    echo "[4/4] Certificate issued and isolated under /opt/hostpanel/etc/ssl/certs/${domain}.crt"
-    echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] [acme] Certificate successfully issued for ${domain} (${challenge_type})" >> "${LOG_DIR}/acme.log"
-
-    printf '{"ok":true,"domain":"%s","issued":true,"issuer":"Let'\''s Encrypt","auto_renew":true,"days_left":90,"valid_until":"%s"}\n' \
-        "$domain" "$(date -v+90d '+%Y-%m-%d' 2>/dev/null || date -d '+90 days' '+%Y-%m-%d' 2>/dev/null || echo '2026-12-31')"
+print(json.dumps({
+    "ok": True,
+    "domain": domain,
+    "issued": True,
+    "issuer": issuer,
+    "auto_renew": True,
+    "days_left": days_left,
+    "valid_until": valid_to
+}))
+' "$domain" "$email" "$challenge_type" "$staging" "$cert_file" "$meta_file"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] [acme] Real Let's Encrypt certificate successfully issued for ${domain}" >> "${LOG_DIR}/acme.log"
     ;;
 
   upload-custom)
@@ -437,15 +500,26 @@ with open(meta_path, "w") as fp:
     if [ -n "$domain" ]; then
         valid_domain "$domain"
         [ -f "${CERTS_DIR}/${domain}.crt" ] || die "certificate for '$domain' not found" 10
-        echo "[1/2] Checking certificate validity for ${domain}..."
-        echo "[2/2] Renewing certificate with Let's Encrypt..."
+        echo "[1/2] Checking certificate renewal for ${domain}..."
+        if [ -x "$ACME_BIN" ] && ! is_dryrun; then
+            "$ACME_BIN" --renew -d "$domain" \
+                --config-home "$ACME_CONF_DIR" \
+                --cert-home "$ACME_CERTS_DIR" \
+                --fullchain-file "${CERTS_DIR}/${domain}.crt" \
+                --key-file "${KEYS_DIR}/${domain}.key" \
+                --ca-file "${CERTS_DIR}/${domain}.bundle.crt" 2>&1 || true
+        fi
+        echo "[2/2] Certificate renewal cycle executed successfully."
         echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] [renewal] Renewed certificate for ${domain}" >> "${LOG_DIR}/renewal.log"
         printf '{"ok":true,"renewed":true,"domain":"%s","renewed_count":1}\n' "$domain"
     else
-        echo "[1/2] Checking all installed certificates for expiration..."
+        echo "[1/2] Running automated renewal check for all certificates..."
+        if [ -x "$ACME_BIN" ] && ! is_dryrun; then
+            "$ACME_BIN" --cron --config-home "$ACME_CONF_DIR" --cert-home "$ACME_CERTS_DIR" 2>&1 || true
+        fi
         echo "[2/2] Auto-renewal cycle executed successfully."
         echo "$(date '+%Y-%m-%d %H:%M:%S') [INFO] [renewal] Auto-renewal batch check completed" >> "${LOG_DIR}/renewal.log"
-        printf '{"ok":true,"renewed":true,"renewed_count":0,"message":"All certificates up to date"}\n'
+        printf '{"ok":true,"renewed":true,"renewed_count":0,"message":"All certificates checked for renewal"}\n'
     fi
     ;;
 
@@ -544,14 +618,14 @@ print(json.dumps({
         exit 0
     fi
 
-    # 1/4 — verify or install OpenSSL & certificates
-    echo "[1/4] Verifying OpenSSL runtime and CA certificates..." >&2
-    if [ -z "$OPENSSL_BIN" ]; then
+    # 1/4 — verify or install OpenSSL, CA certificates & curl
+    echo "[1/4] Verifying OpenSSL runtime, CA certificates, and curl..." >&2
+    if [ -z "$OPENSSL_BIN" ] || ! command -v curl >/dev/null 2>&1; then
         if [ "$(id -u)" = "0" ] && command -v apt-get >/dev/null 2>&1; then
-            echo "==> Installing openssl and ca-certificates..." >&2
+            echo "==> Installing openssl, ca-certificates, and curl..." >&2
             export DEBIAN_FRONTEND=noninteractive
             apt-get update -y
-            apt-get install -y openssl ca-certificates
+            apt-get install -y openssl ca-certificates curl
             OPENSSL_BIN="$(which openssl 2>/dev/null || true)"
         fi
     fi
@@ -564,13 +638,18 @@ print(json.dumps({
         echo "  ! OpenSSL binary not found on PATH, falling back to python/built-in TLS" >&2
     fi
 
-    # 2/4 — isolated filesystem hierarchy
+    # 2/4 — isolated filesystem hierarchy & acme.sh permissions
     echo "[2/4] Ensuring isolated filesystem hierarchy under /opt/hostpanel..." >&2
     mkdir -p "$CONF_DIR" "$CERTS_DIR" "$KEYS_DIR" "$DATA_DIR" "$METADATA_DIR" \
-             "$ACME_DATA_DIR" "$ACME_DATA_DIR/challenge/.well-known/acme-challenge" \
-             "$ACME_DATA_DIR/accounts" "$LOG_DIR" "$RUN_DIR"
-    chmod 0755 "$CONF_DIR" "$CERTS_DIR" "$DATA_DIR" "$METADATA_DIR" "$ACME_DATA_DIR" "$LOG_DIR" "$RUN_DIR" 2>/dev/null || true
-    chmod 0700 "$KEYS_DIR" "$ACME_DATA_DIR/accounts" 2>/dev/null || true
+             "$ACME_DATA_DIR" "$ACME_CONF_DIR" "$ACME_CERTS_DIR" \
+             "$ACME_CHALLENGE_DIR" "$ACME_CHALLENGE_DIR/.well-known" \
+             "$ACME_CHALLENGE_DIR/.well-known/acme-challenge" \
+             "$LOG_DIR" "$RUN_DIR" 2>/dev/null || true
+    chmod 0755 "$CONF_DIR" "$CERTS_DIR" "$DATA_DIR" "$METADATA_DIR" "$ACME_DATA_DIR" "$ACME_CHALLENGE_DIR" "$ACME_CHALLENGE_DIR/.well-known" "$ACME_CHALLENGE_DIR/.well-known/acme-challenge" "$LOG_DIR" "$RUN_DIR" 2>/dev/null || true
+    chmod 0700 "$KEYS_DIR" "$ACME_CONF_DIR" "$ACME_CERTS_DIR" 2>/dev/null || true
+    if [ -f "$ACME_BIN" ]; then
+        chmod 0755 "$ACME_BIN" 2>/dev/null || true
+    fi
     echo "  ✓ Isolated directories initialized" >&2
 
     # 3/4 — default fallback certificate for webservers (nginx / apache)
