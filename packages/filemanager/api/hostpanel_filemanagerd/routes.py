@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from typing import Any, Mapping
 
 from fastapi import APIRouter, File, Form, Query, Request, Response, UploadFile
@@ -226,7 +227,7 @@ def build_router(manifest: M.Manifest, ops_script: str, *,
         content_bytes = await file.read()
         target_path = path.rstrip("/")
         # If target path is a directory (or ends with slash), append filename
-        if path.endswith("/") or target_path in ("/opt/hostpanel/data", "/opt/hostpanel/data/vhosts"):
+        if path.endswith("/") or target_path in ("/opt/hostpanel/data", "/opt/hostpanel/data/vhosts", "/opt/hostpanel", "/home"):
             target_path = f"{target_path}/{file.filename}"
         else:
             # Check if target_path is an existing directory via stat
@@ -238,16 +239,33 @@ def build_router(manifest: M.Manifest, ops_script: str, *,
             except Exception:
                 pass
 
-        try:
-            content_str = content_bytes.decode("utf-8")
-        except UnicodeDecodeError:
-            # For binary content, write via latin1 to preserve raw bytes safely
-            content_str = content_bytes.decode("latin-1")
+        # If it is plain text without null bytes, try file.write first (preserves test suite compatibility)
+        if b"\0" not in content_bytes:
+            try:
+                content_str = content_bytes.decode("utf-8")
+                spec, _ = spec_for("file.write", {"path": target_path, "content": content_str})
+                res = await ops.run(spec)
+                if res.ok:
+                    return JSONResponse({"path": target_path, "uploaded": True, "size": len(content_bytes)})
+            except Exception:
+                pass
 
-        spec, _ = spec_for("file.write", {"path": target_path, "content": content_str})
-        res = await ops.run(spec)
-        res.raise_for_status()
-        return JSONResponse({"path": target_path, "uploaded": True, "size": len(content_bytes)})
+        # For binary files (or if file.write fails), write to isolated staging file and move
+        staging_dir = "/opt/hostpanel/dump" if os.path.isdir("/opt/hostpanel/dump") else "/tmp"
+        staging_file = os.path.join(staging_dir, f".hp-upload-{uuid.uuid4().hex}")
+        try:
+            with open(staging_file, "wb") as f:
+                f.write(content_bytes)
+            spec, _ = spec_for("file.move", {"source": staging_file, "target": target_path})
+            res = await ops.run(spec)
+            res.raise_for_status()
+            return JSONResponse({"path": target_path, "uploaded": True, "size": len(content_bytes)})
+        finally:
+            if os.path.exists(staging_file):
+                try:
+                    os.remove(staging_file)
+                except Exception:
+                    pass
 
     @router.get("/download")
     async def download_file(path: str = Query(...)):

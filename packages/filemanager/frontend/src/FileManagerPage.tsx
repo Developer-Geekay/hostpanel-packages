@@ -16,7 +16,11 @@ import {
   IconButton,
   InputAdornment,
   InputLabel,
+  LinearProgress,
   Link,
+  List,
+  ListItem,
+  ListItemText,
   MenuItem,
   Paper,
   Select,
@@ -37,6 +41,7 @@ import FolderIcon from "@mui/icons-material/Folder";
 import InsertDriveFileIcon from "@mui/icons-material/InsertDriveFile";
 import CreateNewFolderIcon from "@mui/icons-material/CreateNewFolder";
 import NoteAddIcon from "@mui/icons-material/NoteAdd";
+import CloudUploadIcon from "@mui/icons-material/CloudUpload";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import SearchIcon from "@mui/icons-material/Search";
 import DeleteIcon from "@mui/icons-material/Delete";
@@ -221,6 +226,14 @@ function FileManagerBody({ ctx }: { ctx: PackageContext }) {
   const [extractLoading, setExtractLoading] = useState(false);
 
   const [deleteTarget, setDeleteTarget] = useState<FileEntry | null>(null);
+
+  // Upload Modal
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [uploadFiles, setUploadFiles] = useState<File[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<{ current: number; total: number; filename: string } | null>(null);
+  const [isDragOver, setIsDragOver] = useState(false);
+  const fileInputRef = React.useRef<HTMLInputElement | null>(null);
 
   const [toast, setToast] = useState<{ message: string; severity: "success" | "error" | "info" } | null>(null);
 
@@ -571,6 +584,55 @@ function FileManagerBody({ ctx }: { ctx: PackageContext }) {
     }
   };
 
+  // Upload Handlers
+  const handleFilesSelected = (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const newFiles = Array.from(files);
+    setUploadFiles((prev) => [...prev, ...newFiles]);
+  };
+
+  const handleRemoveUploadFile = (index: number) => {
+    setUploadFiles((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handleStartUpload = async () => {
+    if (uploadFiles.length === 0) return;
+    setUploading(true);
+    let successCount = 0;
+
+    for (let i = 0; i < uploadFiles.length; i++) {
+      const file = uploadFiles[i];
+      setUploadProgress({ current: i + 1, total: uploadFiles.length, filename: file.name });
+      try {
+        const formData = new FormData();
+        formData.append("path", currentPath);
+        formData.append("file", file);
+
+        const res = await ctx.api("/upload", {
+          method: "POST",
+          body: formData,
+        });
+        if (!res.ok) {
+          const errJson = await res.json().catch(() => ({}));
+          throw new Error(errJson.message || errJson.error || `HTTP ${res.status}`);
+        }
+        successCount++;
+      } catch (err: any) {
+        showToast(`Failed uploading ${file.name}: ${err.message}`, "error");
+      }
+    }
+
+    setUploading(false);
+    setUploadProgress(null);
+    setUploadFiles([]);
+    setUploadOpen(false);
+
+    if (successCount > 0) {
+      showToast(`Uploaded ${successCount} file${successCount > 1 ? "s" : ""} to ${currentPath}`, "success");
+      await loadDirectory(currentPath);
+    }
+  };
+
   const filtered = entries.filter((e) =>
     e.name.toLowerCase().includes(search.toLowerCase())
   );
@@ -664,6 +726,17 @@ function FileManagerBody({ ctx }: { ctx: PackageContext }) {
             onClick={() => setNewFileOpen(true)}
           >
             New File
+          </Button>
+          <Button
+            variant="contained"
+            size="small"
+            startIcon={<CloudUploadIcon />}
+            onClick={() => {
+              setUploadFiles([]);
+              setUploadOpen(true);
+            }}
+          >
+            Upload
           </Button>
         </Stack>
       </Stack>
@@ -792,18 +865,19 @@ function FileManagerBody({ ctx }: { ctx: PackageContext }) {
                             </IconButton>
                           </Tooltip>
                         )}
-                        {isArchiveFile(e.name) && (
+                        {isArchiveFile(e.name) ? (
                           <Tooltip title="Extract Archive">
                             <IconButton size="small" color="warning" onClick={() => handleOpenExtractModal(e)}>
                               <UnarchiveIcon sx={{ fontSize: 16 }} />
                             </IconButton>
                           </Tooltip>
+                        ) : (
+                          <Tooltip title="Compress / Archive">
+                            <IconButton size="small" onClick={() => handleOpenCompressModal(e)}>
+                              <ArchiveIcon sx={{ fontSize: 16 }} />
+                            </IconButton>
+                          </Tooltip>
                         )}
-                        <Tooltip title="Compress / Archive">
-                          <IconButton size="small" onClick={() => handleOpenCompressModal(e)}>
-                            <ArchiveIcon sx={{ fontSize: 16 }} />
-                          </IconButton>
-                        </Tooltip>
                         <Tooltip title="Rename / Move">
                           <IconButton
                             size="small"
@@ -1206,6 +1280,149 @@ function FileManagerBody({ ctx }: { ctx: PackageContext }) {
           <Button onClick={() => setDeleteTarget(null)}>Cancel</Button>
           <Button variant="contained" color="error" onClick={handleDeleteConfirm}>
             Delete
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* UPLOAD DIALOG */}
+      <Dialog
+        open={uploadOpen}
+        onClose={() => !uploading && setUploadOpen(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", py: 1.5 }}>
+          <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+            <CloudUploadIcon color="primary" />
+            <Typography variant="h6" sx={{ fontSize: "1rem", fontWeight: 700 }}>
+              Upload Files
+            </Typography>
+          </Stack>
+        </DialogTitle>
+        <DialogContent dividers>
+          <Typography variant="body2" sx={{ color: "text.secondary", mb: 2 }}>
+            Destination:{" "}
+            <Box component="span" sx={{ fontFamily: MONO, fontWeight: 600, color: "text.primary" }}>
+              {currentPath}
+            </Box>
+          </Typography>
+
+          {/* Drag & Drop Zone */}
+          <Box
+            onDragOver={(e) => {
+              e.preventDefault();
+              setIsDragOver(true);
+            }}
+            onDragLeave={(e) => {
+              e.preventDefault();
+              setIsDragOver(false);
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              setIsDragOver(false);
+              handleFilesSelected(e.dataTransfer.files);
+            }}
+            onClick={() => !uploading && fileInputRef.current?.click()}
+            sx={{
+              border: "2px dashed",
+              borderColor: isDragOver ? "primary.main" : "divider",
+              bgcolor: isDragOver ? "action.hover" : "background.default",
+              borderRadius: 2,
+              p: 3,
+              textAlign: "center",
+              cursor: uploading ? "default" : "pointer",
+              transition: "all 0.2s ease-in-out",
+              "&:hover": { borderColor: uploading ? "divider" : "primary.main", bgcolor: uploading ? "background.default" : "action.hover" },
+            }}
+          >
+            <input
+              type="file"
+              multiple
+              ref={fileInputRef}
+              style={{ display: "none" }}
+              onChange={(e) => handleFilesSelected(e.target.files)}
+            />
+            <CloudUploadIcon sx={{ fontSize: 44, color: isDragOver ? "primary.main" : "text.secondary", mb: 1 }} />
+            <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+              Click to browse or drag and drop files here
+            </Typography>
+            <Typography variant="caption" sx={{ color: "text.secondary" }}>
+              Upload archives (.zip, .tar.gz), code files, configurations, or documents
+            </Typography>
+          </Box>
+
+          {/* Selected Files List */}
+          {uploadFiles.length > 0 && (
+            <Box sx={{ mt: 2 }}>
+              <Typography variant="caption" sx={{ fontWeight: 600, color: "text.secondary" }}>
+                Files to Upload ({uploadFiles.length}):
+              </Typography>
+              <Paper variant="outlined" sx={{ maxHeight: 180, overflowY: "auto", mt: 0.5 }}>
+                <List dense disablePadding>
+                  {uploadFiles.map((file, idx) => (
+                    <ListItem
+                      key={`${file.name}-${idx}`}
+                      divider={idx < uploadFiles.length - 1}
+                      secondaryAction={
+                        !uploading && (
+                          <IconButton
+                            edge="end"
+                            size="small"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleRemoveUploadFile(idx);
+                            }}
+                          >
+                            <DeleteIcon sx={{ fontSize: 16 }} />
+                          </IconButton>
+                        )
+                      }
+                    >
+                      <ListItemText
+                        primary={
+                          <Typography sx={{ fontSize: "0.8125rem", fontFamily: MONO, fontWeight: 500 }}>
+                            {file.name}
+                          </Typography>
+                        }
+                        secondary={
+                          <Typography sx={{ fontSize: "0.75rem", color: "text.secondary" }}>
+                            {formatBytes(file.size)}
+                          </Typography>
+                        }
+                      />
+                    </ListItem>
+                  ))}
+                </List>
+              </Paper>
+            </Box>
+          )}
+
+          {/* Upload Progress */}
+          {uploading && uploadProgress && (
+            <Box sx={{ mt: 2 }}>
+              <Stack direction="row" sx={{ mb: 0.5, justifyContent: "space-between", alignItems: "center" }}>
+                <Typography variant="caption" sx={{ fontWeight: 600 }}>
+                  Uploading file {uploadProgress.current} of {uploadProgress.total}...
+                </Typography>
+                <Typography variant="caption" sx={{ fontFamily: MONO, color: "text.secondary" }}>
+                  {uploadProgress.filename}
+                </Typography>
+              </Stack>
+              <LinearProgress />
+            </Box>
+          )}
+        </DialogContent>
+        <DialogActions sx={{ px: 2.5, py: 1.5 }}>
+          <Button onClick={() => setUploadOpen(false)} disabled={uploading}>
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            startIcon={uploading ? <CircularProgress size={16} color="inherit" /> : <CloudUploadIcon />}
+            onClick={handleStartUpload}
+            disabled={uploading || uploadFiles.length === 0}
+          >
+            {uploading ? "Uploading..." : `Upload ${uploadFiles.length > 0 ? `(${uploadFiles.length})` : ""}`}
           </Button>
         </DialogActions>
       </Dialog>
