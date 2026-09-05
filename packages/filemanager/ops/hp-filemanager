@@ -237,7 +237,26 @@ op_file_write() {
     no_traversal "$path"
     guard_protected_path "$path"
 
+    local dir
+    dir="$(dirname "$path")"
+    [ -d "$dir" ] || mkdir -p "$dir"
+
     read_secrets
+    local content_b64
+    content_b64="$(secret "content_b64")"
+    if [ -n "$content_b64" ]; then
+        if is_dryrun; then
+            echo "WOULD-EXEC: file-write $path (b64 len: ${#content_b64})" >&2
+            printf '{"path":"%s","written":true,"b64":true}\n' "$path"
+            return 0
+        fi
+        printf '%s' "$content_b64" | base64 -d | atomic_write "$path"
+        local size
+        size=$(stat -c%s "$path" 2>/dev/null || wc -c < "$path" 2>/dev/null || echo 0)
+        printf '{"path":"%s","written":true,"size":%s}\n' "$path" "$size"
+        return 0
+    fi
+
     local content
     content="$(secret "content")"
 
@@ -253,10 +272,6 @@ op_file_write() {
         printf '{"path":"%s","written":true,"size":%d}\n' "$path" "$size"
         return 0
     fi
-
-    local dir
-    dir="$(dirname "$path")"
-    [ -d "$dir" ] || mkdir -p "$dir"
 
     printf '%s' "$content" | atomic_write "$path"
     printf '{"path":"%s","written":true,"size":%d}\n' "$path" "$size"

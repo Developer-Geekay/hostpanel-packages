@@ -283,33 +283,22 @@ def build_router(manifest: M.Manifest, ops_script: str, *,
             except Exception:
                 pass
 
-        # If it is plain text without null bytes, try file.write first (preserves test suite compatibility)
-        if b"\0" not in content_bytes:
-            try:
-                content_str = content_bytes.decode("utf-8")
-                spec, _ = spec_for("file.write", {"path": target_path, "content": content_str})
-                res = await ops.run(spec)
-                if res.ok:
-                    return JSONResponse({"path": target_path, "uploaded": True, "size": len(content_bytes)})
-            except Exception:
-                pass
-
-        # For binary files (or if file.write fails), write to isolated staging file and move
-        staging_dir = "/opt/hostpanel/dump" if os.path.isdir("/opt/hostpanel/dump") else "/tmp"
-        staging_file = os.path.join(staging_dir, f".hp-upload-{uuid.uuid4().hex}")
+        # Encode file content directly to Base64 and write through root ops helper
+        # This is 100% binary-safe, avoids null-byte truncation, requires no temporary
+        # staging files, and eliminates permission conflicts on unprivileged daemons.
+        import base64
+        b64_content = base64.b64encode(content_bytes).decode("ascii")
         try:
-            with open(staging_file, "wb") as f:
-                f.write(content_bytes)
-            spec, _ = spec_for("file.move", {"source": staging_file, "target": target_path})
+            spec, _ = spec_for("file.write", {"path": target_path, "content_b64": b64_content})
             res = await ops.run(spec)
             res.raise_for_status()
             return JSONResponse({"path": target_path, "uploaded": True, "size": len(content_bytes)})
-        finally:
-            if os.path.exists(staging_file):
-                try:
-                    os.remove(staging_file)
-                except Exception:
-                    pass
+        except OpsError as exc:
+            _log.warning("upload failed writing %s: %s (exit: %s)", target_path, exc.message, exc.exit_code)
+            raise HTTPException(status_code=400, detail=exc.message or f"Failed writing to {target_path}")
+        except Exception as exc:
+            _log.exception("unexpected upload failure for %s", target_path)
+            raise HTTPException(status_code=500, detail=f"Upload error: {exc}")
 
     @router.get("/download")
     async def download_file(path: str = Query(...)):

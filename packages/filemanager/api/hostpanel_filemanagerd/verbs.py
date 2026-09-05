@@ -15,7 +15,7 @@ from typing import Any, Mapping
 
 from portald.sdk.errors import Code, OpsError
 
-SECRET_PARAMS = frozenset({"content"})
+SECRET_PARAMS = frozenset({"content", "content_b64"})
 
 _ARGV: dict[str, tuple[str, tuple[str, ...]]] = {
     "file.list":     ("file-list",     ("path",)),

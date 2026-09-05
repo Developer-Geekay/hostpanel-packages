@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "feature": "filemanager",
   "label": "File Manager",
-  "version": "3.0.3",
+  "version": "3.0.4",
   "requires_core": [
     3,
     0,
@@ -84,7 +84,7 @@
       "mutating": true,
       "streams": false,
       "audit_action": "file.write",
-      "timeout_ms": 30000,
+      "timeout_ms": 60000,
       "params": {
         "path": {
           "pattern": "^/[^\\u0000]*$",
@@ -92,7 +92,11 @@
         },
         "content": {
           "secret": true,
-          "required": true
+          "required": false
+        },
+        "content_b64": {
+          "secret": true,
+          "required": false
         }
       }
     },

@@ -22,7 +22,7 @@
     {
       "name": "filemanager",
       "label": "File Manager",
-      "version": "3.0.3",
+      "version": "3.0.4",
       "category": "File & Storage",
       "description": "Web-based file browser, syntax-highlighted code editor, and asset manager",
       "unit": "hostpanel-filemanagerd.service",
