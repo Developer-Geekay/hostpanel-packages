@@ -1,7 +1,6 @@
 """
 Operation -> ops-script verb and argv for hostpanel_storaged.
-
-The only place that knows how an HTTP request becomes a bash invocation.
+Maps S3 Object Storage manifest operations to root ops script invocations.
 """
 from __future__ import annotations
 
@@ -13,17 +12,11 @@ SECRET_PARAMS = frozenset()
 
 #: op -> (verb, positional parameter names). Order is the argv order.
 _ARGV: dict[str, tuple[str, tuple[str, ...]]] = {
-    "storage.list-buckets":    ("list-buckets",    ()),
-    "storage.create-bucket":   ("create-bucket",   ("name", "policy")),
-    "storage.delete-bucket":   ("delete-bucket",   ("name",)),
-    "storage.list-backups":    ("list-backups",    ()),
-    "storage.create-backup":   ("create-backup",   ("name", "targets", "destination", "compression")),
-    "storage.restore-backup":  ("restore-backup",  ("backup_id", "targets")),
-    "storage.delete-backup":   ("delete-backup",   ("backup_id",)),
-    "storage.list-schedules":  ("list-schedules",  ()),
-    "storage.set-schedule":    ("set-schedule",    ("name", "cron", "targets", "retention_days", "destination", "enabled")),
-    "storage.delete-schedule": ("delete-schedule", ("name",)),
+    "storage.bucket-create":   ("bucket-create",   ("name",)),
+    "storage.bucket-delete":   ("bucket-delete",   ("name",)),
+    "storage.storage-init":    ("storage-init",    ()),
     "storage.disk-usage":      ("disk-usage",      ()),
+    "storage.service-restart": ("service-restart", ()),
 }
 
 

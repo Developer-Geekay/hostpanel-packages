@@ -1,5 +1,5 @@
 """
-The storage package API tests against a stand-in ops script.
+The storage package API tests against a stand-in ops script and SQLite database.
 """
 from __future__ import annotations
 
@@ -28,47 +28,24 @@ verb="$1"; shift
   printf 'ARGV=%s\n' "$*"
 } >> "$HP_TEST_LOG"
 
-if [ ! -t 0 ]; then
-  while IFS= read -r -d '' k && IFS= read -r -d '' v; do
-    printf 'SECRET=%s len=%s\n' "$k" "${#v}" >> "$HP_TEST_LOG"
-  done || true
-fi
-
 case "$verb" in
-  list-buckets)
-    echo '{"buckets":[{"name":"demo-bucket","policy":"private","size_bytes":1024,"objects_count":2,"created_at":"2026-08-20T10:00:00Z"}]}'
+  storage-init)
+    echo "storage directories initialized"
     ;;
-  create-bucket)
-    printf '{"name":"%s","created":true,"policy":"%s","size_bytes":0,"objects_count":0,"created_at":"2026-08-23T00:00:00Z"}\n' "$1" "$2"
+  bucket-create)
+    printf 'bucket %s directory ready\n' "$1"
     ;;
-  delete-bucket)
-    printf '{"name":"%s","deleted":true}\n' "$1"
-    ;;
-  list-backups)
-    echo '{"backups":[{"id":"backup-20260823-010000","name":"full-system-backup","targets":"all","size_bytes":25480000,"created_at":"2026-08-23T01:00:00Z","destination":"local","filename":"backup-20260823-010000.tar.zst"}]}'
-    ;;
-  create-backup)
-    echo "[storage] Creating snapshot..." >&2
-    printf '{"id":"backup-20260823-010000","name":"%s","targets":"%s","size_bytes":15420000,"created_at":"2026-08-23T00:00:00Z","destination":"%s","filename":"backup-20260823-010000.tar.zst","created":true}\n' "$1" "$2" "$3"
-    ;;
-  restore-backup)
-    echo "[storage] Restoring backup..." >&2
-    printf '{"id":"%s","restored":true,"targets":"%s"}\n' "$1" "$2"
-    ;;
-  delete-backup)
-    printf '{"id":"%s","deleted":true}\n' "$1"
-    ;;
-  list-schedules)
-    echo '{"schedules":[{"name":"daily-full-backup","cron":"0 2 * * *","targets":"all","retention_days":7,"destination":"local","enabled":true}]}'
-    ;;
-  set-schedule)
-    printf '{"name":"%s","saved":true,"schedule":{"name":"%s","cron":"%s","targets":"%s","retention_days":%s,"destination":"%s","enabled":true}}\n' "$1" "$1" "$2" "$3" "$4" "$5"
-    ;;
-  delete-schedule)
-    printf '{"name":"%s","deleted":true}\n' "$1"
+  bucket-delete)
+    printf 'bucket %s deleted\n' "$1"
     ;;
   disk-usage)
-    echo '{"total_bytes":107374182400,"used_bytes":14200000000,"free_bytes":93174182400,"breakdown":[{"category":"websites","path":"/opt/hostpanel/data/vhosts","size_bytes":5242880000},{"category":"databases","path":"/opt/hostpanel/data","size_bytes":3145728000},{"category":"storage","path":"/opt/hostpanel/data/storage","size_bytes":2097152000},{"category":"backups","path":"/opt/hostpanel/data/backups","size_bytes":2621440000},{"category":"logs","path":"/opt/hostpanel/logs","size_bytes":524288000},{"category":"runtimes","path":"/opt/hostpanel/runtimes","size_bytes":568512000}]}'
+    echo '{"total_bytes":107374182400,"used_bytes":14200000000,"free_bytes":93174182400,"buckets_count":2,"buckets":[{"name":"demo-bucket","size_bytes":1048576,"objects_count":4}]}'
+    ;;
+  service-restart)
+    echo "service restarted"
+    ;;
+  firewall-allow)
+    echo "port $1 allowed"
     ;;
   *)
     echo "unknown verb $verb" >&2; exit 12
@@ -86,18 +63,28 @@ def svc(tmp_path, monkeypatch):
     log = tmp_path / "ops.log"
     log.touch()
 
+    db_path = tmp_path / "hostpanel.db"
+    storage_root = tmp_path / "storage" / "buckets"
+    storage_root.mkdir(parents=True, exist_ok=True)
+
     token = tokenlib.generate()
     monkeypatch.setenv("HP_PACKAGE_TOKEN", token)
     monkeypatch.setenv("HP_OPS_SCRIPT", str(script))
     monkeypatch.setenv("HP_TEST_LOG", str(log))
     monkeypatch.setenv("HP_OPS_SUDO", "0")
+    monkeypatch.setenv("HP_DB_PATH", str(db_path))
+    monkeypatch.setenv("HP_DISABLE_S3_SERVER", "1")
 
     from hostpanel_storaged import main as storaged
+    from hostpanel_storaged import db
+
+    db.init_storage_tables()
+    db.set_storage_setting("storage_path", str(storage_root))
 
     app = storaged.create_app(M.load(MANIFEST))
     with TestClient(app) as client:
         client.headers[tokenlib.HEADER] = token
-        yield type("Svc", (), {"client": client, "token": token, "log": log})
+        yield type("Svc", (), {"client": client, "token": token, "log": log, "storage_root": storage_root})
 
 
 def ops_log(svc) -> str:
@@ -107,159 +94,142 @@ def ops_log(svc) -> str:
 # ── Authentication ────────────────────────────────────────────────────────────
 
 def test_health_needs_no_token(svc):
-    svc.client.headers.pop(tokenlib.HEADER, None)
-    res = svc.client.get("/health")
-    assert res.status_code == 200
-    assert res.json() == {"package": "storage", "version": "3.0.0", "ok": True}
+    old = svc.client.headers.pop(tokenlib.HEADER, None)
+    try:
+        res = svc.client.get("/health")
+        assert res.status_code == 200
+        assert res.json() == {"package": "storage", "version": "3.1.0", "ok": True}
+    finally:
+        if old:
+            svc.client.headers[tokenlib.HEADER] = old
 
 
 def test_operation_without_token_is_rejected(svc):
-    svc.client.headers.pop(tokenlib.HEADER, None)
-    res = svc.client.get("/buckets")
-    assert res.status_code == 401
-    assert res.json()["error"] == "UNAUTHORIZED"
+    old = svc.client.headers.pop(tokenlib.HEADER, None)
+    try:
+        res = svc.client.get("/buckets")
+        assert res.status_code == 401
+        assert res.json()["error"] == "UNAUTHORIZED"
+    finally:
+        if old:
+            svc.client.headers[tokenlib.HEADER] = old
 
 
 def test_operation_with_bad_token_is_rejected(svc):
-    svc.client.headers[tokenlib.HEADER] = "bogus-token"
-    res = svc.client.get("/buckets")
-    assert res.status_code == 401
+    old = svc.client.headers.get(tokenlib.HEADER)
+    try:
+        svc.client.headers[tokenlib.HEADER] = "bogus-token"
+        res = svc.client.get("/buckets")
+        assert res.status_code == 401
+    finally:
+        if old:
+            svc.client.headers[tokenlib.HEADER] = old
 
 
 # ── Buckets ───────────────────────────────────────────────────────────────────
 
-def test_list_buckets(svc):
+def test_list_buckets_initially_empty(svc):
     res = svc.client.get("/buckets")
     assert res.status_code == 200
     data = res.json()
-    assert "buckets" in data
-    assert data["buckets"][0]["name"] == "demo-bucket"
-    assert "VERB=list-buckets" in ops_log(svc)
+    assert data["ok"] is True
+    assert data["buckets"] == []
 
 
 def test_create_bucket(svc):
-    res = svc.client.post("/buckets", json={"name": "media-bucket", "policy": "public-read"})
+    res = svc.client.post("/buckets", json={"name": "media-bucket", "public_access": True, "quota_mb": 2048})
     assert res.status_code == 200
     assert res.json()["name"] == "media-bucket"
     assert res.json()["created"] is True
-    assert "VERB=create-bucket\nARGV=media-bucket public-read" in ops_log(svc)
+
+    # Now verify it appears in list
+    res2 = svc.client.get("/buckets")
+    assert res2.status_code == 200
+    buckets = res2.json()["buckets"]
+    assert len(buckets) == 1
+    assert buckets[0]["name"] == "media-bucket"
+    assert buckets[0]["public_access"] is True
+    assert buckets[0]["quota_mb"] == 2048
 
 
-def test_create_bucket_invalid_name(svc):
-    res = svc.client.post("/buckets", json={"name": "Invalid_Bucket_Uppercase"})
-    assert res.status_code in (400, 422)
+def test_create_bucket_duplicate(svc):
+    res1 = svc.client.post("/buckets", json={"name": "my-bucket"})
+    assert res1.status_code == 200
+    res2 = svc.client.post("/buckets", json={"name": "my-bucket"})
+    assert res2.status_code == 409
+
+
+def test_update_bucket(svc):
+    svc.client.post("/buckets", json={"name": "update-test", "quota_mb": 1000})
+    res = svc.client.patch("/buckets/update-test", json={"quota_mb": 4096, "public_access": True})
+    assert res.status_code == 200
+    assert res.json()["updated"] is True
+
+    res2 = svc.client.get("/buckets")
+    b = [x for x in res2.json()["buckets"] if x["name"] == "update-test"][0]
+    assert b["quota_mb"] == 4096
+    assert b["public_access"] is True
 
 
 def test_delete_bucket(svc):
-    res = svc.client.delete("/buckets/old-bucket")
+    svc.client.post("/buckets", json={"name": "delete-test"})
+    res = svc.client.delete("/buckets/delete-test")
     assert res.status_code == 200
     assert res.json()["deleted"] is True
-    assert "VERB=delete-bucket\nARGV=old-bucket" in ops_log(svc)
+
+    res2 = svc.client.get("/buckets")
+    assert not any(x["name"] == "delete-test" for x in res2.json()["buckets"])
 
 
-# ── Backups ───────────────────────────────────────────────────────────────────
+# ── Access Keys ───────────────────────────────────────────────────────────────
 
-def test_list_backups(svc):
-    res = svc.client.get("/backups")
+def test_access_keys_crud(svc):
+    # List initial keys (empty)
+    res = svc.client.get("/keys")
+    assert res.status_code == 200
+    assert res.json()["keys"] == []
+
+    # Create access key
+    res2 = svc.client.post("/keys", json={"label": "App Backup Key"})
+    assert res2.status_code == 200
+    key_data = res2.json()["key"]
+    assert key_data["access_key_id"].startswith("HPK")
+    assert len(key_data["secret_access_key"]) == 40
+    assert key_data["label"] == "App Backup Key"
+
+    key_id = key_data["access_key_id"]
+
+    # Toggle status
+    res3 = svc.client.post(f"/keys/{key_id}/status", json={"status": "disabled"})
+    assert res3.status_code == 200
+    assert res3.json()["status"] == "disabled"
+
+    # Delete access key
+    res4 = svc.client.delete(f"/keys/{key_id}")
+    assert res4.status_code == 200
+    assert res4.json()["deleted"] is True
+
+
+# ── Settings & Meta ───────────────────────────────────────────────────────────
+
+def test_meta(svc):
+    res = svc.client.get("/meta")
     assert res.status_code == 200
     data = res.json()
-    assert "backups" in data
-    assert data["backups"][0]["id"] == "backup-20260823-010000"
+    assert data["package"] == "storage"
+    assert data["version"] == "3.1.0"
+    assert "s3_port" in data
 
 
-def test_create_backup_json(svc):
-    res = svc.client.post("/backups", json={
-        "name": "daily-snap",
-        "targets": "all",
-        "destination": "local",
-        "compression": "zstd"
-    })
-    assert res.status_code == 200
-    assert res.json()["created"] is True
-    assert "VERB=create-backup" in ops_log(svc)
-
-
-def test_create_backup_sse_stream(svc):
-    res = svc.client.post(
-        "/backups",
-        headers={"Accept": "text/event-stream"},
-        json={"name": "stream-snap", "targets": "all", "destination": "local", "compression": "zstd"}
-    )
-    assert res.status_code == 200
-    assert "text/event-stream" in res.headers["content-type"]
-    assert "event: result" in res.text
-
-
-def test_restore_backup_stream(svc):
-    res = svc.client.post(
-        "/backups/backup-20260823-010000/restore",
-        headers={"Accept": "text/event-stream"},
-        json={"targets": "all"}
-    )
-    assert res.status_code == 200
-    assert "text/event-stream" in res.headers["content-type"]
-    assert "VERB=restore-backup" in ops_log(svc)
-
-
-def test_delete_backup(svc):
-    res = svc.client.delete("/backups/backup-20260823-010000")
-    assert res.status_code == 200
-    assert res.json()["deleted"] is True
-    assert "VERB=delete-backup\nARGV=backup-20260823-010000" in ops_log(svc)
-
-
-# ── Schedules ─────────────────────────────────────────────────────────────────
-
-def test_list_schedules(svc):
-    res = svc.client.get("/schedules")
-    assert res.status_code == 200
-    assert "schedules" in res.json()
-
-
-def test_create_schedule(svc):
-    res = svc.client.post("/schedules", json={
-        "name": "weekly-backup",
-        "cron": "0 3 * * 0",
-        "targets": "all",
-        "retention_days": 14,
-        "destination": "s3",
-        "enabled": True
-    })
-    assert res.status_code == 200
-    assert res.json()["saved"] is True
-    assert "VERB=set-schedule\nARGV=weekly-backup 0 3 * * 0 all 14 s3 1" in ops_log(svc)
-
-
-def test_update_schedule(svc):
-    res = svc.client.put("/schedules/weekly-backup", json={
-        "cron": "0 4 * * 0",
-        "targets": "websites",
-        "retention_days": 30,
-        "destination": "r2",
-        "enabled": False
-    })
-    assert res.status_code == 200
-    assert res.json()["saved"] is True
-    assert "VERB=set-schedule\nARGV=weekly-backup 0 4 * * 0 websites 30 r2 0" in ops_log(svc)
-
-
-def test_delete_schedule(svc):
-    res = svc.client.delete("/schedules/weekly-backup")
-    assert res.status_code == 200
-    assert res.json()["deleted"] is True
-    assert "VERB=delete-schedule\nARGV=weekly-backup" in ops_log(svc)
-
-
-# ── Disk Usage ────────────────────────────────────────────────────────────────
-
-def test_disk_usage(svc):
-    res = svc.client.get("/disk-usage")
+def test_settings(svc):
+    res = svc.client.get("/settings")
     assert res.status_code == 200
     data = res.json()
-    assert "total_bytes" in data
-    assert "used_bytes" in data
-    assert "breakdown" in data
-    assert len(data["breakdown"]) >= 1
+    assert data["s3_port"] == 9000
+
+    res2 = svc.client.post("/settings", json={"s3_port": "9100"})
+    assert res2.status_code == 200
+    assert res2.json()["saved"] is True
 
 
 # ── Operations Introspection ──────────────────────────────────────────────────
@@ -269,6 +239,6 @@ def test_operations_introspection(svc):
     assert res.status_code == 200
     data = res.json()
     assert data["package"] == "storage"
-    assert "storage.create-backup" in data["operations"]
-    assert "storage.create-bucket" in data["operations"]
+    assert "storage.bucket-create" in data["operations"]
+    assert "storage.bucket-delete" in data["operations"]
     assert "storage.disk-usage" in data["operations"]

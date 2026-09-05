@@ -5,7 +5,6 @@ import {
   Button,
   Card,
   CardContent,
-  Checkbox,
   Chip,
   CircularProgress,
   Dialog,
@@ -13,18 +12,18 @@ import {
   DialogContent,
   DialogContentText,
   DialogTitle,
+  FormControl,
   FormControlLabel,
-  FormGroup,
   IconButton,
   InputAdornment,
+  InputLabel,
   LinearProgress,
   MenuItem,
   Paper,
-  Radio,
-  RadioGroup,
   Select,
   Snackbar,
   Stack,
+  Switch,
   Tab,
   Table,
   TableBody,
@@ -41,39 +40,35 @@ import { ThemeProvider, createTheme, type ThemeOptions } from "@mui/material/sty
 import RefreshIcon from "@mui/icons-material/Refresh";
 import AddIcon from "@mui/icons-material/Add";
 import DeleteIcon from "@mui/icons-material/Delete";
-import RestoreIcon from "@mui/icons-material/Restore";
 import DownloadIcon from "@mui/icons-material/Download";
-import ScheduleIcon from "@mui/icons-material/Schedule";
+import UploadFileIcon from "@mui/icons-material/UploadFile";
 import FolderIcon from "@mui/icons-material/Folder";
+import InsertDriveFileIcon from "@mui/icons-material/InsertDriveFile";
 import CloudQueueIcon from "@mui/icons-material/CloudQueue";
-import BackupIcon from "@mui/icons-material/Backup";
-import PieChartIcon from "@mui/icons-material/PieChart";
-import SecurityIcon from "@mui/icons-material/Security";
+import VpnKeyIcon from "@mui/icons-material/VpnKey";
+import ShareIcon from "@mui/icons-material/Share";
+import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import LockIcon from "@mui/icons-material/Lock";
+import LockOpenIcon from "@mui/icons-material/LockOpen";
+import SettingsIcon from "@mui/icons-material/Settings";
+import MenuBookIcon from "@mui/icons-material/MenuBook";
+import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import SearchIcon from "@mui/icons-material/Search";
-import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 
 import type {
-  BackupSnapshot,
+  AccessKey,
   Bucket,
-  DiskUsage,
   PackageContext,
-  Schedule,
+  S3Object,
   ServiceMeta,
+  StorageSettings,
 } from "./types";
 import {
   Dot,
-  Field,
-  LogPane,
   MicroLabel,
   MONO,
   Panel,
-  Readout,
-  appendEvent,
-  type Line,
 } from "./kit";
-
-/** Padding inside a tab panel, matching the SSL, Nginx and WireGuard pages. */
-const PANEL_PAD = 2.25;
 
 export function StoragePage({ ctx }: { ctx: PackageContext }) {
   const theme = useMemo(
@@ -86,14 +81,6 @@ export function StoragePage({ ctx }: { ctx: PackageContext }) {
       <StoragePageBody ctx={ctx} />
     </ThemeProvider>
   );
-}
-
-function formatBytes(bytes: number): string {
-  if (isNaN(bytes) || bytes === 0) return "0 B";
-  const k = 1024;
-  const sizes = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
 }
 
 function formatDate(isoString?: string): string {
@@ -121,72 +108,78 @@ function StoragePageBody({ ctx }: { ctx: PackageContext }) {
 
   // Data states
   const [buckets, setBuckets] = useState<Bucket[]>([]);
-  const [backups, setBackups] = useState<BackupSnapshot[]>([]);
-  const [schedules, setSchedules] = useState<Schedule[]>([]);
-  const [diskUsage, setDiskUsage] = useState<DiskUsage | null>(null);
+  const [accessKeys, setAccessKeys] = useState<AccessKey[]>([]);
+  const [settings, setSettings] = useState<StorageSettings | null>(null);
   const [meta, setMeta] = useState<ServiceMeta | null>(null);
 
-  // Search filters
+  // Search filter
   const [searchFilter, setSearchFilter] = useState("");
 
-  // Live ops log streaming
-  const [lines, setLines] = useState<Line[]>([]);
-  const [running, setRunning] = useState(false);
-  const abortRef = useRef<AbortController | null>(null);
+  // ── Object Browser state ──────────────────────────────────────────────────
+  const [browsingBucket, setBrowsingBucket] = useState<string | null>(null);
+  const [browserPrefix, setBrowserPrefix] = useState<string>("");
+  const [bucketObjects, setBucketObjects] = useState<S3Object[]>([]);
+  const [objectsLoading, setObjectsLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Modal: Create Snapshot
-  const [createSnapshotOpen, setCreateSnapshotOpen] = useState(false);
-  const [snapshotName, setSnapshotName] = useState("");
-  const [targetWebsites, setTargetWebsites] = useState(true);
-  const [targetDatabases, setTargetDatabases] = useState(true);
-  const [targetConfigs, setTargetConfigs] = useState(true);
-  const [snapshotDest, setSnapshotDest] = useState<"local" | "s3" | "r2">("local");
-  const [snapshotComp, setSnapshotComp] = useState<"zstd" | "gzip" | "none">("zstd");
-
-  // Modal: Restore Snapshot
-  const [restoreTarget, setRestoreTarget] = useState<BackupSnapshot | null>(null);
-
-  // Modal: Delete Snapshot
-  const [deleteBackupTarget, setDeleteBackupTarget] = useState<BackupSnapshot | null>(null);
-
-  // Modal: New Bucket
-  const [newBucketOpen, setNewBucketOpen] = useState(false);
+  // ── Modals state ──────────────────────────────────────────────────────────
+  // Create Bucket
+  const [createBucketOpen, setCreateBucketOpen] = useState(false);
   const [newBucketName, setNewBucketName] = useState("");
-  const [newBucketPolicy, setNewBucketPolicy] = useState<"private" | "public-read" | "authenticated-read">("private");
+  const [newBucketQuota, setNewBucketQuota] = useState(5120);
+  const [newBucketPublic, setNewBucketPublic] = useState(false);
 
-  // Modal: Delete Bucket
+  // Delete Bucket
   const [deleteBucketTarget, setDeleteBucketTarget] = useState<Bucket | null>(null);
 
-  // Modal: Set Schedule
-  const [scheduleModalOpen, setScheduleModalOpen] = useState(false);
-  const [scheduleName, setScheduleName] = useState("");
-  const [scheduleCron, setScheduleCron] = useState("0 2 * * *");
-  const [schedulePreset, setSchedulePreset] = useState("daily");
-  const [scheduleRetention, setScheduleRetention] = useState(7);
-  const [scheduleDest, setScheduleDest] = useState<"local" | "s3" | "r2">("local");
-  const [scheduleEnabled, setScheduleEnabled] = useState(true);
-  const [scheduleTargets, setScheduleTargets] = useState("all");
+  // Create Access Key
+  const [createKeyOpen, setCreateKeyOpen] = useState(false);
+  const [keyLabel, setKeyLabel] = useState("");
+  const [keyBucketId, setKeyBucketId] = useState<number | "">("");
+  const [createdKeySecret, setCreatedKeySecret] = useState<{ id: string; secret: string } | null>(null);
 
-  // Modal: Delete Schedule
-  const [deleteScheduleTarget, setDeleteScheduleTarget] = useState<Schedule | null>(null);
+  // Delete Access Key
+  const [deleteKeyTarget, setDeleteKeyTarget] = useState<AccessKey | null>(null);
 
+  // Presigned URL
+  const [presignTarget, setPresignTarget] = useState<{ bucket: string; key: string } | null>(null);
+  const [presignExpires, setPresignExpires] = useState<number>(3600);
+  const [generatedPresignUrl, setGeneratedPresignUrl] = useState<string | null>(null);
+
+  // Delete Object
+  const [deleteObjectTarget, setDeleteObjectTarget] = useState<string | null>(null);
+
+  // Guide Sub-tab
+  const [guideTab, setGuideTab] = useState(0);
+
+  // ── Data Fetching ─────────────────────────────────────────────────────────
   const refresh = useCallback(async () => {
     setLoading(true);
-    setError(null);
     try {
-      const [bRes, bkRes, sRes, dRes, mRes] = await Promise.all([
-        ctx.api("/buckets").then((r) => r.json()).catch(() => ({ buckets: [] })),
-        ctx.api("/backups").then((r) => r.json()).catch(() => ({ backups: [] })),
-        ctx.api("/schedules").then((r) => r.json()).catch(() => ({ schedules: [] })),
-        ctx.api("/disk-usage").then((r) => r.json()).catch(() => null),
-        ctx.api("/meta").then((r) => r.json()).catch(() => null),
+      const [bRes, kRes, sRes, mRes] = await Promise.all([
+        ctx.api("/buckets"),
+        ctx.api("/keys"),
+        ctx.api("/settings"),
+        ctx.api("/meta"),
       ]);
 
-      setBuckets(bRes.buckets ?? []);
-      setBackups(bkRes.backups ?? []);
-      setSchedules(sRes.schedules ?? []);
-      if (dRes) setDiskUsage(dRes);
-      if (mRes) setMeta(mRes);
+      if (bRes.ok) {
+        const data = await bRes.json();
+        setBuckets(data.buckets || []);
+      }
+      if (kRes.ok) {
+        const data = await kRes.json();
+        setAccessKeys(data.keys || []);
+      }
+      if (sRes.ok) {
+        const data = await sRes.json();
+        setSettings(data);
+      }
+      if (mRes.ok) {
+        const data = await mRes.json();
+        setMeta(data);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -198,98 +191,31 @@ function StoragePageBody({ ctx }: { ctx: PackageContext }) {
     refresh();
   }, [refresh]);
 
-  // ── Actions: Create Snapshot Now ───────────────────────────────────────────
-  const handleCreateSnapshot = async () => {
-    const targetsList: string[] = [];
-    if (targetWebsites) targetsList.push("websites");
-    if (targetDatabases) targetsList.push("databases");
-    if (targetConfigs) targetsList.push("configs");
-    const targetsStr = targetsList.length === 3 ? "all" : targetsList.join(",") || "all";
-
-    setRunning(true);
-    setLines([]);
-    const controller = new AbortController();
-    abortRef.current = controller;
-
+  // Fetch objects when browsing a bucket
+  const loadObjects = useCallback(async (bucketName: string, prefix: string = "") => {
+    setObjectsLoading(true);
     try {
-      const generator = ctx.run("/backups", {
-        method: "POST",
-        body: {
-          name: snapshotName.trim() || undefined,
-          targets: targetsStr,
-          destination: snapshotDest,
-          compression: snapshotComp,
-        },
-        signal: controller.signal,
-      });
-
-      for await (const event of generator) {
-        setLines((prev) => appendEvent(prev, event));
-        if (event.kind === "result" && event.ok) {
-          setToast("Backup snapshot created successfully.");
-          refresh();
-        }
-      }
-    } catch (err) {
-      setLines((prev) => [
-        ...prev,
-        { stream: "stderr", text: err instanceof Error ? err.message : String(err) },
-      ]);
-    } finally {
-      setRunning(false);
-    }
-  };
-
-  // ── Actions: Restore Snapshot ──────────────────────────────────────────────
-  const handleRestoreSnapshot = async () => {
-    if (!restoreTarget) return;
-    setRunning(true);
-    setLines([]);
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    try {
-      const generator = ctx.run(`/backups/${restoreTarget.id}/restore`, {
-        method: "POST",
-        body: { targets: "all" },
-        signal: controller.signal,
-      });
-
-      for await (const event of generator) {
-        setLines((prev) => appendEvent(prev, event));
-        if (event.kind === "result" && event.ok) {
-          setToast(`Snapshot ${restoreTarget.id} restored successfully.`);
-          refresh();
-        }
-      }
-    } catch (err) {
-      setLines((prev) => [
-        ...prev,
-        { stream: "stderr", text: err instanceof Error ? err.message : String(err) },
-      ]);
-    } finally {
-      setRunning(false);
-    }
-  };
-
-  // ── Actions: Delete Snapshot ───────────────────────────────────────────────
-  const handleDeleteSnapshot = async () => {
-    if (!deleteBackupTarget) return;
-    try {
-      const res = await ctx.api(`/backups/${deleteBackupTarget.id}`, { method: "DELETE" });
+      const q = new URLSearchParams({ prefix, delimiter: "/" });
+      const res = await ctx.api(`/buckets/${bucketName}/objects?${q.toString()}`);
       if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.message ?? `HTTP ${res.status}`);
+        throw new Error(`Failed to list objects in bucket ${bucketName}`);
       }
-      setToast(`Snapshot ${deleteBackupTarget.id} deleted.`);
-      setDeleteBackupTarget(null);
-      refresh();
+      const data = await res.json();
+      setBucketObjects(data.objects || []);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setObjectsLoading(false);
     }
-  };
+  }, [ctx]);
 
-  // ── Actions: Create Bucket ─────────────────────────────────────────────────
+  useEffect(() => {
+    if (browsingBucket) {
+      loadObjects(browsingBucket, browserPrefix);
+    }
+  }, [browsingBucket, browserPrefix, loadObjects]);
+
+  // ── Actions: Buckets ──────────────────────────────────────────────────────
   const handleCreateBucket = async () => {
     if (!newBucketName.trim()) return;
     try {
@@ -298,15 +224,16 @@ function StoragePageBody({ ctx }: { ctx: PackageContext }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: newBucketName.trim(),
-          policy: newBucketPolicy,
+          quota_mb: Number(newBucketQuota) || 5120,
+          public_access: newBucketPublic,
         }),
       });
       if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.message ?? `HTTP ${res.status}`);
+        const b = await res.json().catch(() => ({}));
+        throw new Error(b.detail ?? `HTTP ${res.status}`);
       }
-      setToast(`S3 Bucket '${newBucketName}' created.`);
-      setNewBucketOpen(false);
+      setToast(`S3 Bucket '${newBucketName}' created successfully.`);
+      setCreateBucketOpen(false);
       setNewBucketName("");
       refresh();
     } catch (err) {
@@ -314,16 +241,18 @@ function StoragePageBody({ ctx }: { ctx: PackageContext }) {
     }
   };
 
-  // ── Actions: Delete Bucket ─────────────────────────────────────────────────
   const handleDeleteBucket = async () => {
     if (!deleteBucketTarget) return;
     try {
       const res = await ctx.api(`/buckets/${deleteBucketTarget.name}`, { method: "DELETE" });
       if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.message ?? `HTTP ${res.status}`);
+        const b = await res.json().catch(() => ({}));
+        throw new Error(b.detail ?? `HTTP ${res.status}`);
       }
       setToast(`Bucket '${deleteBucketTarget.name}' deleted.`);
+      if (browsingBucket === deleteBucketTarget.name) {
+        setBrowsingBucket(null);
+      }
       setDeleteBucketTarget(null);
       refresh();
     } catch (err) {
@@ -331,83 +260,165 @@ function StoragePageBody({ ctx }: { ctx: PackageContext }) {
     }
   };
 
-  // ── Actions: Set Schedule ──────────────────────────────────────────────────
-  const handleSaveSchedule = async () => {
-    if (!scheduleName.trim()) return;
+  // ── Actions: Object Browser ───────────────────────────────────────────────
+  const handleStartBrowse = (bucketName: string) => {
+    setBrowsingBucket(bucketName);
+    setBrowserPrefix("");
+    setTabIndex(1);
+  };
+
+  const handleUploadFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !browsingBucket) return;
+
+    setUploading(true);
     try {
-      const res = await ctx.api("/schedules", {
+      const formData = new FormData();
+      formData.append("prefix", browserPrefix);
+      formData.append("file", file);
+
+      const res = await ctx.api(`/buckets/${browsingBucket}/objects/upload`, {
+        method: "POST",
+        body: formData,
+      });
+      if (!res.ok) {
+        const b = await res.json().catch(() => ({}));
+        throw new Error(b.detail ?? `Upload failed`);
+      }
+      setToast(`Uploaded '${file.name}' to ${browsingBucket}.`);
+      loadObjects(browsingBucket, browserPrefix);
+      refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
+  const handleDeleteObject = async () => {
+    if (!browsingBucket || !deleteObjectTarget) return;
+    try {
+      const q = new URLSearchParams({ key: deleteObjectTarget });
+      const res = await ctx.api(`/buckets/${browsingBucket}/objects?${q.toString()}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) throw new Error("Failed to delete object");
+      setToast(`Deleted '${deleteObjectTarget}'`);
+      setDeleteObjectTarget(null);
+      loadObjects(browsingBucket, browserPrefix);
+      refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleToggleObjectAcl = async (obj: S3Object) => {
+    if (!browsingBucket) return;
+    try {
+      const res = await ctx.api(`/buckets/${browsingBucket}/objects/acl`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          name: scheduleName.trim(),
-          cron: scheduleCron,
-          targets: scheduleTargets,
-          retention_days: scheduleRetention,
-          destination: scheduleDest,
-          enabled: scheduleEnabled,
+          object_key: obj.key,
+          is_public: !obj.is_public,
+        }),
+      });
+      if (!res.ok) throw new Error("Failed to update access policy");
+      setToast(`Object access set to ${!obj.is_public ? "Public" : "Private"}.`);
+      loadObjects(browsingBucket, browserPrefix);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleGeneratePresign = async () => {
+    if (!presignTarget) return;
+    try {
+      const res = await ctx.api(`/buckets/${presignTarget.bucket}/objects/presign`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          object_key: presignTarget.key,
+          expires_in: presignExpires,
+        }),
+      });
+      if (!res.ok) throw new Error("Failed to generate presigned link");
+      const data = await res.json();
+      setGeneratedPresignUrl(data.url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  // ── Actions: Access Keys ──────────────────────────────────────────────────
+  const handleCreateKey = async () => {
+    try {
+      const res = await ctx.api("/keys", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          label: keyLabel.trim(),
+          bucket_id: keyBucketId === "" ? null : Number(keyBucketId),
         }),
       });
       if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.message ?? `HTTP ${res.status}`);
+        const b = await res.json().catch(() => ({}));
+        throw new Error(b.detail ?? `Failed to create key`);
       }
-      setToast(`Schedule '${scheduleName}' saved.`);
-      setScheduleModalOpen(false);
-      setScheduleName("");
+      const data = await res.json();
+      setCreatedKeySecret({ id: data.access_key, secret: data.secret_key });
+      setKeyLabel("");
+      setKeyBucketId("");
       refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
   };
 
-  // ── Actions: Delete Schedule ───────────────────────────────────────────────
-  const handleDeleteSchedule = async () => {
-    if (!deleteScheduleTarget) return;
+  const handleToggleKeyStatus = async (key: AccessKey) => {
+    const nextStatus = key.status === "active" ? "disabled" : "active";
     try {
-      const res = await ctx.api(`/schedules/${deleteScheduleTarget.name}`, { method: "DELETE" });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.message ?? `HTTP ${res.status}`);
-      }
-      setToast(`Schedule '${deleteScheduleTarget.name}' removed.`);
-      setDeleteScheduleTarget(null);
+      const res = await ctx.api(`/keys/${key.access_key}/status`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: nextStatus }),
+      });
+      if (!res.ok) throw new Error("Failed to update key status");
+      setToast(`Access key is now ${nextStatus}.`);
       refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
   };
 
-  const totalStorageBytes = useMemo(() => {
-    if (diskUsage) return diskUsage.used_bytes;
-    return (
-      buckets.reduce((acc, b) => acc + (b.size_bytes || 0), 0) +
-      backups.reduce((acc, bk) => acc + (bk.size_bytes || 0), 0)
-    );
-  }, [diskUsage, buckets, backups]);
-
-  const filteredBackups = useMemo(() => {
-    if (!searchFilter) return backups;
-    const q = searchFilter.toLowerCase();
-    return backups.filter(
-      (b) =>
-        b.name.toLowerCase().includes(q) ||
-        b.id.toLowerCase().includes(q) ||
-        b.targets.toLowerCase().includes(q) ||
-        b.destination.toLowerCase().includes(q),
-    );
-  }, [backups, searchFilter]);
+  const handleDeleteKey = async () => {
+    if (!deleteKeyTarget) return;
+    try {
+      const res = await ctx.api(`/keys/${deleteKeyTarget.access_key}`, { method: "DELETE" });
+      if (!res.ok) throw new Error("Failed to delete access key");
+      setToast(`Access key '${deleteKeyTarget.access_key}' deleted.`);
+      setDeleteKeyTarget(null);
+      refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
 
   const filteredBuckets = useMemo(() => {
     if (!searchFilter) return buckets;
     const q = searchFilter.toLowerCase();
-    return buckets.filter(
-      (b) => b.name.toLowerCase().includes(q) || b.policy.toLowerCase().includes(q),
-    );
+    return buckets.filter((b) => b.name.toLowerCase().includes(q));
   }, [buckets, searchFilter]);
+
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard?.writeText(text);
+    setToast("Copied to clipboard!");
+  };
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
-      {/* ── Top Action Bar ─────────────────────────────────────────────────── */}
+      {/* ── Header ────────────────────────────────────────────────────────── */}
       <Stack
         direction={{ xs: "column", md: "row" }}
         sx={{
@@ -419,16 +430,16 @@ function StoragePageBody({ ctx }: { ctx: PackageContext }) {
         <Box>
           <Stack direction="row" spacing={1.5} sx={{ alignItems: "center", mb: 0.5 }}>
             <Typography variant="h5" sx={{ fontWeight: 700, letterSpacing: "-0.02em" }}>
-              Storage & Backups
+              Object Storage (S3)
             </Typography>
             <Chip
               icon={<Dot ok={true} size={8} />}
-              label="Active"
+              label="S3 Active"
               size="small"
               sx={{ fontWeight: 600, bgcolor: "success.light", color: "success.contrastText" }}
             />
             <Chip
-              label={`Port ${meta?.port ?? "\u2014"}`}
+              label={`Port ${meta?.s3_port ?? 9000}`}
               size="small"
               variant="outlined"
               sx={{ fontFamily: MONO, fontSize: "0.75rem" }}
@@ -442,66 +453,38 @@ function StoragePageBody({ ctx }: { ctx: PackageContext }) {
             />
           </Stack>
           <Typography variant="body2" sx={{ color: "text.secondary" }}>
-            S3-compatible object storage, compressed snapshot archives, automated schedules & storage isolation.
+            AWS S3-compatible object storage with AWS SigV4 protocol, bucket quotas, access keys & object explorer.
           </Typography>
         </Box>
 
-        <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", flexShrink: 0 }}>
-          {/* Refresh */}
-          <Tooltip title="Refresh Status" arrow>
-            <span>
-              <IconButton
-                size="small"
-                onClick={refresh}
-                disabled={loading}
-                sx={{ border: "1px solid", borderColor: "divider" }}
-              >
-                {loading ? <CircularProgress size={16} color="inherit" /> : <RefreshIcon sx={{ fontSize: 18 }} />}
-              </IconButton>
-            </span>
-          </Tooltip>
-
-          {/* New S3 Bucket */}
+        <Stack direction="row" spacing={1} sx={{ alignItems: "center", flexShrink: 0 }}>
           <Button
             variant="outlined"
             size="small"
-            startIcon={<AddIcon />}
-            onClick={() => {
-              setNewBucketName("");
-              setNewBucketOpen(true);
-            }}
-            sx={{ whiteSpace: "nowrap" }}
+            startIcon={<RefreshIcon />}
+            onClick={() => refresh()}
+            disabled={loading}
           >
-            New Bucket
+            Refresh
           </Button>
-
-          {/* Set Schedule */}
           <Button
             variant="outlined"
             size="small"
-            startIcon={<ScheduleIcon />}
+            startIcon={<VpnKeyIcon />}
             onClick={() => {
-              setScheduleName(`backup-${schedules.length + 1}`);
-              setScheduleModalOpen(true);
+              setCreatedKeySecret(null);
+              setCreateKeyOpen(true);
             }}
-            sx={{ whiteSpace: "nowrap" }}
           >
-            Schedule
+            New Access Key
           </Button>
-
-          {/* Primary Action Button */}
           <Button
             variant="contained"
             size="small"
-            color="primary"
-            startIcon={<BackupIcon />}
-            onClick={() => {
-              setSnapshotName("");
-              setCreateSnapshotOpen(true);
-            }}
-            sx={{ ml: 0.5, whiteSpace: "nowrap" }}
+            startIcon={<AddIcon />}
+            onClick={() => setCreateBucketOpen(true)}
           >
-            Create Snapshot
+            Create Bucket
           </Button>
         </Stack>
       </Stack>
@@ -513,88 +496,61 @@ function StoragePageBody({ ctx }: { ctx: PackageContext }) {
         </Alert>
       )}
 
-      {/* ── 4 Overview Stat Cards ──────────────────────────────────────────── */}
-      <Stack
-        direction={{ xs: "column", sm: "row" }}
-        spacing={2}
-      >
+      {/* ── Top Stat Cards ─────────────────────────────────────────────────── */}
+      <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
         <Card sx={{ flex: 1, minWidth: 200, bgcolor: "background.paper" }}>
           <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
-            <MicroLabel sx={{ mb: 0.5 }}>STORAGE SERVICE STATUS</MicroLabel>
-            <Stack direction="row" spacing={1} sx={{ alignItems: "center", mb: 0.5 }}>
-              <Dot ok={true} size={10} />
-              <Typography variant="h6" sx={{ fontWeight: 700 }}>
-                Active · {meta?.port ?? "\u2014"}
-              </Typography>
-            </Stack>
-            <Typography variant="caption" sx={{ color: "text.disabled", fontFamily: MONO }}>
-              {meta ? `${meta.unit} (${meta.run_as})` : "\u2014"}
-            </Typography>
-          </CardContent>
-        </Card>
-
-        <Card sx={{ flex: 1, minWidth: 200, bgcolor: "background.paper" }}>
-          <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
-            <MicroLabel sx={{ mb: 0.5 }}>TOTAL STORAGE USED</MicroLabel>
-            <Typography variant="h6" sx={{ fontWeight: 700, fontFamily: MONO, mb: 0.5 }}>
-              {formatBytes(totalStorageBytes)}
-            </Typography>
-            <Typography variant="caption" sx={{ color: "text.secondary" }}>
-              Across /opt/hostpanel data assets
-            </Typography>
-          </CardContent>
-        </Card>
-
-        <Card sx={{ flex: 1, minWidth: 200, bgcolor: "background.paper" }}>
-          <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
-            <MicroLabel sx={{ mb: 0.5 }}>BACKUP SNAPSHOTS COUNT</MicroLabel>
-            <Typography variant="h6" sx={{ fontWeight: 700, mb: 0.5 }}>
-              {backups.length} {backups.length === 1 ? "Snapshot" : "Snapshots"}
-            </Typography>
-            <Typography variant="caption" sx={{ color: "text.secondary" }}>
-              {backups.length > 0
-                ? `Latest: ${formatDate(backups[0]?.created_at)}`
-                : "No snapshots recorded yet"}
-            </Typography>
-          </CardContent>
-        </Card>
-
-        <Card sx={{ flex: 1, minWidth: 200, bgcolor: "background.paper" }}>
-          <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
-            <MicroLabel sx={{ mb: 0.5 }}>S3 BUCKETS COUNT</MicroLabel>
+            <MicroLabel sx={{ mb: 0.5 }}>S3 BUCKETS</MicroLabel>
             <Typography variant="h6" sx={{ fontWeight: 700, mb: 0.5 }}>
               {buckets.length} {buckets.length === 1 ? "Bucket" : "Buckets"}
             </Typography>
             <Typography variant="caption" sx={{ color: "text.secondary" }}>
-              Total objects: {buckets.reduce((a, b) => a + (b.objects_count || 0), 0)}
+              Total isolated buckets
+            </Typography>
+          </CardContent>
+        </Card>
+
+        <Card sx={{ flex: 1, minWidth: 200, bgcolor: "background.paper" }}>
+          <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
+            <MicroLabel sx={{ mb: 0.5 }}>TOTAL OBJECTS</MicroLabel>
+            <Typography variant="h6" sx={{ fontWeight: 700, mb: 0.5 }}>
+              {settings?.total_objects ?? buckets.reduce((acc, b) => acc + (b.object_count || 0), 0)} Files
+            </Typography>
+            <Typography variant="caption" sx={{ color: "text.secondary" }}>
+              Stored across all S3 buckets
+            </Typography>
+          </CardContent>
+        </Card>
+
+        <Card sx={{ flex: 1, minWidth: 200, bgcolor: "background.paper" }}>
+          <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
+            <MicroLabel sx={{ mb: 0.5 }}>STORAGE USED</MicroLabel>
+            <Typography variant="h6" sx={{ fontWeight: 700, fontFamily: MONO, mb: 0.5 }}>
+              {settings?.total_size_formatted ?? "0 B"}
+            </Typography>
+            <Typography variant="caption" sx={{ color: "text.secondary" }}>
+              Under /opt/hostpanel/data/storage
+            </Typography>
+          </CardContent>
+        </Card>
+
+        <Card sx={{ flex: 1, minWidth: 200, bgcolor: "background.paper" }}>
+          <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
+            <MicroLabel sx={{ mb: 0.5 }}>S3 SERVICE STATUS</MicroLabel>
+            <Stack direction="row" spacing={1} sx={{ alignItems: "center", mb: 0.5 }}>
+              <Dot ok={true} size={10} />
+              <Typography variant="h6" sx={{ fontWeight: 700, fontFamily: MONO }}>
+                Port {meta?.s3_port ?? 9000}
+              </Typography>
+            </Stack>
+            <Typography variant="caption" sx={{ color: "text.secondary" }}>
+              AWS SigV4 REST API Ready
             </Typography>
           </CardContent>
         </Card>
       </Stack>
 
-      {/* Progress streaming pane if active */}
-      {(lines.length > 0 || running) && (
-        <Box>
-          <Panel
-            label="Live Operations Progress"
-            action={
-              running && (
-                <Button
-                  size="small"
-                  color="error"
-                  onClick={() => abortRef.current?.abort()}
-                >
-                  Cancel
-                </Button>
-              )
-            }
-          >
-            <LogPane lines={lines} running={running} />
-          </Panel>
-        </Box>
-      )}
-
-      {/* ── Bordered Paper with Tabs ───────────────────────────────────────── */}
+      {/* ── Main Tab Navigation ────────────────────────────────────────────── */}
       <Paper sx={{ overflow: "hidden" }}>
         <Box sx={{ borderBottom: 1, borderColor: "divider", px: 2, pt: 1 }}>
           <Tabs
@@ -604,34 +560,34 @@ function StoragePageBody({ ctx }: { ctx: PackageContext }) {
             scrollButtons="auto"
           >
             <Tab
-              icon={<BackupIcon fontSize="small" />}
-              iconPosition="start"
-              label={`Backup Snapshots (${backups.length})`}
-            />
-            <Tab
-              icon={<CloudQueueIcon fontSize="small" />}
+              icon={<FolderIcon fontSize="small" />}
               iconPosition="start"
               label={`S3 Buckets (${buckets.length})`}
             />
             <Tab
-              icon={<ScheduleIcon fontSize="small" />}
+              icon={<CloudQueueIcon fontSize="small" />}
               iconPosition="start"
-              label={`Automated Schedules (${schedules.length})`}
+              label={browsingBucket ? `Browser (${browsingBucket})` : "Object Browser"}
             />
             <Tab
-              icon={<PieChartIcon fontSize="small" />}
+              icon={<VpnKeyIcon fontSize="small" />}
               iconPosition="start"
-              label="Disk Usage Visualizer"
+              label={`Access Keys (${accessKeys.length})`}
             />
             <Tab
-              icon={<SecurityIcon fontSize="small" />}
+              icon={<MenuBookIcon fontSize="small" />}
               iconPosition="start"
-              label="Service & Isolation"
+              label="Connection Guide"
+            />
+            <Tab
+              icon={<SettingsIcon fontSize="small" />}
+              iconPosition="start"
+              label="Settings & Service"
             />
           </Tabs>
         </Box>
 
-        {/* ── Tab 1: Backup Snapshots ───────────────────────────────────────── */}
+        {/* ── Tab 0: S3 Buckets Table ────────────────────────────────────────── */}
         {tabIndex === 0 && (
           <Box sx={{ p: 2 }}>
             <Stack
@@ -641,184 +597,15 @@ function StoragePageBody({ ctx }: { ctx: PackageContext }) {
             >
               <TextField
                 size="small"
-                placeholder="Search snapshots by name, ID or destination..."
+                placeholder="Search buckets by name..."
                 value={searchFilter}
                 onChange={(e) => setSearchFilter(e.target.value)}
-                sx={{ width: { xs: "100%", sm: 360 } }}
+                sx={{ width: { xs: "100%", sm: 320 } }}
                 slotProps={{
                   input: {
                     startAdornment: (
                       <InputAdornment position="start">
-                        <SearchIcon fontSize="small" sx={{ color: "text.disabled" }} />
-                      </InputAdornment>
-                    ),
-                  },
-                }}
-              />
-              <Button
-                variant="contained"
-                size="small"
-                startIcon={<BackupIcon />}
-                onClick={() => {
-                  setSnapshotName("");
-                  setCreateSnapshotOpen(true);
-                }}
-              >
-                Create Snapshot
-              </Button>
-            </Stack>
-
-            <TableContainer>
-              <Table size="small">
-                <TableHead>
-                  <TableRow>
-                    <TableCell sx={{ fontWeight: 600 }}>Snapshot Name / ID</TableCell>
-                    <TableCell sx={{ fontWeight: 600 }}>Targets Included</TableCell>
-                    <TableCell sx={{ fontWeight: 600 }}>Archive Size</TableCell>
-                    <TableCell sx={{ fontWeight: 600 }}>Created At</TableCell>
-                    <TableCell sx={{ fontWeight: 600 }}>Destination</TableCell>
-                    <TableCell align="right" sx={{ fontWeight: 600 }}>
-                      Actions
-                    </TableCell>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {loading && backups.length === 0 ? (
-                    <TableRow>
-                      <TableCell colSpan={6} align="center" sx={{ py: 4 }}>
-                        <CircularProgress size={28} />
-                      </TableCell>
-                    </TableRow>
-                  ) : filteredBackups.length === 0 ? (
-                    <TableRow>
-                      <TableCell colSpan={6} align="center" sx={{ py: 6 }}>
-                        <Typography variant="body2" sx={{ color: "text.secondary", mb: 1 }}>
-                          No backup snapshots found.
-                        </Typography>
-                        <Button
-                          variant="outlined"
-                          size="small"
-                          startIcon={<BackupIcon />}
-                          onClick={() => setCreateSnapshotOpen(true)}
-                        >
-                          Create your first snapshot
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  ) : (
-                    filteredBackups.map((bk) => (
-                      <TableRow key={bk.id} hover>
-                        <TableCell>
-                          <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                            {bk.name || bk.id}
-                          </Typography>
-                          <Typography
-                            variant="caption"
-                            sx={{ fontFamily: MONO, color: "text.disabled" }}
-                          >
-                            {bk.id}
-                          </Typography>
-                        </TableCell>
-                        <TableCell>
-                          <Stack direction="row" spacing={0.5} sx={{ flexWrap: "wrap", gap: 0.5 }}>
-                            {bk.targets === "all" ? (
-                              <>
-                                <Chip label="Websites" size="small" variant="outlined" />
-                                <Chip label="Databases" size="small" variant="outlined" />
-                                <Chip label="Configs" size="small" variant="outlined" />
-                              </>
-                            ) : (
-                              bk.targets.split(",").map((t) => (
-                                <Chip
-                                  key={t}
-                                  label={t.trim()}
-                                  size="small"
-                                  variant="outlined"
-                                />
-                              ))
-                            )}
-                          </Stack>
-                        </TableCell>
-                        <TableCell sx={{ fontFamily: MONO, fontSize: "0.8125rem" }}>
-                          {formatBytes(bk.size_bytes)}
-                        </TableCell>
-                        <TableCell sx={{ fontSize: "0.8125rem" }}>
-                          {formatDate(bk.created_at)}
-                        </TableCell>
-                        <TableCell>
-                          <Chip
-                            label={bk.destination.toUpperCase()}
-                            size="small"
-                            color={
-                              bk.destination === "local"
-                                ? "default"
-                                : bk.destination === "s3"
-                                ? "primary"
-                                : "secondary"
-                            }
-                            sx={{ fontWeight: 600, fontSize: "0.6875rem" }}
-                          />
-                        </TableCell>
-                        <TableCell align="right">
-                          <Stack direction="row" spacing={0.5} sx={{ justifyContent: "flex-end" }}>
-                            <Tooltip title="Restore snapshot payload">
-                              <IconButton
-                                size="small"
-                                color="primary"
-                                onClick={() => setRestoreTarget(bk)}
-                              >
-                                <RestoreIcon fontSize="small" />
-                              </IconButton>
-                            </Tooltip>
-                            <Tooltip title="Download archive (.tar.zst)">
-                              <IconButton
-                                size="small"
-                                onClick={() => {
-                                  window.open(`/cpanelapi/storage/backups/${bk.id}/download`, "_blank");
-                                }}
-                              >
-                                <DownloadIcon fontSize="small" />
-                              </IconButton>
-                            </Tooltip>
-                            <Tooltip title="Delete snapshot">
-                              <IconButton
-                                size="small"
-                                color="error"
-                                onClick={() => setDeleteBackupTarget(bk)}
-                              >
-                                <DeleteIcon fontSize="small" />
-                              </IconButton>
-                            </Tooltip>
-                          </Stack>
-                        </TableCell>
-                      </TableRow>
-                    ))
-                  )}
-                </TableBody>
-              </Table>
-            </TableContainer>
-          </Box>
-        )}
-
-        {/* ── Tab 2: S3 Buckets ──────────────────────────────────────────────── */}
-        {tabIndex === 1 && (
-          <Box sx={{ p: 2 }}>
-            <Stack
-              direction={{ xs: "column", sm: "row" }}
-              spacing={2}
-              sx={{ mb: 2, justifyContent: "space-between", alignItems: "center" }}
-            >
-              <TextField
-                size="small"
-                placeholder="Search S3 buckets..."
-                value={searchFilter}
-                onChange={(e) => setSearchFilter(e.target.value)}
-                sx={{ width: { xs: "100%", sm: 360 } }}
-                slotProps={{
-                  input: {
-                    startAdornment: (
-                      <InputAdornment position="start">
-                        <SearchIcon fontSize="small" sx={{ color: "text.disabled" }} />
+                        <SearchIcon fontSize="small" />
                       </InputAdornment>
                     ),
                   },
@@ -828,10 +615,7 @@ function StoragePageBody({ ctx }: { ctx: PackageContext }) {
                 variant="contained"
                 size="small"
                 startIcon={<AddIcon />}
-                onClick={() => {
-                  setNewBucketName("");
-                  setNewBucketOpen(true);
-                }}
+                onClick={() => setCreateBucketOpen(true)}
               >
                 New S3 Bucket
               </Button>
@@ -843,10 +627,10 @@ function StoragePageBody({ ctx }: { ctx: PackageContext }) {
                   <TableRow>
                     <TableCell sx={{ fontWeight: 600 }}>Bucket Name</TableCell>
                     <TableCell sx={{ fontWeight: 600 }}>Access Policy</TableCell>
-                    <TableCell sx={{ fontWeight: 600 }}>Object Count</TableCell>
-                    <TableCell sx={{ fontWeight: 600 }}>Total Size</TableCell>
-                    <TableCell sx={{ fontWeight: 600 }}>Created At</TableCell>
-                    <TableCell sx={{ fontWeight: 600 }}>S3 URI / Path</TableCell>
+                    <TableCell sx={{ fontWeight: 600 }}>Storage Quota & Usage</TableCell>
+                    <TableCell sx={{ fontWeight: 600 }}>Objects</TableCell>
+                    <TableCell sx={{ fontWeight: 600 }}>S3 URI</TableCell>
+                    <TableCell sx={{ fontWeight: 600 }}>Created</TableCell>
                     <TableCell align="right" sx={{ fontWeight: 600 }}>
                       Actions
                     </TableCell>
@@ -863,100 +647,312 @@ function StoragePageBody({ ctx }: { ctx: PackageContext }) {
                           variant="outlined"
                           size="small"
                           startIcon={<AddIcon />}
-                          onClick={() => setNewBucketOpen(true)}
+                          onClick={() => setCreateBucketOpen(true)}
                         >
-                          Create New S3 Bucket
+                          Create First Bucket
                         </Button>
                       </TableCell>
                     </TableRow>
                   ) : (
-                    filteredBuckets.map((bucket) => (
-                      <TableRow key={bucket.name} hover>
-                        <TableCell>
-                          <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
-                            <FolderIcon fontSize="small" sx={{ color: "primary.main" }} />
-                            <Typography variant="body2" sx={{ fontWeight: 600, fontFamily: MONO }}>
-                              {bucket.name}
-                            </Typography>
-                          </Stack>
-                        </TableCell>
-                        <TableCell>
-                          <Chip
-                            label={bucket.policy}
-                            size="small"
-                            color={
-                              bucket.policy === "private"
-                                ? "default"
-                                : bucket.policy === "public-read"
-                                ? "warning"
-                                : "info"
-                            }
-                            sx={{ fontWeight: 600, fontSize: "0.6875rem" }}
-                          />
-                        </TableCell>
-                        <TableCell sx={{ fontFamily: MONO }}>
-                          {bucket.objects_count ?? 0}
-                        </TableCell>
-                        <TableCell sx={{ fontFamily: MONO }}>
-                          {formatBytes(bucket.size_bytes ?? 0)}
-                        </TableCell>
-                        <TableCell sx={{ fontSize: "0.8125rem" }}>
-                          {formatDate(bucket.created_at)}
-                        </TableCell>
-                        <TableCell sx={{ fontFamily: MONO, fontSize: "0.75rem", color: "text.secondary" }}>
-                          s3://{bucket.name}
-                        </TableCell>
-                        <TableCell align="right">
-                          <Tooltip title="Delete bucket">
-                            <IconButton
+                    filteredBuckets.map((bucket) => {
+                      const quotaBytes = bucket.quota_mb * 1024 * 1024;
+                      const pct = Math.min(100, Math.round((bucket.used_bytes / (quotaBytes || 1)) * 100));
+                      return (
+                        <TableRow key={bucket.name} hover>
+                          <TableCell>
+                            <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+                              <FolderIcon fontSize="small" sx={{ color: "primary.main" }} />
+                              <Typography variant="body2" sx={{ fontWeight: 600, fontFamily: MONO }}>
+                                {bucket.name}
+                              </Typography>
+                            </Stack>
+                          </TableCell>
+                          <TableCell>
+                            <Chip
+                              icon={bucket.public_access ? <LockOpenIcon fontSize="small" /> : <LockIcon fontSize="small" />}
+                              label={bucket.public_access ? "Public Read" : "Private"}
                               size="small"
-                              color="error"
-                              onClick={() => setDeleteBucketTarget(bucket)}
-                            >
-                              <DeleteIcon fontSize="small" />
-                            </IconButton>
-                          </Tooltip>
-                        </TableCell>
-                      </TableRow>
-                    ))
+                              color={bucket.public_access ? "warning" : "default"}
+                              sx={{ fontWeight: 600, fontSize: "0.6875rem" }}
+                            />
+                          </TableCell>
+                          <TableCell sx={{ minWidth: 160 }}>
+                            <Box sx={{ display: "flex", justifyContent: "space-between", mb: 0.5 }}>
+                              <Typography variant="caption" sx={{ fontFamily: MONO }}>
+                                {bucket.used_formatted || "0 B"}
+                              </Typography>
+                              <Typography variant="caption" sx={{ color: "text.secondary", fontFamily: MONO }}>
+                                {bucket.quota_mb} MB ({pct}%)
+                              </Typography>
+                            </Box>
+                            <LinearProgress
+                              variant="determinate"
+                              value={pct}
+                              color={pct > 90 ? "error" : pct > 75 ? "warning" : "primary"}
+                              sx={{ height: 4, borderRadius: 2 }}
+                            />
+                          </TableCell>
+                          <TableCell sx={{ fontFamily: MONO }}>{bucket.object_count ?? 0}</TableCell>
+                          <TableCell sx={{ fontFamily: MONO, fontSize: "0.75rem", color: "text.secondary" }}>
+                            s3://{bucket.name}
+                          </TableCell>
+                          <TableCell sx={{ fontSize: "0.8125rem" }}>
+                            {formatDate(bucket.created_at)}
+                          </TableCell>
+                          <TableCell align="right">
+                            <Stack direction="row" spacing={0.5} sx={{ justifyContent: "flex-end" }}>
+                              <Button
+                                size="small"
+                                variant="outlined"
+                                onClick={() => handleStartBrowse(bucket.name)}
+                              >
+                                Browse
+                              </Button>
+                              <Tooltip title="Delete bucket">
+                                <IconButton
+                                  size="small"
+                                  color="error"
+                                  onClick={() => setDeleteBucketTarget(bucket)}
+                                >
+                                  <DeleteIcon fontSize="small" />
+                                </IconButton>
+                              </Tooltip>
+                            </Stack>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })
                   )}
                 </TableBody>
               </Table>
             </TableContainer>
-
-            <Alert severity="info" sx={{ mt: 3 }}>
-              <Typography variant="caption" sx={{ display: "block", fontWeight: 600 }}>
-                S3 Object Storage Isolation:
-              </Typography>
-              <Typography variant="caption">
-                All bucket data is strictly stored under{" "}
-                <code>/opt/hostpanel/data/storage/&lt;bucket_name&gt;</code> and managed by daemon{" "}
-                <code>{meta?.unit ?? "\u2014"}</code> (Port {meta?.port ?? "\u2014"}).
-              </Typography>
-            </Alert>
           </Box>
         )}
 
-        {/* ── Tab 3: Automated Schedules ────────────────────────────────────── */}
+        {/* ── Tab 1: Interactive Object Browser ──────────────────────────────── */}
+        {tabIndex === 1 && (
+          <Box sx={{ p: 2 }}>
+            <Stack
+              direction={{ xs: "column", sm: "row" }}
+              spacing={2}
+              sx={{ mb: 2, justifyContent: "space-between", alignItems: "center" }}
+            >
+              <Stack direction="row" spacing={1.5} sx={{ alignItems: "center" }}>
+                <FormControl size="small" sx={{ minWidth: 200 }}>
+                  <InputLabel>Bucket</InputLabel>
+                  <Select
+                    value={browsingBucket || ""}
+                    label="Bucket"
+                    onChange={(e) => {
+                      setBrowsingBucket(e.target.value);
+                      setBrowserPrefix("");
+                    }}
+                  >
+                    {buckets.map((b) => (
+                      <MenuItem key={b.name} value={b.name}>
+                        {b.name}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+
+                {browserPrefix && (
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    startIcon={<ArrowBackIcon />}
+                    onClick={() => {
+                      const parts = browserPrefix.replace(/\/$/, "").split("/");
+                      parts.pop();
+                      setBrowserPrefix(parts.length > 0 ? parts.join("/") + "/" : "");
+                    }}
+                  >
+                    Up
+                  </Button>
+                )}
+
+                <Typography variant="body2" sx={{ fontFamily: MONO, fontWeight: 600 }}>
+                  s3://{browsingBucket}/{browserPrefix}
+                </Typography>
+              </Stack>
+
+              <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  style={{ display: "none" }}
+                  onChange={handleUploadFile}
+                />
+                <Button
+                  variant="contained"
+                  size="small"
+                  startIcon={<UploadFileIcon />}
+                  disabled={!browsingBucket || uploading}
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  {uploading ? "Uploading..." : "Upload Object"}
+                </Button>
+              </Stack>
+            </Stack>
+
+            {/* Objects table */}
+            {!browsingBucket ? (
+              <Box sx={{ py: 8, textAlign: "center" }}>
+                <CloudQueueIcon sx={{ fontSize: 48, color: "text.disabled", mb: 1 }} />
+                <Typography variant="body1" sx={{ color: "text.secondary" }}>
+                  Select a bucket from the dropdown or click "Browse" on the Buckets tab.
+                </Typography>
+              </Box>
+            ) : objectsLoading ? (
+              <Box sx={{ py: 8, textAlign: "center" }}>
+                <CircularProgress size={32} />
+              </Box>
+            ) : (
+              <TableContainer>
+                <Table size="small">
+                  <TableHead>
+                    <TableRow>
+                      <TableCell sx={{ fontWeight: 600 }}>Name</TableCell>
+                      <TableCell sx={{ fontWeight: 600 }}>Size</TableCell>
+                      <TableCell sx={{ fontWeight: 600 }}>Type</TableCell>
+                      <TableCell sx={{ fontWeight: 600 }}>Access</TableCell>
+                      <TableCell sx={{ fontWeight: 600 }}>Last Modified</TableCell>
+                      <TableCell align="right" sx={{ fontWeight: 600 }}>
+                        Actions
+                      </TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {bucketObjects.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={6} align="center" sx={{ py: 6 }}>
+                          <Typography variant="body2" sx={{ color: "text.secondary", mb: 1 }}>
+                            This bucket prefix is empty.
+                          </Typography>
+                          <Button
+                            size="small"
+                            variant="outlined"
+                            startIcon={<UploadFileIcon />}
+                            onClick={() => fileInputRef.current?.click()}
+                          >
+                            Upload Object Here
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      bucketObjects.map((obj) => (
+                        <TableRow key={obj.key} hover>
+                          <TableCell>
+                            <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+                              {obj.is_dir ? (
+                                <FolderIcon fontSize="small" sx={{ color: "warning.main" }} />
+                              ) : (
+                                <InsertDriveFileIcon fontSize="small" sx={{ color: "primary.main" }} />
+                              )}
+                              {obj.is_dir ? (
+                                <Button
+                                  size="small"
+                                  sx={{ textTransform: "none", fontFamily: MONO, fontWeight: 600 }}
+                                  onClick={() => setBrowserPrefix(obj.key)}
+                                >
+                                  {obj.name}
+                                </Button>
+                              ) : (
+                                <Typography variant="body2" sx={{ fontFamily: MONO }}>
+                                  {obj.name}
+                                </Typography>
+                              )}
+                            </Stack>
+                          </TableCell>
+                          <TableCell sx={{ fontFamily: MONO }}>{obj.size_formatted}</TableCell>
+                          <TableCell sx={{ fontSize: "0.75rem", color: "text.secondary" }}>
+                            {obj.content_type}
+                          </TableCell>
+                          <TableCell>
+                            {!obj.is_dir && (
+                              <Chip
+                                label={obj.is_public ? "Public" : "Private"}
+                                size="small"
+                                color={obj.is_public ? "warning" : "default"}
+                                onClick={() => handleToggleObjectAcl(obj)}
+                                sx={{ cursor: "pointer", fontWeight: 600, fontSize: "0.6875rem" }}
+                              />
+                            )}
+                          </TableCell>
+                          <TableCell sx={{ fontSize: "0.8125rem" }}>
+                            {formatDate(obj.last_modified)}
+                          </TableCell>
+                          <TableCell align="right">
+                            {!obj.is_dir && (
+                              <Stack direction="row" spacing={0.5} sx={{ justifyContent: "flex-end" }}>
+                                <Tooltip title="Download">
+                                  <IconButton
+                                    size="small"
+                                    onClick={() => {
+                                      window.open(
+                                        `/api/packages/storage/buckets/${browsingBucket}/objects/download?key=${encodeURIComponent(obj.key)}`,
+                                        "_blank",
+                                      );
+                                    }}
+                                  >
+                                    <DownloadIcon fontSize="small" />
+                                  </IconButton>
+                                </Tooltip>
+                                <Tooltip title="Share Presigned Link">
+                                  <IconButton
+                                    size="small"
+                                    color="primary"
+                                    onClick={() => {
+                                      setPresignTarget({ bucket: browsingBucket, key: obj.key });
+                                      setGeneratedPresignUrl(null);
+                                    }}
+                                  >
+                                    <ShareIcon fontSize="small" />
+                                  </IconButton>
+                                </Tooltip>
+                                <Tooltip title="Delete">
+                                  <IconButton
+                                    size="small"
+                                    color="error"
+                                    onClick={() => setDeleteObjectTarget(obj.key)}
+                                  >
+                                    <DeleteIcon fontSize="small" />
+                                  </IconButton>
+                                </Tooltip>
+                              </Stack>
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      ))
+                    )}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+            )}
+          </Box>
+        )}
+
+        {/* ── Tab 2: S3 Access Keys ──────────────────────────────────────────── */}
         {tabIndex === 2 && (
           <Box sx={{ p: 2 }}>
             <Stack
-              direction="row"
+              direction={{ xs: "column", sm: "row" }}
+              spacing={2}
               sx={{ mb: 2, justifyContent: "space-between", alignItems: "center" }}
             >
               <Typography variant="body2" sx={{ color: "text.secondary" }}>
-                Automated backup snapshots running via cron with retention pruning and remote replication.
+                Access Key IDs and Secret Access Keys for AWS CLI, Boto3, and S3-compatible clients.
               </Typography>
               <Button
                 variant="contained"
                 size="small"
-                startIcon={<ScheduleIcon />}
+                startIcon={<AddIcon />}
                 onClick={() => {
-                  setScheduleName(`schedule-${schedules.length + 1}`);
-                  setScheduleModalOpen(true);
+                  setCreatedKeySecret(null);
+                  setCreateKeyOpen(true);
                 }}
               >
-                Set Schedule
+                Create Access Key
               </Button>
             </Stack>
 
@@ -964,89 +960,88 @@ function StoragePageBody({ ctx }: { ctx: PackageContext }) {
               <Table size="small">
                 <TableHead>
                   <TableRow>
-                    <TableCell sx={{ fontWeight: 600 }}>Schedule Name</TableCell>
-                    <TableCell sx={{ fontWeight: 600 }}>Frequency / Cron</TableCell>
-                    <TableCell sx={{ fontWeight: 600 }}>Targets</TableCell>
-                    <TableCell sx={{ fontWeight: 600 }}>Retention Policy</TableCell>
-                    <TableCell sx={{ fontWeight: 600 }}>Destination</TableCell>
+                    <TableCell sx={{ fontWeight: 600 }}>Access Key ID</TableCell>
+                    <TableCell sx={{ fontWeight: 600 }}>Label</TableCell>
+                    <TableCell sx={{ fontWeight: 600 }}>Scope / Bucket</TableCell>
                     <TableCell sx={{ fontWeight: 600 }}>Status</TableCell>
+                    <TableCell sx={{ fontWeight: 600 }}>Created</TableCell>
                     <TableCell align="right" sx={{ fontWeight: 600 }}>
                       Actions
                     </TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
-                  {schedules.length === 0 ? (
+                  {accessKeys.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={7} align="center" sx={{ py: 6 }}>
+                      <TableCell colSpan={6} align="center" sx={{ py: 6 }}>
                         <Typography variant="body2" sx={{ color: "text.secondary", mb: 1 }}>
-                          No automated schedules configured.
+                          No S3 access keys created yet.
                         </Typography>
                         <Button
                           variant="outlined"
                           size="small"
-                          startIcon={<ScheduleIcon />}
-                          onClick={() => setScheduleModalOpen(true)}
+                          startIcon={<AddIcon />}
+                          onClick={() => setCreateKeyOpen(true)}
                         >
-                          Configure Daily Snapshot Schedule
+                          Generate First Key Pair
                         </Button>
                       </TableCell>
                     </TableRow>
                   ) : (
-                    schedules.map((sched) => (
-                      <TableRow key={sched.name} hover>
-                        <TableCell sx={{ fontWeight: 600 }}>{sched.name}</TableCell>
+                    accessKeys.map((k) => (
+                      <TableRow key={k.access_key} hover>
                         <TableCell>
-                          <Typography variant="body2" sx={{ fontFamily: MONO }}>
-                            {sched.cron}
-                          </Typography>
-                          <Typography variant="caption" sx={{ color: "text.disabled" }}>
-                            {sched.cron === "0 2 * * *"
-                              ? "Daily at 02:00 UTC"
-                              : sched.cron === "0 3 * * 0"
-                              ? "Weekly on Sunday at 03:00 UTC"
-                              : "Custom cron schedule"}
-                          </Typography>
+                          <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+                            <Typography variant="body2" sx={{ fontFamily: MONO, fontWeight: 600 }}>
+                              {k.access_key}
+                            </Typography>
+                            <IconButton
+                              size="small"
+                              onClick={() => copyToClipboard(k.access_key)}
+                            >
+                              <ContentCopyIcon fontSize="inherit" />
+                            </IconButton>
+                          </Stack>
                         </TableCell>
+                        <TableCell>{k.label || "\u2014"}</TableCell>
                         <TableCell>
-                          <Chip label={sched.targets || "all"} size="small" variant="outlined" />
-                        </TableCell>
-                        <TableCell sx={{ fontFamily: MONO, fontSize: "0.8125rem" }}>
-                          Keep {sched.retention_days} days
+                          {k.bucket_name ? (
+                            <Chip label={k.bucket_name} size="small" variant="outlined" />
+                          ) : (
+                            <Chip label="All Buckets" size="small" color="primary" variant="outlined" />
+                          )}
                         </TableCell>
                         <TableCell>
                           <Chip
-                            label={sched.destination.toUpperCase()}
+                            label={k.status === "active" ? "Active" : "Disabled"}
                             size="small"
-                            color={
-                              sched.destination === "local"
-                                ? "default"
-                                : sched.destination === "s3"
-                                ? "primary"
-                                : "secondary"
-                            }
+                            color={k.status === "active" ? "success" : "default"}
                             sx={{ fontWeight: 600, fontSize: "0.6875rem" }}
                           />
                         </TableCell>
-                        <TableCell>
-                          <Chip
-                            icon={<Dot ok={sched.enabled} size={6} />}
-                            label={sched.enabled ? "Active" : "Disabled"}
-                            size="small"
-                            variant="outlined"
-                            sx={{ fontSize: "0.6875rem" }}
-                          />
+                        <TableCell sx={{ fontSize: "0.8125rem" }}>
+                          {formatDate(k.created_at)}
                         </TableCell>
                         <TableCell align="right">
-                          <Tooltip title="Delete schedule">
-                            <IconButton
+                          <Stack direction="row" spacing={0.5} sx={{ justifyContent: "flex-end" }}>
+                            <Button
                               size="small"
-                              color="error"
-                              onClick={() => setDeleteScheduleTarget(sched)}
+                              variant="outlined"
+                              color={k.status === "active" ? "warning" : "success"}
+                              onClick={() => handleToggleKeyStatus(k)}
                             >
-                              <DeleteIcon fontSize="small" />
-                            </IconButton>
-                          </Tooltip>
+                              {k.status === "active" ? "Disable" : "Enable"}
+                            </Button>
+                            <Tooltip title="Delete key">
+                              <IconButton
+                                size="small"
+                                color="error"
+                                onClick={() => setDeleteKeyTarget(k)}
+                              >
+                                <DeleteIcon fontSize="small" />
+                              </IconButton>
+                            </Tooltip>
+                          </Stack>
                         </TableCell>
                       </TableRow>
                     ))
@@ -1057,571 +1052,432 @@ function StoragePageBody({ ctx }: { ctx: PackageContext }) {
           </Box>
         )}
 
-        {/* ── Tab 4: Disk Usage Visualizer ──────────────────────────────────── */}
+        {/* ── Tab 3: Connection Guide ────────────────────────────────────────── */}
         {tabIndex === 3 && (
-          <Box sx={{ p: PANEL_PAD }}>
-            <Stack spacing={3}>
+          <Box sx={{ p: 2 }}>
+            <Box sx={{ mb: 2 }}>
+              <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 0.5 }}>
+                S3 Client Integration Details:
+              </Typography>
+              <Paper variant="outlined" sx={{ p: 1.5, bgcolor: "background.default", fontFamily: MONO, fontSize: "0.8125rem" }}>
+                <Box>Endpoint URL: <strong>{meta?.s3_endpoint ?? "http://<server-ip>:9000"}</strong></Box>
+                <Box>Region: <strong>us-east-1</strong></Box>
+                <Box>Protocol: <strong>HTTP / AWS SigV4</strong></Box>
+              </Paper>
+            </Box>
+
+            <Tabs
+              value={guideTab}
+              onChange={(_, v) => setGuideTab(v)}
+              sx={{ borderBottom: 1, borderColor: "divider", mb: 2 }}
+            >
+              <Tab label="AWS CLI" />
+              <Tab label="Python (boto3)" />
+              <Tab label="Node.js (AWS SDK v3)" />
+              <Tab label="PHP / Laravel" />
+              <Tab label="Cyberduck / Rclone" />
+            </Tabs>
+
+            {guideTab === 0 && (
               <Box>
-                <Typography variant="subtitle1" sx={{ fontWeight: 700, mb: 1 }}>
-                  HostPanel Storage Breakdown (/opt/hostpanel)
+                <Typography variant="caption" sx={{ color: "text.secondary", display: "block", mb: 1 }}>
+                  Configure your AWS CLI to talk to this HostPanel S3 storage instance:
                 </Typography>
-                <Typography variant="body2" sx={{ color: "text.secondary", mb: 2 }}>
-                  Visual breakdown of storage usage across isolated directories under /opt/hostpanel.
-                </Typography>
+                <Paper sx={{ p: 2, bgcolor: "#0d1117", color: "#c9d1d9", fontFamily: MONO, fontSize: "0.8125rem", overflowX: "auto" }}>
+                  <pre style={{ margin: 0 }}>
+{`# 1. Configure credentials
+aws configure set aws_access_key_id YOUR_ACCESS_KEY
+aws configure set aws_secret_access_key YOUR_SECRET_KEY
+aws configure set default.region us-east-1
 
-                {diskUsage && (
-                  <Paper sx={{ p: 2, mb: 3, bgcolor: "background.default" }}>
-                    <Stack
-                      direction={{ xs: "column", sm: "row" }}
-                      spacing={3}
-                      sx={{ justifyContent: "space-between", mb: 2 }}
-                    >
-                      <Readout
-                        label="TOTAL DISK CAPACITY"
-                        value={formatBytes(diskUsage.total_bytes)}
-                      />
-                      <Readout
-                        label="TOTAL USED SPACE"
-                        value={formatBytes(diskUsage.used_bytes)}
-                      />
-                      <Readout
-                        label="FREE AVAILABLE SPACE"
-                        value={formatBytes(diskUsage.free_bytes)}
-                      />
-                    </Stack>
-                    <LinearProgress
-                      variant="determinate"
-                      value={Math.min(
-                        100,
-                        (diskUsage.used_bytes / (diskUsage.total_bytes || 1)) * 100,
-                      )}
-                      sx={{ height: 8, borderRadius: 4 }}
-                    />
-                  </Paper>
-                )}
+# 2. List buckets
+aws --endpoint-url ${meta?.s3_endpoint ?? "http://<server-ip>:9000"} s3 ls
+
+# 3. Copy files to bucket
+aws --endpoint-url ${meta?.s3_endpoint ?? "http://<server-ip>:9000"} s3 cp ./file.txt s3://${buckets[0]?.name ?? "my-bucket"}/`}
+                  </pre>
+                </Paper>
               </Box>
+            )}
 
-              <Stack spacing={2}>
-                {(diskUsage?.breakdown ?? [
-                  { category: "websites", path: "/opt/hostpanel/data/vhosts", size_bytes: 5242880000 },
-                  { category: "databases", path: "/opt/hostpanel/data", size_bytes: 3145728000 },
-                  { category: "storage", path: "/opt/hostpanel/data/storage", size_bytes: 2097152000 },
-                  { category: "backups", path: "/opt/hostpanel/data/backups", size_bytes: 2621440000 },
-                  { category: "logs", path: "/opt/hostpanel/logs", size_bytes: 524288000 },
-                  { category: "runtimes", path: "/opt/hostpanel/runtimes", size_bytes: 568512000 },
-                ]).map((item) => {
-                  const percent = diskUsage?.used_bytes
-                    ? ((item.size_bytes / diskUsage.used_bytes) * 100).toFixed(1)
-                    : "0";
-                  return (
-                    <Paper key={item.category} sx={{ p: 2 }}>
-                      <Stack
-                        direction="row"
-                        sx={{ justifyContent: "space-between", alignItems: "center", mb: 1 }}
-                      >
-                        <Box>
-                          <Typography variant="body2" sx={{ fontWeight: 700, textTransform: "capitalize" }}>
-                            {item.category}
-                          </Typography>
-                          <Typography
-                            variant="caption"
-                            sx={{ fontFamily: MONO, color: "text.disabled" }}
-                          >
-                            {item.path}
-                          </Typography>
-                        </Box>
-                        <Stack direction="row" spacing={2} sx={{ alignItems: "center" }}>
-                          <Typography variant="body2" sx={{ fontWeight: 600, fontFamily: MONO }}>
-                            {formatBytes(item.size_bytes)}
-                          </Typography>
-                          <Chip
-                            label={`${percent}%`}
-                            size="small"
-                            variant="outlined"
-                            sx={{ fontFamily: MONO, fontSize: "0.75rem" }}
-                          />
-                        </Stack>
-                      </Stack>
-                      <LinearProgress
-                        variant="determinate"
-                        value={parseFloat(percent) || 0}
-                        sx={{ height: 6, borderRadius: 3 }}
-                      />
-                    </Paper>
-                  );
-                })}
-              </Stack>
-            </Stack>
+            {guideTab === 1 && (
+              <Box>
+                <Typography variant="caption" sx={{ color: "text.secondary", display: "block", mb: 1 }}>
+                  Use Python's boto3 library to connect to HostPanel S3:
+                </Typography>
+                <Paper sx={{ p: 2, bgcolor: "#0d1117", color: "#c9d1d9", fontFamily: MONO, fontSize: "0.8125rem", overflowX: "auto" }}>
+                  <pre style={{ margin: 0 }}>
+{`import boto3
+
+s3 = boto3.client(
+    "s3",
+    endpoint_url="${meta?.s3_endpoint ?? "http://<server-ip>:9000"}",
+    aws_access_key_id="YOUR_ACCESS_KEY",
+    aws_secret_access_key="YOUR_SECRET_KEY",
+    region_name="us-east-1",
+)
+
+# Upload file
+s3.upload_file("photo.jpg", "${buckets[0]?.name ?? "my-bucket"}", "uploads/photo.jpg")
+
+# List objects
+response = s3.list_objects_v2(Bucket="${buckets[0]?.name ?? "my-bucket"}")
+for item in response.get("Contents", []):
+    print(item["Key"], item["Size"])`}
+                  </pre>
+                </Paper>
+              </Box>
+            )}
+
+            {guideTab === 2 && (
+              <Box>
+                <Typography variant="caption" sx={{ color: "text.secondary", display: "block", mb: 1 }}>
+                  Connect using @aws-sdk/client-s3 for Node.js / TypeScript:
+                </Typography>
+                <Paper sx={{ p: 2, bgcolor: "#0d1117", color: "#c9d1d9", fontFamily: MONO, fontSize: "0.8125rem", overflowX: "auto" }}>
+                  <pre style={{ margin: 0 }}>
+{`import { S3Client, ListObjectsV2Command, PutObjectCommand } from "@aws-sdk/client-s3";
+
+const client = new S3Client({
+  endpoint: "${meta?.s3_endpoint ?? "http://<server-ip>:9000"}",
+  region: "us-east-1",
+  credentials: {
+    accessKeyId: "YOUR_ACCESS_KEY",
+    secretAccessKey: "YOUR_SECRET_KEY",
+  },
+  forcePathStyle: true,
+});
+
+// List bucket contents
+const res = await client.send(new ListObjectsV2Command({ Bucket: "${buckets[0]?.name ?? "my-bucket"}" }));
+console.log(res.Contents);`}
+                  </pre>
+                </Paper>
+              </Box>
+            )}
+
+            {guideTab === 3 && (
+              <Box>
+                <Typography variant="caption" sx={{ color: "text.secondary", display: "block", mb: 1 }}>
+                  Add this disk configuration in Laravel <code>config/filesystems.php</code>:
+                </Typography>
+                <Paper sx={{ p: 2, bgcolor: "#0d1117", color: "#c9d1d9", fontFamily: MONO, fontSize: "0.8125rem", overflowX: "auto" }}>
+                  <pre style={{ margin: 0 }}>
+{`'hostpanel_s3' => [
+    'driver' => 's3',
+    'key' => env('AWS_ACCESS_KEY_ID'),
+    'secret' => env('AWS_SECRET_ACCESS_KEY'),
+    'region' => 'us-east-1',
+    'bucket' => '${buckets[0]?.name ?? "my-bucket"}',
+    'endpoint' => '${meta?.s3_endpoint ?? "http://<server-ip>:9000"}',
+    'use_path_style_endpoint' => true,
+    'throw' => true,
+],`}
+                  </pre>
+                </Paper>
+              </Box>
+            )}
+
+            {guideTab === 4 && (
+              <Box>
+                <Typography variant="caption" sx={{ color: "text.secondary", display: "block", mb: 1 }}>
+                  Rclone configuration snippet (<code>~/.config/rclone/rclone.conf</code>):
+                </Typography>
+                <Paper sx={{ p: 2, bgcolor: "#0d1117", color: "#c9d1d9", fontFamily: MONO, fontSize: "0.8125rem", overflowX: "auto" }}>
+                  <pre style={{ margin: 0 }}>
+{`[hostpanel-s3]
+type = s3
+provider = Other
+env_auth = false
+access_key_id = YOUR_ACCESS_KEY
+secret_access_key = YOUR_SECRET_KEY
+endpoint = ${meta?.s3_endpoint ?? "http://<server-ip>:9000"}
+acl = private`}
+                  </pre>
+                </Paper>
+              </Box>
+            )}
           </Box>
         )}
 
-        {/* ── Tab 5: Service & Isolation ────────────────────────────────────── */}
+        {/* ── Tab 4: Settings & Service ──────────────────────────────────────── */}
         {tabIndex === 4 && (
-          <Box sx={{ p: PANEL_PAD }}>
-            <Stack spacing={3}>
-              <Box>
-                <Typography variant="subtitle1" sx={{ fontWeight: 700, mb: 1 }}>
-                  100% Strict Filesystem Isolation Under /opt/hostpanel
-                </Typography>
-                <Typography variant="body2" sx={{ color: "text.secondary", mb: 2 }}>
-                  All storage assets, backup archives, configs, logs, and sockets live strictly under /opt/hostpanel.
-                  Never in /var/backups, /etc, or /tmp.
-                </Typography>
-              </Box>
-
-              <TableContainer component={Paper}>
-                <Table size="small">
-                  <TableHead>
-                    <TableRow>
-                      <TableCell sx={{ fontWeight: 600 }}>Asset Classification</TableCell>
-                      <TableCell sx={{ fontWeight: 600 }}>Strict Isolated Path</TableCell>
-                      <TableCell sx={{ fontWeight: 600 }}>Status / Security Constraint</TableCell>
-                    </TableRow>
-                  </TableHead>
-                  <TableBody>
-                    <TableRow>
-                      <TableCell sx={{ fontWeight: 600 }}>S3 Object Storage</TableCell>
-                      <TableCell sx={{ fontFamily: MONO }}>/opt/hostpanel/data/storage</TableCell>
-                      <TableCell>
-                        <Chip
-                          icon={<CheckCircleIcon fontSize="small" />}
-                          label={`${meta?.run_as ?? "service"} owned`}
-                          size="small"
-                          color="success"
-                          variant="outlined"
-                        />
-                      </TableCell>
-                    </TableRow>
-                    <TableRow>
-                      <TableCell sx={{ fontWeight: 600 }}>Backup Snapshots</TableCell>
-                      <TableCell sx={{ fontFamily: MONO }}>/opt/hostpanel/data/backups</TableCell>
-                      <TableCell>
-                        <Chip
-                          icon={<CheckCircleIcon fontSize="small" />}
-                          label="tar.zst / tar.gz only"
-                          size="small"
-                          color="success"
-                          variant="outlined"
-                        />
-                      </TableCell>
-                    </TableRow>
-                    <TableRow>
-                      <TableCell sx={{ fontWeight: 600 }}>Configuration & Schedules</TableCell>
-                      <TableCell sx={{ fontFamily: MONO }}>/opt/hostpanel/etc/storage</TableCell>
-                      <TableCell>
-                        <Chip
-                          icon={<CheckCircleIcon fontSize="small" />}
-                          label="Atomic JSON Store"
-                          size="small"
-                          color="success"
-                          variant="outlined"
-                        />
-                      </TableCell>
-                    </TableRow>
-                    <TableRow>
-                      <TableCell sx={{ fontWeight: 600 }}>Service Logs</TableCell>
-                      <TableCell sx={{ fontFamily: MONO }}>/opt/hostpanel/logs/storage</TableCell>
-                      <TableCell>
-                        <Chip
-                          icon={<CheckCircleIcon fontSize="small" />}
-                          label="Isolated logs"
-                          size="small"
-                          color="success"
-                          variant="outlined"
-                        />
-                      </TableCell>
-                    </TableRow>
-                    <TableRow>
-                      <TableCell sx={{ fontWeight: 600 }}>Runtime Sockets & PIDs</TableCell>
-                      <TableCell sx={{ fontFamily: MONO }}>/opt/hostpanel/run/storage</TableCell>
-                      <TableCell>
-                        <Chip
-                          icon={<CheckCircleIcon fontSize="small" />}
-                          label="Isolated run"
-                          size="small"
-                          color="success"
-                          variant="outlined"
-                        />
-                      </TableCell>
-                    </TableRow>
-                  </TableBody>
-                </Table>
-              </TableContainer>
-
-              <Panel label="Daemon & Sandbox Specifications">
-                <Stack spacing={2} sx={{ p: 2 }}>
-                  <Stack direction={{ xs: "column", sm: "row" }} spacing={3}>
-                    <Readout label="DAEMON UNIT" value={meta?.unit ?? "\u2014"} />
-                    <Readout label="PORT" value={meta?.port ? `${meta.port} (${meta.host} loopback only)` : "\u2014"} />
-                    <Readout label="SERVICE USER" value={meta?.run_as ?? "\u2014"} />
-                    <Readout label="OPS SCRIPT" value={meta?.ops_script ?? "\u2014"} />
-                  </Stack>
-                  <Stack direction={{ xs: "column", sm: "row" }} spacing={3}>
-                    <Readout label="SANDBOX POLICY" value="ProtectSystem=strict" />
-                    <Readout label="PRIVILEGES" value="NoNewPrivileges=no" />
-                    <Readout label="PERSISTENCE" value="SQLite / JSON (No /var pollution)" />
-                  </Stack>
+          <Box sx={{ p: 2 }}>
+            <Stack spacing={3} sx={{ maxWidth: 640 }}>
+              <Panel label="S3 Protocol Server Configuration">
+                <Stack spacing={2}>
+                  <TextField
+                    size="small"
+                    label="S3 REST Port"
+                    value={meta?.s3_port ?? 9000}
+                    helperText="Standard port for incoming AWS S3 REST API calls (Default: 9000)"
+                    disabled
+                  />
+                  <TextField
+                    size="small"
+                    label="Data Storage Root Path"
+                    value={meta?.storage_root ?? "/opt/hostpanel/data/storage/buckets"}
+                    helperText="Enforces 100% HostPanel isolation under /opt/hostpanel"
+                    disabled
+                  />
                 </Stack>
+              </Panel>
+
+              <Panel label="System Isolation & Architecture">
+                <Typography variant="body2" sx={{ color: "text.secondary", mb: 1 }}>
+                  HostPanel Object Storage is 100% self-contained. All buckets and metadata are stored exclusively within:
+                </Typography>
+                <Box component="ul" sx={{ pl: 2, m: 0, fontSize: "0.8125rem", fontFamily: MONO }}>
+                  <li>Buckets Directory: /opt/hostpanel/data/storage/buckets/</li>
+                  <li>SQLite Database: /opt/hostpanel/data/hostpanel.db</li>
+                  <li>Daemon Service: hostpanel-storaged.service (hp-storage)</li>
+                  <li>S3 Protocol: AWS SigV4 Native on port {meta?.s3_port ?? 9000}</li>
+                </Box>
               </Panel>
             </Stack>
           </Box>
         )}
       </Paper>
 
-      {/* ── Modal: Create Snapshot ─────────────────────────────────────────── */}
-      <Dialog
-        open={createSnapshotOpen}
-        onClose={() => setCreateSnapshotOpen(false)}
-        maxWidth="sm"
-        fullWidth
-      >
-        <DialogTitle>Create Backup Snapshot</DialogTitle>
-        <DialogContent>
-          <DialogContentText sx={{ mb: 2 }}>
-            Creates a compressed snapshot archive of selected HostPanel components directly under /opt/hostpanel/data/backups/.
-          </DialogContentText>
-          <Stack spacing={2}>
-            <Field label="Snapshot Name (Optional)" hint="e.g. pre-upgrade-snap">
-              <TextField
-                fullWidth
-                size="small"
-                placeholder="Leave blank for auto timestamp"
-                value={snapshotName}
-                onChange={(e) => setSnapshotName(e.target.value)}
-              />
-            </Field>
-
-            <Field label="Components to Back Up">
-              <FormGroup row>
-                <FormControlLabel
-                  control={
-                    <Checkbox
-                      checked={targetWebsites}
-                      onChange={(e) => setTargetWebsites(e.target.checked)}
-                    />
-                  }
-                  label="Websites (/data/vhosts)"
-                />
-                <FormControlLabel
-                  control={
-                    <Checkbox
-                      checked={targetDatabases}
-                      onChange={(e) => setTargetDatabases(e.target.checked)}
-                    />
-                  }
-                  label="Databases (/data)"
-                />
-                <FormControlLabel
-                  control={
-                    <Checkbox
-                      checked={targetConfigs}
-                      onChange={(e) => setTargetConfigs(e.target.checked)}
-                    />
-                  }
-                  label="Configuration (/etc)"
-                />
-              </FormGroup>
-            </Field>
-
-            <Field label="Storage Destination">
-              <RadioGroup
-                row
-                value={snapshotDest}
-                onChange={(e) => setSnapshotDest(e.target.value as any)}
-              >
-                <FormControlLabel value="local" control={<Radio size="small" />} label="Local (/data/backups)" />
-                <FormControlLabel value="s3" control={<Radio size="small" />} label="AWS S3" />
-                <FormControlLabel value="r2" control={<Radio size="small" />} label="Cloudflare R2" />
-              </RadioGroup>
-            </Field>
-
-            <Field label="Compression Algorithm">
-              <Select
-                size="small"
-                value={snapshotComp}
-                onChange={(e) => setSnapshotComp(e.target.value as any)}
-                fullWidth
-              >
-                <MenuItem value="zstd">Zstandard (.tar.zst) - Recommended: High speed & compression</MenuItem>
-                <MenuItem value="gzip">Gzip (.tar.gz) - Universal compatibility</MenuItem>
-                <MenuItem value="none">None (.tar) - Uncompressed</MenuItem>
-              </Select>
-            </Field>
-          </Stack>
-        </DialogContent>
-        <DialogActions sx={{ px: 3, pb: 2 }}>
-          <Button onClick={() => setCreateSnapshotOpen(false)}>Cancel</Button>
-          <Button
-            variant="contained"
-            onClick={() => {
-              setCreateSnapshotOpen(false);
-              handleCreateSnapshot();
-            }}
-          >
-            Start Snapshot
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      {/* ── Modal: Restore Snapshot Confirmation ───────────────────────────── */}
-      <Dialog
-        open={Boolean(restoreTarget)}
-        onClose={() => setRestoreTarget(null)}
-        maxWidth="xs"
-        fullWidth
-      >
-        <DialogTitle>Restore Snapshot?</DialogTitle>
-        <DialogContent>
-          <DialogContentText>
-            Are you sure you want to restore snapshot{" "}
-            <strong>{restoreTarget?.name || restoreTarget?.id}</strong>? Existing files
-            in target directories will be updated to match the snapshot state.
-          </DialogContentText>
-        </DialogContent>
-        <DialogActions sx={{ px: 3, pb: 2 }}>
-          <Button onClick={() => setRestoreTarget(null)}>Cancel</Button>
-          <Button
-            variant="contained"
-            color="primary"
-            onClick={() => {
-              handleRestoreSnapshot();
-              setRestoreTarget(null);
-            }}
-          >
-            Restore Payload
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      {/* ── Modal: Delete Snapshot Confirmation ────────────────────────────── */}
-      <Dialog
-        open={Boolean(deleteBackupTarget)}
-        onClose={() => setDeleteBackupTarget(null)}
-        maxWidth="xs"
-        fullWidth
-      >
-        <DialogTitle>Delete Snapshot?</DialogTitle>
-        <DialogContent>
-          <DialogContentText>
-            Are you sure you want to permanently delete snapshot{" "}
-            <strong>{deleteBackupTarget?.name || deleteBackupTarget?.id}</strong>?
-          </DialogContentText>
-        </DialogContent>
-        <DialogActions sx={{ px: 3, pb: 2 }}>
-          <Button onClick={() => setDeleteBackupTarget(null)}>Cancel</Button>
-          <Button
-            variant="contained"
-            color="error"
-            onClick={handleDeleteSnapshot}
-          >
-            Delete Snapshot
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      {/* ── Modal: New S3 Bucket ───────────────────────────────────────────── */}
-      <Dialog
-        open={newBucketOpen}
-        onClose={() => setNewBucketOpen(false)}
-        maxWidth="xs"
-        fullWidth
-      >
+      {/* ── Modal: Create Bucket ───────────────────────────────────────────── */}
+      <Dialog open={createBucketOpen} onClose={() => setCreateBucketOpen(false)} maxWidth="xs" fullWidth>
         <DialogTitle>Create S3 Bucket</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
-            <Field label="Bucket Name" hint="lowercase alphanumeric and hyphens">
-              <TextField
-                fullWidth
-                size="small"
-                placeholder="my-app-assets"
-                value={newBucketName}
-                onChange={(e) => setNewBucketName(e.target.value.toLowerCase())}
-              />
-            </Field>
-            <Field label="Access Policy">
-              <Select
-                size="small"
-                value={newBucketPolicy}
-                onChange={(e) => setNewBucketPolicy(e.target.value as any)}
-                fullWidth
-              >
-                <MenuItem value="private">Private (Default)</MenuItem>
-                <MenuItem value="public-read">Public Read (Static Assets)</MenuItem>
-                <MenuItem value="authenticated-read">Authenticated Read</MenuItem>
-              </Select>
-            </Field>
+            <TextField
+              size="small"
+              label="Bucket Name"
+              placeholder="e.g. static-assets"
+              value={newBucketName}
+              onChange={(e) => setNewBucketName(e.target.value.toLowerCase().replace(/[^a-z0-9.-]/g, ""))}
+              helperText="Only lowercase letters, numbers, hyphens, and periods."
+              fullWidth
+            />
+            <TextField
+              size="small"
+              type="number"
+              label="Storage Quota (MB)"
+              value={newBucketQuota}
+              onChange={(e) => setNewBucketQuota(Number(e.target.value))}
+              helperText="Maximum allowed storage size for this bucket (e.g. 5120 MB = 5 GB)"
+              fullWidth
+            />
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={newBucketPublic}
+                  onChange={(e) => setNewBucketPublic(e.target.checked)}
+                />
+              }
+              label={
+                <Box>
+                  <Typography variant="body2" sx={{ fontWeight: 600 }}>Public Read Access</Typography>
+                  <Typography variant="caption" sx={{ color: "text.secondary" }}>
+                    Allow anonymous read access without AWS signature.
+                  </Typography>
+                </Box>
+              }
+            />
           </Stack>
         </DialogContent>
-        <DialogActions sx={{ px: 3, pb: 2 }}>
-          <Button onClick={() => setNewBucketOpen(false)}>Cancel</Button>
-          <Button variant="contained" onClick={handleCreateBucket}>
+        <DialogActions>
+          <Button onClick={() => setCreateBucketOpen(false)}>Cancel</Button>
+          <Button variant="contained" onClick={handleCreateBucket} disabled={!newBucketName.trim()}>
             Create Bucket
           </Button>
         </DialogActions>
       </Dialog>
 
-      {/* ── Modal: Delete Bucket Confirmation ──────────────────────────────── */}
-      <Dialog
-        open={Boolean(deleteBucketTarget)}
-        onClose={() => setDeleteBucketTarget(null)}
-        maxWidth="xs"
-        fullWidth
-      >
-        <DialogTitle>Delete Bucket?</DialogTitle>
+      {/* ── Modal: Delete Bucket ───────────────────────────────────────────── */}
+      <Dialog open={!!deleteBucketTarget} onClose={() => setDeleteBucketTarget(null)}>
+        <DialogTitle>Delete S3 Bucket</DialogTitle>
         <DialogContent>
           <DialogContentText>
-            Are you sure you want to permanently delete bucket{" "}
-            <strong>{deleteBucketTarget?.name}</strong> and all its objects?
+            Are you sure you want to delete bucket <strong>{deleteBucketTarget?.name}</strong>?
+            This will permanently remove all stored files and records inside this bucket!
           </DialogContentText>
         </DialogContent>
-        <DialogActions sx={{ px: 3, pb: 2 }}>
+        <DialogActions>
           <Button onClick={() => setDeleteBucketTarget(null)}>Cancel</Button>
-          <Button variant="contained" color="error" onClick={handleDeleteBucket}>
+          <Button color="error" variant="contained" onClick={handleDeleteBucket}>
             Delete Bucket
           </Button>
         </DialogActions>
       </Dialog>
 
-      {/* ── Modal: Set Schedule ────────────────────────────────────────────── */}
-      <Dialog
-        open={scheduleModalOpen}
-        onClose={() => setScheduleModalOpen(false)}
-        maxWidth="sm"
-        fullWidth
-      >
-        <DialogTitle>Set Automated Backup Schedule</DialogTitle>
+      {/* ── Modal: Create Access Key ───────────────────────────────────────── */}
+      <Dialog open={createKeyOpen} onClose={() => setCreateKeyOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Create S3 Access Key</DialogTitle>
         <DialogContent>
-          <Stack spacing={2} sx={{ mt: 1 }}>
-            <Field label="Schedule Name" hint="alphanumeric identifier">
+          {!createdKeySecret ? (
+            <Stack spacing={2} sx={{ mt: 1 }}>
               <TextField
-                fullWidth
                 size="small"
-                placeholder="daily-full-backup"
-                value={scheduleName}
-                onChange={(e) => setScheduleName(e.target.value)}
+                label="Key Label / Description"
+                placeholder="e.g. WordPress Uploads, Nextcloud Key"
+                value={keyLabel}
+                onChange={(e) => setKeyLabel(e.target.value)}
+                fullWidth
               />
-            </Field>
-
-            <Field label="Frequency Preset">
-              <Select
-                size="small"
-                value={schedulePreset}
-                onChange={(e) => {
-                  const p = e.target.value;
-                  setSchedulePreset(p);
-                  if (p === "daily") setScheduleCron("0 2 * * *");
-                  if (p === "weekly") setScheduleCron("0 3 * * 0");
-                  if (p === "monthly") setScheduleCron("0 4 1 * *");
-                }}
-                fullWidth
-              >
-                <MenuItem value="daily">Daily at 02:00 UTC (0 2 * * *)</MenuItem>
-                <MenuItem value="weekly">Weekly on Sunday at 03:00 UTC (0 3 * * 0)</MenuItem>
-                <MenuItem value="monthly">Monthly on 1st at 04:00 UTC (0 4 1 * *)</MenuItem>
-                <MenuItem value="custom">Custom Cron Expression</MenuItem>
-              </Select>
-            </Field>
-
-            {schedulePreset === "custom" && (
-              <Field label="Cron Expression" hint="minute hour day month weekday">
-                <TextField
-                  fullWidth
-                  size="small"
-                  value={scheduleCron}
-                  onChange={(e) => setScheduleCron(e.target.value)}
-                  placeholder="0 2 * * *"
-                  sx={{ fontFamily: MONO }}
-                />
-              </Field>
-            )}
-
-            <Field label="Backup Targets">
-              <Select
-                size="small"
-                value={scheduleTargets}
-                onChange={(e) => setScheduleTargets(e.target.value)}
-                fullWidth
-              >
-                <MenuItem value="all">All Components (Websites, Databases, Configs)</MenuItem>
-                <MenuItem value="websites">Websites Only</MenuItem>
-                <MenuItem value="databases">Databases Only</MenuItem>
-                <MenuItem value="configs">Configurations Only</MenuItem>
-              </Select>
-            </Field>
-
-            <Field label="Retention Period (Days)" hint="Automatically prune older snapshots">
-              <TextField
-                type="number"
-                fullWidth
-                size="small"
-                value={scheduleRetention}
-                onChange={(e) => setScheduleRetention(parseInt(e.target.value, 10) || 7)}
-              />
-            </Field>
-
-            <Field label="Replication Destination">
-              <RadioGroup
-                row
-                value={scheduleDest}
-                onChange={(e) => setScheduleDest(e.target.value as any)}
-              >
-                <FormControlLabel value="local" control={<Radio size="small" />} label="Local Storage" />
-                <FormControlLabel value="s3" control={<Radio size="small" />} label="AWS S3" />
-                <FormControlLabel value="r2" control={<Radio size="small" />} label="Cloudflare R2" />
-              </RadioGroup>
-            </Field>
-
-            <Field label="Schedule State">
-              <FormControlLabel
-                control={
-                  <Checkbox
-                    checked={scheduleEnabled}
-                    onChange={(e) => setScheduleEnabled(e.target.checked)}
-                  />
-                }
-                label="Enabled (Active cron execution)"
-              />
-            </Field>
-          </Stack>
+              <FormControl size="small" fullWidth>
+                <InputLabel>Bucket Scope</InputLabel>
+                <Select
+                  value={keyBucketId}
+                  label="Bucket Scope"
+                  onChange={(e) => setKeyBucketId(e.target.value as any)}
+                >
+                  <MenuItem value="">
+                    <em>All Buckets (Global S3 Access)</em>
+                  </MenuItem>
+                  {buckets.map((b) => (
+                    <MenuItem key={b.id} value={b.id}>
+                      {b.name}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            </Stack>
+          ) : (
+            <Stack spacing={2} sx={{ mt: 1 }}>
+              <Alert severity="warning">
+                Save your <strong>Secret Access Key</strong> now! For security reasons, it cannot be retrieved again after this dialog is closed.
+              </Alert>
+              <Paper variant="outlined" sx={{ p: 2, bgcolor: "background.default" }}>
+                <Box sx={{ mb: 1.5 }}>
+                  <MicroLabel>ACCESS KEY ID</MicroLabel>
+                  <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+                    <Typography variant="body1" sx={{ fontFamily: MONO, fontWeight: 700 }}>
+                      {createdKeySecret.id}
+                    </Typography>
+                    <IconButton size="small" onClick={() => copyToClipboard(createdKeySecret.id)}>
+                      <ContentCopyIcon fontSize="small" />
+                    </IconButton>
+                  </Stack>
+                </Box>
+                <Box>
+                  <MicroLabel>SECRET ACCESS KEY</MicroLabel>
+                  <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+                    <Typography variant="body1" sx={{ fontFamily: MONO, fontWeight: 700, wordBreak: "break-all" }}>
+                      {createdKeySecret.secret}
+                    </Typography>
+                    <IconButton size="small" onClick={() => copyToClipboard(createdKeySecret.secret)}>
+                      <ContentCopyIcon fontSize="small" />
+                    </IconButton>
+                  </Stack>
+                </Box>
+              </Paper>
+            </Stack>
+          )}
         </DialogContent>
-        <DialogActions sx={{ px: 3, pb: 2 }}>
-          <Button onClick={() => setScheduleModalOpen(false)}>Cancel</Button>
-          <Button variant="contained" onClick={handleSaveSchedule}>
-            Save Schedule
-          </Button>
+        <DialogActions>
+          {!createdKeySecret ? (
+            <>
+              <Button onClick={() => setCreateKeyOpen(false)}>Cancel</Button>
+              <Button variant="contained" onClick={handleCreateKey}>
+                Generate Key Pair
+              </Button>
+            </>
+          ) : (
+            <Button variant="contained" onClick={() => setCreateKeyOpen(false)}>
+              Done & Closed
+            </Button>
+          )}
         </DialogActions>
       </Dialog>
 
-      {/* ── Modal: Delete Schedule Confirmation ────────────────────────────── */}
-      <Dialog
-        open={Boolean(deleteScheduleTarget)}
-        onClose={() => setDeleteScheduleTarget(null)}
-        maxWidth="xs"
-        fullWidth
-      >
-        <DialogTitle>Delete Schedule?</DialogTitle>
+      {/* ── Modal: Delete Key ──────────────────────────────────────────────── */}
+      <Dialog open={!!deleteKeyTarget} onClose={() => setDeleteKeyTarget(null)}>
+        <DialogTitle>Revoke Access Key</DialogTitle>
         <DialogContent>
           <DialogContentText>
-            Are you sure you want to delete schedule{" "}
-            <strong>{deleteScheduleTarget?.name}</strong>?
+            Are you sure you want to revoke S3 access key <strong>{deleteKeyTarget?.access_key}</strong>?
+            Any applications currently using this key will immediately lose access.
           </DialogContentText>
         </DialogContent>
-        <DialogActions sx={{ px: 3, pb: 2 }}>
-          <Button onClick={() => setDeleteScheduleTarget(null)}>Cancel</Button>
-          <Button
-            variant="contained"
-            color="error"
-            onClick={handleDeleteSchedule}
-          >
-            Delete
+        <DialogActions>
+          <Button onClick={() => setDeleteKeyTarget(null)}>Cancel</Button>
+          <Button color="error" variant="contained" onClick={handleDeleteKey}>
+            Revoke Key
           </Button>
         </DialogActions>
       </Dialog>
 
-      {/* Toast Notification */}
+      {/* ── Modal: Share Presigned URL ─────────────────────────────────────── */}
+      <Dialog open={!!presignTarget} onClose={() => setPresignTarget(null)} maxWidth="sm" fullWidth>
+        <DialogTitle>Share Presigned Download URL</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <Typography variant="body2">
+              Generate a time-limited shareable download link for:
+              <br />
+              <strong style={{ fontFamily: MONO }}>{presignTarget?.key}</strong>
+            </Typography>
+
+            <FormControl size="small" fullWidth>
+              <InputLabel>Expiration Duration</InputLabel>
+              <Select
+                value={presignExpires}
+                label="Expiration Duration"
+                onChange={(e) => setPresignExpires(Number(e.target.value))}
+              >
+                <MenuItem value={3600}>1 Hour</MenuItem>
+                <MenuItem value={86400}>24 Hours (1 Day)</MenuItem>
+                <MenuItem value={604800}>7 Days</MenuItem>
+                <MenuItem value={0}>Never Expire (Permanent)</MenuItem>
+              </Select>
+            </FormControl>
+
+            {generatedPresignUrl && (
+              <Box>
+                <MicroLabel sx={{ mb: 0.5 }}>PRESIGNED URL</MicroLabel>
+                <Paper variant="outlined" sx={{ p: 1.5, bgcolor: "background.default" }}>
+                  <Typography variant="body2" sx={{ fontFamily: MONO, fontSize: "0.75rem", wordBreak: "break-all" }}>
+                    {generatedPresignUrl}
+                  </Typography>
+                </Paper>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  startIcon={<ContentCopyIcon />}
+                  onClick={() => copyToClipboard(generatedPresignUrl)}
+                  sx={{ mt: 1 }}
+                >
+                  Copy URL
+                </Button>
+              </Box>
+            )}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPresignTarget(null)}>Close</Button>
+          {!generatedPresignUrl && (
+            <Button variant="contained" onClick={handleGeneratePresign}>
+              Generate Link
+            </Button>
+          )}
+        </DialogActions>
+      </Dialog>
+
+      {/* ── Modal: Delete Object ───────────────────────────────────────────── */}
+      <Dialog open={!!deleteObjectTarget} onClose={() => setDeleteObjectTarget(null)}>
+        <DialogTitle>Delete Object</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            Are you sure you want to delete object <strong>{deleteObjectTarget}</strong> from {browsingBucket}?
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeleteObjectTarget(null)}>Cancel</Button>
+          <Button color="error" variant="contained" onClick={handleDeleteObject}>
+            Delete Object
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Toast notifications */}
       <Snackbar
-        open={Boolean(toast)}
-        autoHideDuration={4000}
+        open={!!toast}
+        autoHideDuration={3000}
         onClose={() => setToast(null)}
         message={toast}
       />

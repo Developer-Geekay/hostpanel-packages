@@ -1,0 +1,4 @@
+* text=auto
+packages/*/ops/* text eol=lf
+packages/*/ops/tests/* text eol=lf
+*.sh text eol=lf

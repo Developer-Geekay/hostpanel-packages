@@ -1,5 +1,5 @@
 /**
- * The contract between the shell and the storage package.
+ * The contract between the shell and the S3 Object Storage package.
  */
 
 export interface LogEvent {
@@ -49,61 +49,74 @@ export interface PackageContext {
   theme: Record<string, unknown>;
 }
 
-// ── Domain Types ────────────────────────────────────────────────────────────
+// ── S3 Domain Types ──────────────────────────────────────────────────────────
 
 export interface Bucket {
+  id: number;
   name: string;
-  policy: "private" | "public-read" | "authenticated-read" | string;
-  size_bytes: number;
-  objects_count: number;
-  created_at: string;
-}
-
-export interface BackupSnapshot {
-  id: string;
-  name: string;
-  targets: string;
-  size_bytes: number;
-  created_at: string;
-  destination: "local" | "s3" | "r2" | string;
-  filename: string;
-}
-
-export interface Schedule {
-  name: string;
-  cron: string;
-  targets: string;
-  retention_days: number;
-  destination: "local" | "s3" | "r2" | string;
-  enabled: boolean;
-  last_run?: string;
-  next_run?: string;
-}
-
-export interface DiskCategory {
-  category: string;
-  path: string;
-  size_bytes: number;
-}
-
-export interface DiskUsage {
-  total_bytes: number;
+  owner: string;
+  public_access: boolean;
+  quota_mb: number;
   used_bytes: number;
-  free_bytes: number;
-  breakdown: DiskCategory[];
+  used_mb: number;
+  used_formatted: string;
+  object_count: number;
+  region: string;
+  custom_path?: string | null;
+  created_at: string;
 }
 
-/** This daemon's own identity, from GET /meta.
- *
- *  Reported rather than hardcoded: the port is allocated from portald's registry
- *  at provision time and is reassigned on every reinstall, so no literal in this
- *  bundle can be right about it. */
+export interface S3Object {
+  key: string;
+  name: string;
+  is_dir: boolean;
+  size_bytes: number;
+  size_formatted: string;
+  content_type: string;
+  last_modified: string;
+  is_public: boolean;
+}
+
+export interface AccessKey {
+  id: number;
+  access_key: string;
+  secret_key?: string | null;
+  owner: string;
+  label: string;
+  status: "active" | "disabled" | string;
+  bucket_id?: number | null;
+  bucket_name?: string | null;
+  created_at: string;
+}
+
+export interface PresignedUrl {
+  id: number;
+  bucket_name: string;
+  object_key: string;
+  token: string;
+  expires_at: number;
+  status: string;
+  created_by: string;
+  created_at: string;
+}
+
+export interface StorageSettings {
+  s3_port: string | number;
+  storage_path: string;
+  bucket_count: number;
+  total_objects: number;
+  total_size_bytes: number;
+  total_size_formatted: string;
+}
+
 export interface ServiceMeta {
+  package: string;
+  label: string;
+  version: string;
   unit: string;
   run_as: string;
-  ops_script: string;
-  package: string;
-  version: string;
-  port: number | null;
-  host: string;
+  s3_port: number;
+  s3_endpoint: string;
+  storage_root: string;
+  port?: number | null;
 }
