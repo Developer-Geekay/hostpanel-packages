@@ -17,6 +17,8 @@ SECRET_PARAMS = frozenset({"cert_pem", "key_pem", "ca_bundle"})
 #: op -> (verb, positional parameter names). Order is the argv order.
 _ARGV: dict[str, tuple[str, tuple[str, ...]]] = {
     "engine.status":          ("engine-status",     ()),
+    "engine.install":         ("engine-install",    ()),
+    "engine.uninstall":       ("engine-uninstall",  ("mode",)),
     "engine.logs":            ("engine-logs",       ("lines", "log_type")),
     "ssl.list":               ("list",              ()),
     "ssl.get":                ("get",               ("domain",)),

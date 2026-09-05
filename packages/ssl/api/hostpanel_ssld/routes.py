@@ -186,6 +186,16 @@ def build_router(manifest: M.Manifest, ops_script: str, *,
         """Retrieve daemon status, acme cron state, active cert count, and isolation paths."""
         return await run_json("engine.status", {})
 
+    @router.post("/engine/install")
+    async def install_engine(request: Request):
+        """Provision SSL runtime directories, CA certs, and default fallback certificate."""
+        return await dispatch(request, "engine.install", {})
+
+    @router.post("/engine/uninstall")
+    async def uninstall_engine(request: Request, mode: str = Query("keep")):
+        """Clean or purge SSL runtime files and certificates."""
+        return await dispatch(request, "engine.uninstall", {"mode": mode})
+
     @router.get("/engine/logs")
     async def get_engine_logs(lines: int = Query(50), log_type: str = Query("acme")):
         """Fetch logs from /opt/hostpanel/logs/ssl/."""

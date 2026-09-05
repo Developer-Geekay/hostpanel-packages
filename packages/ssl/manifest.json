@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "feature": "ssl",
   "label": "SSL / TLS Certificates",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "requires_core": [
     3,
     0,
@@ -48,6 +48,29 @@
       "streams": false,
       "audit_action": "ssl.engine.status",
       "timeout_ms": 10000
+    },
+    "engine.install": {
+      "verb": "engine-install",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "ssl.engine.install",
+      "timeout_ms": 60000
+    },
+    "engine.uninstall": {
+      "verb": "engine-uninstall",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "ssl.engine.uninstall",
+      "timeout_ms": 30000,
+      "params": {
+        "mode": {
+          "enum": [
+            "keep",
+            "purge"
+          ],
+          "default": "keep"
+        }
+      }
     },
     "engine.logs": {
       "verb": "engine-logs",

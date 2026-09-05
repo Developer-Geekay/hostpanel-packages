@@ -37,6 +37,12 @@ case "$verb" in
   engine-status)
     printf '{"ok":true,"daemon":"hostpanel-ssld","status":"running","active":true,"port":9112,"total_certs":2,"active_certs":2,"expiring_soon":0,"acme_cron":true,"version":"OpenSSL 3.0.13","paths":{"conf":"/opt/hostpanel/etc/ssl","certs":"/opt/hostpanel/etc/ssl/certs","keys":"/opt/hostpanel/etc/ssl/private","acme":"/opt/hostpanel/data/acme","logs":"/opt/hostpanel/logs/ssl","run":"/opt/hostpanel/run/ssl"}}\n'
     ;;
+  engine-install)
+    printf '{"ok":true,"engine":"ssl","status":"installed","version":"OpenSSL 3.0.13"}\n'
+    ;;
+  engine-uninstall)
+    printf '{"ok":true,"engine":"ssl","status":"uninstalled","mode":"%s"}\n' "${1:-keep}"
+    ;;
   engine-logs)
     printf '{"ok":true,"log_type":"%s","lines":["[INFO] ACME renewal check ok","[INFO] Certificate valid"],"total":2}\n' "${2:-acme}"
     ;;
@@ -248,6 +254,22 @@ def test_engine_status(svc):
     assert data["paths"]["conf"] == "/opt/hostpanel/etc/ssl"
 
 
+def test_engine_install(svc):
+    r = svc.client.post("/engine/install")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] is True
+    assert data["status"] == "installed"
+
+
+def test_engine_uninstall(svc):
+    r = svc.client.post("/engine/uninstall?mode=keep")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] is True
+    assert data["status"] == "uninstalled"
+
+
 def test_engine_logs(svc):
     r = svc.client.get("/engine/logs?lines=50&log_type=acme")
     assert r.status_code == 200
@@ -291,6 +313,8 @@ def test_operations_introspection(svc):
     assert "ssl.delete" in ops
     assert "ssl.force-https" in ops
     assert "engine.status" in ops
+    assert "engine.install" in ops
+    assert "engine.uninstall" in ops
     assert "engine.logs" in ops
 
 

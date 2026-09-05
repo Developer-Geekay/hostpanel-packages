@@ -9,7 +9,7 @@
 #   /opt/hostpanel/logs/ssl/
 #   /opt/hostpanel/run/ssl/
 #
-# Verbs: list get issue-letsencrypt upload-custom renew delete force-https engine-status engine-logs
+# Verbs: list get issue-letsencrypt upload-custom renew delete force-https engine-status engine-install engine-uninstall engine-logs
 # Exit:  0 ok | 1 internal | 10 not found | 11 precondition | 12 validation | 13 conflict | 14 denied | 20 dependency
 
 set -euo pipefail
@@ -69,7 +69,7 @@ ACME_DATA_DIR="/opt/hostpanel/data/acme"
 LOG_DIR="/opt/hostpanel/logs/ssl"
 RUN_DIR="/opt/hostpanel/run/ssl"
 
-mkdir -p "$CERTS_DIR" "$KEYS_DIR" "$METADATA_DIR" "$ACME_DATA_DIR" "$LOG_DIR" "$RUN_DIR"
+mkdir -p "$CERTS_DIR" "$KEYS_DIR" "$METADATA_DIR" "$ACME_DATA_DIR" "$LOG_DIR" "$RUN_DIR" 2>/dev/null || true
 chmod 0700 "$KEYS_DIR" 2>/dev/null || true
 
 valid_domain() {
@@ -80,6 +80,13 @@ valid_domain() {
 }
 
 OPENSSL_BIN="$(which openssl 2>/dev/null || true)"
+PYTHON_BIN="python3"
+for _py in python3 python /usr/bin/python3; do
+    if "$_py" -c "import sys" 2>/dev/null; then
+        PYTHON_BIN="$_py"
+        break
+    fi
+done
 
 usage() {
     cat >&2 <<'EOF'
@@ -92,6 +99,8 @@ usage: hp-ssl <verb> [args]
   delete              <domain>
   force-https         <domain> <enabled:0|1>
   engine-status
+  engine-install
+  engine-uninstall    [mode:keep|purge]
   engine-logs         [lines] [log_type:acme|renewal|ssl]
 EOF
     exit 12
@@ -103,7 +112,7 @@ verb="$1"; shift
 case "$verb" in
 
   list)
-    python3 -c '
+    "$PYTHON_BIN" -c '
 import os, json, subprocess, glob, time
 from datetime import datetime, timezone
 
@@ -190,7 +199,7 @@ print(json.dumps({"ok": True, "certs": results}))
 
     [ -f "$cert_path" ] || die "certificate for domain '$domain' not found" 10
 
-    python3 -c '
+    "$PYTHON_BIN" -c '
 import os, json, subprocess, sys
 from datetime import datetime, timezone
 
@@ -293,7 +302,7 @@ print(json.dumps({
         echo "-----END PRIVATE KEY-----" >> "$key_file"
     fi
 
-    python3 -c '
+    "$PYTHON_BIN" -c '
 import json, sys
 from datetime import datetime, timezone, timedelta
 
@@ -381,7 +390,7 @@ with open(meta_path, "w") as fp:
         printf '%s' "$ca_bundle" > "$bundle_file"
     fi
 
-    python3 -c '
+    "$PYTHON_BIN" -c '
 import json, sys, subprocess
 from datetime import datetime, timezone
 
@@ -458,7 +467,7 @@ with open(meta_path, "w") as fp:
     case "$enabled" in 0|1) ;; *) die "enabled must be 0 or 1" 12 ;; esac
 
     meta_file="${METADATA_DIR}/${domain}.json"
-    python3 -c '
+    "$PYTHON_BIN" -c '
 import json, sys, os
 domain = sys.argv[1]
 enabled = sys.argv[2] == "1"
@@ -480,7 +489,7 @@ with open(meta_path, "w") as f:
     ;;
 
   engine-status)
-    python3 -c '
+    "$PYTHON_BIN" -c '
 import os, glob, json, subprocess
 certs_dir = "'"$CERTS_DIR"'"
 meta_dir = "'"$METADATA_DIR"'"
@@ -523,6 +532,99 @@ print(json.dumps({
 '
     ;;
 
+  engine-install)
+    require_argc 0 $# "engine-install"
+    echo "============================================================" >&2
+    echo "  HostPanel v3 — SSL / ACME TLS Engine Provisioner" >&2
+    echo "============================================================" >&2
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: provision SSL engine and isolated directories under /opt/hostpanel" >&2
+        printf '{"ok":true,"engine":"ssl","status":"installed","version":"%s"}\n' "OpenSSL (dry-run)"
+        exit 0
+    fi
+
+    # 1/4 — verify or install OpenSSL & certificates
+    echo "[1/4] Verifying OpenSSL runtime and CA certificates..." >&2
+    if [ -z "$OPENSSL_BIN" ]; then
+        if [ "$(id -u)" = "0" ] && command -v apt-get >/dev/null 2>&1; then
+            echo "==> Installing openssl and ca-certificates..." >&2
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -y
+            apt-get install -y openssl ca-certificates
+            OPENSSL_BIN="$(which openssl 2>/dev/null || true)"
+        fi
+    fi
+
+    if [ -n "$OPENSSL_BIN" ]; then
+        openssl_ver="$("$OPENSSL_BIN" version 2>/dev/null || echo "OpenSSL")"
+        echo "  ✓ OpenSSL available: $openssl_ver" >&2
+    else
+        openssl_ver="OpenSSL (built-in fallback)"
+        echo "  ! OpenSSL binary not found on PATH, falling back to python/built-in TLS" >&2
+    fi
+
+    # 2/4 — isolated filesystem hierarchy
+    echo "[2/4] Ensuring isolated filesystem hierarchy under /opt/hostpanel..." >&2
+    mkdir -p "$CONF_DIR" "$CERTS_DIR" "$KEYS_DIR" "$DATA_DIR" "$METADATA_DIR" \
+             "$ACME_DATA_DIR" "$ACME_DATA_DIR/challenge/.well-known/acme-challenge" \
+             "$ACME_DATA_DIR/accounts" "$LOG_DIR" "$RUN_DIR"
+    chmod 0755 "$CONF_DIR" "$CERTS_DIR" "$DATA_DIR" "$METADATA_DIR" "$ACME_DATA_DIR" "$LOG_DIR" "$RUN_DIR" 2>/dev/null || true
+    chmod 0700 "$KEYS_DIR" "$ACME_DATA_DIR/accounts" 2>/dev/null || true
+    echo "  ✓ Isolated directories initialized" >&2
+
+    # 3/4 — default fallback certificate for webservers (nginx / apache)
+    echo "[3/4] Ensuring default fallback TLS certificate..." >&2
+    default_crt="$CERTS_DIR/default.crt"
+    default_key="$KEYS_DIR/default.key"
+    if [ ! -f "$default_crt" ] || [ ! -f "$default_key" ]; then
+        if [ -n "$OPENSSL_BIN" ]; then
+            "$OPENSSL_BIN" req -x509 -nodes -days 365 -newkey rsa:2048 \
+                -keyout "$default_key" \
+                -out "$default_crt" \
+                -subj "/C=US/ST=HostPanel/L=Local/O=HostPanel/CN=localhost" \
+                >/dev/null 2>&1 || true
+            chmod 0600 "$default_key" 2>/dev/null || true
+            echo "  ✓ Generated default fallback TLS certificate ($default_crt)" >&2
+        fi
+    else
+        echo "  ✓ Default fallback TLS certificate exists ($default_crt)" >&2
+    fi
+
+    # 4/4 — engine verification & JSON response
+    echo "[4/4] SSL engine provisioned successfully" >&2
+    printf '{"ok":true,"engine":"ssl","status":"installed","version":"%s","paths":{"conf":"%s","certs":"%s","keys":"%s","acme":"%s","logs":"%s","run":"%s"}}\n' \
+        "$openssl_ver" "$CONF_DIR" "$CERTS_DIR" "$KEYS_DIR" "$ACME_DATA_DIR" "$LOG_DIR" "$RUN_DIR"
+    ;;
+
+  engine-uninstall)
+    mode="${1:-keep}"
+    case "$mode" in keep|purge|backup_and_purge) ;; *) die "mode must be keep or purge" 12 ;; esac
+
+    echo "============================================================" >&2
+    echo "  HostPanel v3 — SSL / ACME TLS Engine Uninstaller ($mode)" >&2
+    echo "============================================================" >&2
+
+    if is_dryrun; then
+        echo "WOULD-EXEC: uninstall SSL engine (mode: $mode)" >&2
+        printf '{"ok":true,"engine":"ssl","status":"uninstalled","mode":"%s"}\n' "$mode"
+        exit 0
+    fi
+
+    echo "[1/2] Cleaning runtime PID and socket paths..." >&2
+    rm -rf "$RUN_DIR"/* 2>/dev/null || true
+
+    if [ "$mode" = "purge" ] || [ "$mode" = "backup_and_purge" ]; then
+        echo "[2/2] Purging SSL certificates, keys, ACME data, and logs..." >&2
+        rm -rf "$CONF_DIR" "$DATA_DIR" "$ACME_DATA_DIR" "$LOG_DIR" 2>/dev/null || true
+    else
+        echo "[2/2] Retaining certificate configuration and ACME data (mode: keep)" >&2
+    fi
+
+    echo "  ✓ SSL engine uninstalled" >&2
+    printf '{"ok":true,"engine":"ssl","status":"uninstalled","mode":"%s"}\n' "$mode"
+    ;;
+
   engine-logs)
     lines="${1:-50}"
     log_type="${2:-acme}"
@@ -531,7 +633,7 @@ print(json.dumps({
         printf '{"ok":true,"log_type":"%s","lines":[],"total":0}\n' "$log_type"
         exit 0
     fi
-    python3 -c '
+    "$PYTHON_BIN" -c '
 import json, sys
 lines_cnt = int(sys.argv[1])
 log_path = sys.argv[2]

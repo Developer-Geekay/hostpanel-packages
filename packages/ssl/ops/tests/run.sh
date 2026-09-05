@@ -45,6 +45,12 @@ expect "issue-letsencrypt invalid challenge rejected"   12 issue-letsencrypt exa
 expect "issue-letsencrypt invalid staging rejected"     12 issue-letsencrypt example.com admin@example.com http-01 9
 expect "force-https invalid boolean rejected"           12 force-https example.com 5
 
+echo "── engine ────────────────────────────────────────────────────────────────"
+expect "engine-status succeeds"                        0 engine-status
+expect "engine-install succeeds in dry-run"            0 engine-install
+expect "engine-uninstall succeeds in dry-run"          0 engine-uninstall
+expect "engine-uninstall invalid mode rejected"        12 engine-uninstall invalid_mode
+
 echo
 if [ "$FAIL" -eq 0 ]; then
     printf '\033[32m%d passed, 0 failed\033[0m\n\n' "$PASS"
