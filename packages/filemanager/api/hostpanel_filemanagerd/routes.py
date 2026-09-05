@@ -229,75 +229,118 @@ def build_router(manifest: M.Manifest, ops_script: str, *,
         file: UploadFile | None = File(default=None),
     ):
         target_path = None
-        content_bytes = b""
         filename = ""
+        file_size = 0
 
-        # 1. Standard multipart form data
-        if file is not None and path is not None:
-            content_bytes = await file.read()
-            target_path = path
-            filename = file.filename or "uploaded_file"
-        else:
-            # 2. Fallback: Parse request form or JSON body
-            content_type = request.headers.get("content-type", "").lower()
-            if "application/json" in content_type:
-                try:
-                    data = await request.json()
-                    target_path = data.get("path")
-                    filename = data.get("filename", "uploaded_file")
-                    if "content_base64" in data:
-                        import base64
-                        content_bytes = base64.b64decode(data["content_base64"])
-                    elif "content" in data:
-                        content_bytes = data["content"].encode("utf-8")
-                except Exception as e:
-                    raise HTTPException(status_code=400, detail=f"Failed to parse JSON upload payload: {e}")
-            else:
-                try:
-                    form = await request.form()
-                    target_path = form.get("path")
-                    form_file = form.get("file")
-                    if hasattr(form_file, "read"):
-                        content_bytes = await form_file.read()
-                        filename = getattr(form_file, "filename", "uploaded_file")
-                except Exception:
-                    pass
-
-        if not target_path or (not content_bytes and file is None):
-            raise HTTPException(
-                status_code=400,
-                detail="Both 'path' and 'file' (or 'content') are required for upload."
-            )
-
-        target_path = str(target_path).rstrip("/")
-        # If target path is a directory (or ends with slash), append filename
-        if str(target_path).endswith("/") or target_path in ("/opt/hostpanel/data", "/opt/hostpanel/data/vhosts", "/opt/hostpanel", "/home"):
-            target_path = f"{target_path}/{filename}"
-        else:
-            # Check if target_path is an existing directory via stat
+        # Determine staging directory
+        staging_dir = "/opt/hostpanel/data/staging"
+        try:
+            os.makedirs(staging_dir, exist_ok=True)
+        except Exception:
+            staging_dir = "/tmp"
             try:
-                stat_spec, _ = spec_for("file.stat", {"path": target_path})
-                stat_res = await ops.run(stat_spec)
-                if stat_res.ok and stat_res.data().get("stat", {}).get("is_dir"):
-                    target_path = f"{target_path}/{filename}"
+                os.makedirs(staging_dir, exist_ok=True)
             except Exception:
                 pass
 
-        # Encode file content directly to Base64 and write through root ops helper
-        # This is 100% binary-safe, avoids null-byte truncation, requires no temporary
-        # staging files, and eliminates permission conflicts on unprivileged daemons.
-        import base64
-        b64_content = base64.b64encode(content_bytes).decode("ascii")
+        temp_id = uuid.uuid4().hex
+        staging_path = ""
+
         try:
-            spec, _ = spec_for("file.write", {"path": target_path, "content_b64": b64_content})
-            res = await ops.run(spec)
-            res.raise_for_status()
-            return JSONResponse({"path": target_path, "uploaded": True, "size": len(content_bytes)})
-        except OpsError as exc:
-            _log.warning("upload failed writing %s: %s (exit: %s)", target_path, exc.message, exc.exit_code)
-            raise HTTPException(status_code=400, detail=exc.message or f"Failed writing to {target_path}")
+            # 1. Standard multipart form data (streamed to disk in 1MB chunks)
+            if file is not None and path is not None:
+                filename = os.path.basename(file.filename or "uploaded_file")
+                staging_path = os.path.join(staging_dir, f"hpupload_{temp_id}_{filename}")
+                target_path = str(path).rstrip("/")
+                with open(staging_path, "wb") as out_fp:
+                    while chunk := await file.read(1024 * 1024):
+                        out_fp.write(chunk)
+                        file_size += len(chunk)
+            else:
+                # 2. Fallback: Parse request form or JSON body for small API payloads
+                content_type = request.headers.get("content-type", "").lower()
+                content_bytes = b""
+                if "application/json" in content_type:
+                    try:
+                        data = await request.json()
+                        target_path = data.get("path")
+                        filename = os.path.basename(data.get("filename", "uploaded_file"))
+                        if "content_base64" in data:
+                            import base64
+                            content_bytes = base64.b64decode(data["content_base64"])
+                        elif "content" in data:
+                            content_bytes = data["content"].encode("utf-8")
+                    except Exception as e:
+                        raise HTTPException(status_code=400, detail=f"Failed to parse JSON upload payload: {e}")
+                else:
+                    try:
+                        form = await request.form()
+                        target_path = form.get("path")
+                        form_file = form.get("file")
+                        if hasattr(form_file, "read"):
+                            filename = os.path.basename(getattr(form_file, "filename", "uploaded_file"))
+                            staging_path = os.path.join(staging_dir, f"hpupload_{temp_id}_{filename}")
+                            with open(staging_path, "wb") as out_fp:
+                                while chunk := await form_file.read(1024 * 1024):
+                                    out_fp.write(chunk)
+                                    file_size += len(chunk)
+                    except Exception:
+                        pass
+
+                if content_bytes:
+                    staging_path = os.path.join(staging_dir, f"hpupload_{temp_id}_{filename}")
+                    with open(staging_path, "wb") as out_fp:
+                        out_fp.write(content_bytes)
+                    file_size = len(content_bytes)
+
+            if not target_path or not staging_path or not os.path.exists(staging_path):
+                if staging_path and os.path.exists(staging_path):
+                    try: os.unlink(staging_path)
+                    except Exception: pass
+                raise HTTPException(
+                    status_code=400,
+                    detail="Both 'path' and 'file' (or 'content') are required for upload."
+                )
+
+            # Resolve destination target path
+            target_path = str(target_path).rstrip("/")
+            if str(target_path).endswith("/") or target_path in ("/opt/hostpanel/data", "/opt/hostpanel/data/vhosts", "/opt/hostpanel", "/home"):
+                target_path = f"{target_path}/{filename}"
+            else:
+                try:
+                    stat_spec, _ = spec_for("file.stat", {"path": target_path})
+                    stat_res = await ops.run(stat_spec)
+                    if stat_res.ok and stat_res.data().get("stat", {}).get("is_dir"):
+                        target_path = f"{target_path}/{filename}"
+                except Exception:
+                    pass
+
+            # Move staged file to final target using privileged helper
+            # mv is instantaneous (0.001s), atomic, and avoids loading data into bash memory
+            try:
+                move_spec, _ = spec_for("file.move", {"source": staging_path, "target": target_path})
+                res = await ops.run(move_spec)
+                res.raise_for_status()
+                return JSONResponse({"ok": True, "path": target_path, "uploaded": True, "size": file_size})
+            except OpsError as exc:
+                if staging_path and os.path.exists(staging_path):
+                    try: os.unlink(staging_path)
+                    except Exception: pass
+                _log.warning("upload failed installing %s: %s (exit: %s)", target_path, exc.message, exc.exit_code)
+                raise HTTPException(status_code=400, detail=exc.message or f"Failed writing to {target_path}")
+            except Exception as exc:
+                if staging_path and os.path.exists(staging_path):
+                    try: os.unlink(staging_path)
+                    except Exception: pass
+                _log.exception("unexpected upload move failure for %s", target_path)
+                raise HTTPException(status_code=500, detail=f"Upload move error: {exc}")
+        except HTTPException:
+            raise
         except Exception as exc:
-            _log.exception("unexpected upload failure for %s", target_path)
+            if staging_path and os.path.exists(staging_path):
+                try: os.unlink(staging_path)
+                except Exception: pass
+            _log.exception("unexpected upload error for %s", target_path)
             raise HTTPException(status_code=500, detail=f"Upload error: {exc}")
 
     @router.get("/download")

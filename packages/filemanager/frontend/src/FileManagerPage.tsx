@@ -231,7 +231,14 @@ function FileManagerBody({ ctx }: { ctx: PackageContext }) {
   const [uploadOpen, setUploadOpen] = useState(false);
   const [uploadFiles, setUploadFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState<{ current: number; total: number; filename: string } | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<{
+    current: number;
+    total: number;
+    filename: string;
+    percent: number;
+    loaded: number;
+    size: number;
+  } | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
 
@@ -595,6 +602,68 @@ function FileManagerBody({ ctx }: { ctx: PackageContext }) {
     setUploadFiles((prev) => prev.filter((_, i) => i !== index));
   };
 
+  const uploadSingleFile = (
+    file: File,
+    destPath: string,
+    currentIdx: number,
+    totalCount: number
+  ): Promise<void> => {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      const formData = new FormData();
+      formData.append("path", destPath);
+      formData.append("file", file);
+
+      xhr.upload.onprogress = (event) => {
+        const percent = event.lengthComputable
+          ? Math.min(100, Math.round((event.loaded / event.total) * 100))
+          : 0;
+        setUploadProgress({
+          current: currentIdx,
+          total: totalCount,
+          filename: file.name,
+          percent,
+          loaded: event.loaded,
+          size: event.lengthComputable ? event.total : file.size,
+        });
+      };
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve();
+        } else {
+          let msg = `HTTP ${xhr.status}`;
+          try {
+            const data = JSON.parse(xhr.responseText);
+            msg = data.message || data.error || data.detail || msg;
+          } catch {
+            if (xhr.responseText) msg = xhr.responseText.slice(0, 150);
+          }
+          reject(new Error(msg));
+        }
+      };
+
+      xhr.onerror = () => {
+        reject(new Error("Network connection error during upload"));
+      };
+
+      xhr.ontimeout = () => {
+        reject(new Error("Upload request timed out"));
+      };
+
+      xhr.open("POST", "/cpanelapi/pkg/filemanager/upload", true);
+      xhr.withCredentials = true;
+      xhr.setRequestHeader("Accept", "application/json");
+
+      const token = sessionStorage.getItem("hp_token") || localStorage.getItem("hp_token");
+      if (token) {
+        xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+      }
+
+      xhr.send(formData);
+    });
+  };
+
   const handleStartUpload = async () => {
     if (uploadFiles.length === 0) return;
     setUploading(true);
@@ -602,28 +671,17 @@ function FileManagerBody({ ctx }: { ctx: PackageContext }) {
 
     for (let i = 0; i < uploadFiles.length; i++) {
       const file = uploadFiles[i];
-      setUploadProgress({ current: i + 1, total: uploadFiles.length, filename: file.name });
+      setUploadProgress({
+        current: i + 1,
+        total: uploadFiles.length,
+        filename: file.name,
+        percent: 0,
+        loaded: 0,
+        size: file.size,
+      });
+
       try {
-        const formData = new FormData();
-        formData.append("path", currentPath);
-        formData.append("file", file);
-
-        const token = sessionStorage.getItem("hp_token") || localStorage.getItem("hp_token");
-        const headers: Record<string, string> = {
-          Accept: "application/json",
-        };
-        if (token) headers["Authorization"] = `Bearer ${token}`;
-
-        const res = await fetch("/cpanelapi/pkg/filemanager/upload", {
-          method: "POST",
-          headers,
-          body: formData,
-          credentials: "same-origin",
-        });
-        if (!res.ok) {
-          const errJson = await res.json().catch(() => ({}));
-          throw new Error(errJson.message || errJson.error || `HTTP ${res.status}`);
-        }
+        await uploadSingleFile(file, currentPath, i + 1, uploadFiles.length);
         successCount++;
       } catch (err: any) {
         showToast(`Failed uploading ${file.name}: ${err.message}`, "error");
@@ -1410,13 +1468,25 @@ function FileManagerBody({ ctx }: { ctx: PackageContext }) {
             <Box sx={{ mt: 2 }}>
               <Stack direction="row" sx={{ mb: 0.5, justifyContent: "space-between", alignItems: "center" }}>
                 <Typography variant="caption" sx={{ fontWeight: 600 }}>
-                  Uploading file {uploadProgress.current} of {uploadProgress.total}...
+                  Uploading file {uploadProgress.current} of {uploadProgress.total} ({uploadProgress.percent}%)
                 </Typography>
                 <Typography variant="caption" sx={{ fontFamily: MONO, color: "text.secondary" }}>
-                  {uploadProgress.filename}
+                  {uploadProgress.filename} ({formatBytes(uploadProgress.loaded)} / {formatBytes(uploadProgress.size)})
                 </Typography>
               </Stack>
-              <LinearProgress />
+              <LinearProgress
+                variant="determinate"
+                value={uploadProgress.percent}
+                sx={{
+                  height: 8,
+                  borderRadius: 1,
+                  bgcolor: "rgba(255, 255, 255, 0.08)",
+                  "& .MuiLinearProgress-bar": {
+                    borderRadius: 1,
+                    transition: "transform 0.15s linear",
+                  },
+                }}
+              />
             </Box>
           )}
         </DialogContent>

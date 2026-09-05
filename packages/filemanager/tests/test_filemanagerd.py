@@ -221,8 +221,7 @@ def test_upload_file(svc):
     data = {"path": "/opt/hostpanel/data/vhosts/"}
     r = svc.client.post("/upload", data=data, files=files)
     assert r.status_code == 200
-    assert "VERB=file-write" in ops_log(svc)
-    assert "SECRET=content" in ops_log(svc)
+    assert "VERB=file-move" in ops_log(svc)
 
 
 def test_download_file(svc):
