@@ -157,7 +157,7 @@
     {
       "name": "ssl",
       "label": "SSL / TLS Certificates",
-      "version": "3.0.2",
+      "version": "3.0.3",
       "category": "Security",
       "description": "HostPanel SSL / TLS Certificates package",
       "unit": "hostpanel-ssld.service",

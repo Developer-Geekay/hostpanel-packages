@@ -35,6 +35,9 @@ import {
 import { ThemeProvider, createTheme, type ThemeOptions } from "@mui/material/styles";
 import AddIcon from "@mui/icons-material/Add";
 import AutorenewIcon from "@mui/icons-material/Autorenew";
+import CheckIcon from "@mui/icons-material/Check";
+import CodeIcon from "@mui/icons-material/Code";
+import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import DeleteIcon from "@mui/icons-material/Delete";
 import FileUploadIcon from "@mui/icons-material/FileUpload";
 import HttpsIcon from "@mui/icons-material/Https";
@@ -89,6 +92,12 @@ function SslPageBody({ ctx }: { ctx: PackageContext }) {
   const [viewCertModalOpen, setViewCertModalOpen] = useState(false);
   const [selectedCert, setSelectedCert] = useState<CertificateItem | null>(null);
   const [certLoading, setCertLoading] = useState(false);
+
+  // Nginx SSL Directives Snippet Modal State
+  const [snippetModalOpen, setSnippetModalOpen] = useState(false);
+  const [snippetDomain, setSnippetDomain] = useState<string>("");
+  const [copiedSnippet, setCopiedSnippet] = useState(false);
+  const [lastIssuedDomain, setLastIssuedDomain] = useState<string | null>(null);
 
   // Delete Modal State
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
@@ -195,18 +204,39 @@ function SslPageBody({ ctx }: { ctx: PackageContext }) {
     }
   };
 
-  const handleToggleForceHttps = async (cert: CertificateItem) => {
-    const nextState = !cert.force_https;
+  const handleOpenNginxConfig = (domain: string) => {
+    setSnippetDomain(domain);
+    setCopiedSnippet(false);
+    setSnippetModalOpen(true);
+  };
+
+  const getNginxSnippet = (domain: string) => {
+    return `    #ssl start
+    ssl_certificate     /opt/hostpanel/etc/ssl/certs/${domain}.crt;
+    ssl_certificate_key /opt/hostpanel/etc/ssl/private/${domain}.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    #ssl end`;
+  };
+
+  const handleCopySnippet = async (text: string) => {
     try {
-      await apiFetch(`/certs/${encodeURIComponent(cert.domain)}/force-https`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enabled: nextState }),
-      });
-      setToast(`Force HTTPS for ${cert.domain} ${nextState ? "enabled" : "disabled"}.`);
-      await loadCerts();
-    } catch (e: any) {
-      setToast(`Failed to update Force HTTPS: ${e.message}`);
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
+      setCopiedSnippet(true);
+      setToast("Nginx SSL directives copied to clipboard!");
+      setTimeout(() => setCopiedSnippet(false), 2500);
+    } catch {
+      setToast("Failed to copy to clipboard.");
     }
   };
 
@@ -282,6 +312,7 @@ function SslPageBody({ ctx }: { ctx: PackageContext }) {
         }
       }
       setToast(`Let's Encrypt certificate issued for ${issueDomain}!`);
+      setLastIssuedDomain(issueDomain.trim());
       await refreshAll();
     } catch (e: any) {
       setIssueLogs((prev) => [
@@ -567,14 +598,13 @@ function SslPageBody({ ctx }: { ctx: PackageContext }) {
                       <TableCell>Issuer</TableCell>
                       <TableCell>Valid Until</TableCell>
                       <TableCell>Auto-Renew</TableCell>
-                      <TableCell>Force HTTPS</TableCell>
                       <TableCell align="right">Actions</TableCell>
                     </TableRow>
                   </TableHead>
                   <TableBody>
                     {filteredCerts.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={6} align="center" sx={{ py: 5, color: "text.secondary" }}>
+                        <TableCell colSpan={5} align="center" sx={{ py: 5, color: "text.secondary" }}>
                           <LockOpenIcon sx={{ fontSize: 32, mb: 1, color: "text.disabled", display: "block", mx: "auto" }} />
                           No SSL certificates found. Issue a free Let's Encrypt cert or upload a custom certificate.
                         </TableCell>
@@ -622,20 +652,13 @@ function SslPageBody({ ctx }: { ctx: PackageContext }) {
                                 disabled={!isLetsEncrypt}
                               />
                             </TableCell>
-                            <TableCell>
-                              <Stack direction="row" spacing={0.75} sx={{ alignItems: "center" }}>
-                                <Switch
-                                  size="small"
-                                  checked={c.force_https}
-                                  onChange={() => handleToggleForceHttps(c)}
-                                />
-                                <Typography variant="caption" sx={{ color: c.force_https ? "success.main" : "text.secondary" }}>
-                                  {c.force_https ? "301 Redirect" : "Off"}
-                                </Typography>
-                              </Stack>
-                            </TableCell>
                             <TableCell align="right">
                               <Stack direction="row" spacing={0.5} sx={{ justifyContent: "flex-end" }}>
+                                <Tooltip title="Nginx SSL Directives">
+                                  <IconButton size="small" color="primary" onClick={() => handleOpenNginxConfig(c.domain)}>
+                                    <CodeIcon sx={{ fontSize: 16 }} />
+                                  </IconButton>
+                                </Tooltip>
                                 <Tooltip title="View Certificate Details">
                                   <IconButton size="small" onClick={() => handleOpenViewCert(c)}>
                                     <InfoOutlinedIcon sx={{ fontSize: 16 }} />
@@ -765,6 +788,38 @@ function SslPageBody({ ctx }: { ctx: PackageContext }) {
                   {issuing ? "Issuing Certificate..." : "Issue Free Certificate"}
                 </Button>
               </Box>
+
+              {lastIssuedDomain && (
+                <Paper
+                  variant="outlined"
+                  sx={{
+                    p: 2,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    bgcolor: "rgba(34, 197, 94, 0.08)",
+                    borderColor: "success.main",
+                  }}
+                >
+                  <Box>
+                    <Typography variant="subtitle2" sx={{ fontWeight: 700, color: "success.main" }}>
+                      Certificate ready for {lastIssuedDomain}!
+                    </Typography>
+                    <Typography variant="caption" sx={{ color: "text.secondary" }}>
+                      Copy the Nginx SSL directives to enable HTTPS in your web server configuration.
+                    </Typography>
+                  </Box>
+                  <Button
+                    variant="contained"
+                    size="small"
+                    color="success"
+                    startIcon={<CodeIcon />}
+                    onClick={() => handleOpenNginxConfig(lastIssuedDomain)}
+                  >
+                    View Nginx Directives
+                  </Button>
+                </Paper>
+              )}
 
               {issueLogs.length > 0 && (
                 <Box sx={{ mt: 2 }}>
@@ -1040,8 +1095,71 @@ function SslPageBody({ ctx }: { ctx: PackageContext }) {
             </Stack>
           ) : null}
         </DialogContent>
-        <DialogActions sx={{ p: 2 }}>
+        <DialogActions sx={{ p: 2, justifyContent: "space-between" }}>
+          {selectedCert ? (
+            <Button
+              variant="outlined"
+              size="small"
+              startIcon={<CodeIcon />}
+              onClick={() => handleOpenNginxConfig(selectedCert.domain)}
+            >
+              Nginx SSL Directives
+            </Button>
+          ) : <Box />}
           <Button onClick={() => setViewCertModalOpen(false)} color="inherit">
+            Close
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Nginx SSL Directives Modal */}
+      <Dialog
+        open={snippetModalOpen}
+        onClose={() => setSnippetModalOpen(false)}
+        maxWidth="md"
+        fullWidth
+      >
+        <DialogTitle sx={{ pb: 1, fontWeight: 600 }}>
+          Nginx SSL Directives: {snippetDomain}
+        </DialogTitle>
+        <DialogContent dividers sx={{ p: 2.5 }}>
+          <Stack spacing={2}>
+            <Typography variant="body2" sx={{ color: "text.secondary" }}>
+              To enable SSL in Nginx, paste this block inside your existing{" "}
+              <code style={{ fontFamily: MONO, color: "#38bdf8" }}>server &#123; ... &#125;</code> block
+              in <code style={{ fontFamily: MONO }}>/opt/hostpanel/etc/nginx/vhosts/{snippetDomain}.conf</code> and change{" "}
+              <code style={{ fontFamily: MONO, color: "#eab308" }}>listen 80;</code> to{" "}
+              <code style={{ fontFamily: MONO, color: "#22c55e" }}>listen 443 ssl;</code>.
+            </Typography>
+
+            <Paper
+              sx={{
+                p: 2,
+                bgcolor: CONSOLE.bg,
+                color: CONSOLE.fg,
+                fontFamily: MONO,
+                fontSize: "0.8125rem",
+                lineHeight: 1.6,
+                borderRadius: "8px",
+                border: "1px solid rgba(255, 255, 255, 0.1)",
+                whiteSpace: "pre",
+                overflowX: "auto",
+              }}
+            >
+              {getNginxSnippet(snippetDomain)}
+            </Paper>
+          </Stack>
+        </DialogContent>
+        <DialogActions sx={{ p: 2, justifyContent: "space-between" }}>
+          <Button
+            variant="contained"
+            color="primary"
+            startIcon={copiedSnippet ? <CheckIcon /> : <ContentCopyIcon />}
+            onClick={() => handleCopySnippet(getNginxSnippet(snippetDomain))}
+          >
+            {copiedSnippet ? "Copied!" : "Copy Snippet"}
+          </Button>
+          <Button onClick={() => setSnippetModalOpen(false)} color="inherit">
             Close
           </Button>
         </DialogActions>
