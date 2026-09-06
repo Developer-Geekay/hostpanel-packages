@@ -196,9 +196,9 @@ cmd_engine_restart() {
 
 cmd_engine_reload() {
   if [ -n "$NGINX_BIN" ] && [ -f "$CONF_FILE" ]; then
-    "$NGINX_BIN" -p "$CONF_DIR" -c "$CONF_FILE" -s reload 2>/dev/null || systemctl reload nginx 2>/dev/null || true
+    "$NGINX_BIN" -p "$CONF_DIR" -e "${LOG_DIR}/error.log" -c "$CONF_FILE" -s reload 2>&1 || systemctl reload nginx 2>&1 || true
   else
-    systemctl reload nginx 2>/dev/null || true
+    systemctl reload nginx 2>&1 || true
   fi
   printf '{"ok":true,"action":"reload","reloaded":true}\n'
 }
@@ -211,25 +211,24 @@ cmd_engine_test() {
   local content=""
   if [[ ! -t 0 ]]; then content="$(read_secret "content")"; fi
 
-  local out
+  mkdir -p "$RUN_DIR" "$LOG_DIR"
+  local out=""
   if [ -n "$content" ]; then
     local tmp_file
-    tmp_file="$(mktemp /tmp/nginx_test_XXXXXX.conf)"
-    printf '%s' "$content" > "$tmp_file"
-    if out="$("$NGINX_BIN" -p "$CONF_DIR" -c "$tmp_file" -t 2>&1)"; then
+    tmp_file="$(mktemp "${RUN_DIR}/nginx_test_XXXXXX.conf")"
+    printf '%s\n' "$content" > "$tmp_file"
+    if out="$("$NGINX_BIN" -p "$CONF_DIR" -e "${LOG_DIR}/error.log" -c "$tmp_file" -t 2>&1)"; then
       rm -f "$tmp_file"
       printf '{"ok":true,"valid":true,"output":%s}\n' "$(python3 -c "import json, sys; print(json.dumps(sys.argv[1]))" "$out")"
     else
       rm -f "$tmp_file"
-      printf '{"ok":false,"valid":false,"error":%s,"code":"SYNTAX_ERROR"}\n' "$(python3 -c "import json, sys; print(json.dumps(sys.argv[1]))" "$out")" >&2
-      return $EXIT_EXECUTION_FAILED
+      printf '{"ok":true,"valid":false,"output":%s}\n' "$(python3 -c "import json, sys; print(json.dumps(sys.argv[1]))" "$out")"
     fi
   else
-    if out="$("$NGINX_BIN" -p "$CONF_DIR" -c "$CONF_FILE" -t 2>&1)"; then
+    if out="$("$NGINX_BIN" -p "$CONF_DIR" -e "${LOG_DIR}/error.log" -c "$CONF_FILE" -t 2>&1)"; then
       printf '{"ok":true,"valid":true,"output":%s}\n' "$(python3 -c "import json, sys; print(json.dumps(sys.argv[1]))" "$out")"
     else
-      printf '{"ok":false,"valid":false,"error":%s,"code":"SYNTAX_ERROR"}\n' "$(python3 -c "import json, sys; print(json.dumps(sys.argv[1]))" "$out")" >&2
-      return $EXIT_EXECUTION_FAILED
+      printf '{"ok":true,"valid":false,"output":%s}\n' "$(python3 -c "import json, sys; print(json.dumps(sys.argv[1]))" "$out")"
     fi
   fi
 }
@@ -252,27 +251,26 @@ cmd_engine_config_set() {
   if [[ ! -t 0 ]]; then content="$(read_secret "content")"; fi
   [ -z "$content" ] && die "content payload required" "$EXIT_INVALID_INPUT"
 
+  mkdir -p "$RUN_DIR" "$CONF_DIR" "$LOG_DIR"
   local tmp_file
-  tmp_file="$(mktemp /tmp/nginx_test_XXXXXX.conf)"
-  printf '%s' "$content" > "$tmp_file"
+  tmp_file="$(mktemp "${RUN_DIR}/nginx_test_XXXXXX.conf")"
+  printf '%s\n' "$content" > "$tmp_file"
 
   if [ -n "$NGINX_BIN" ]; then
-    if ! "$NGINX_BIN" -p "$CONF_DIR" -t -c "$tmp_file" >/dev/null 2>&1; then
-      local err
-      err="$("$NGINX_BIN" -p "$CONF_DIR" -t -c "$tmp_file" 2>&1 || true)"
+    local err=""
+    if ! err="$("$NGINX_BIN" -p "$CONF_DIR" -e "${LOG_DIR}/error.log" -c "$tmp_file" -t 2>&1)"; then
       rm -f "$tmp_file"
       printf '{"ok":false,"error":%s,"code":"INVALID_SYNTAX"}\n' "$(python3 -c "import json, sys; print(json.dumps(sys.argv[1]))" "$err")" >&2
       return $EXIT_INVALID_INPUT
     fi
   fi
 
-  mkdir -p "$CONF_DIR"
   if [ -f "$CONF_FILE" ]; then
     cp "$CONF_FILE" "${CONF_FILE}.bak" 2>/dev/null || true
   fi
   cp "$tmp_file" "$CONF_FILE"
   rm -f "$tmp_file"
-  cmd_engine_reload >/dev/null 2>&1 || true
+  cmd_engine_reload
   printf '{"ok":true,"updated":true,"path":"%s"}\n' "$CONF_FILE"
 }
 
@@ -416,9 +414,8 @@ HTML
   fi
 
   if [ -n "$NGINX_BIN" ]; then
-    if ! "$NGINX_BIN" -p "$CONF_DIR" -c "$CONF_FILE" -t >/dev/null 2>&1; then
-      local err
-      err="$("$NGINX_BIN" -p "$CONF_DIR" -c "$CONF_FILE" -t 2>&1 || true)"
+    local err=""
+    if ! err="$("$NGINX_BIN" -p "$CONF_DIR" -e "${LOG_DIR}/error.log" -c "$CONF_FILE" -t 2>&1)"; then
       if [ -n "$backup" ]; then
         printf '%s' "$backup" > "$target"
       else
@@ -428,7 +425,7 @@ HTML
       return $EXIT_INVALID_INPUT
     fi
   fi
-  cmd_engine_reload >/dev/null 2>&1 || true
+  cmd_engine_reload
   printf '{"ok":true,"domain":"%s","saved":true}\n' "$domain"
 }
 

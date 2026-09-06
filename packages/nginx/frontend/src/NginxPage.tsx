@@ -203,8 +203,24 @@ function NginxPageBody({ ctx }: { ctx: PackageContext }) {
     async (path: string, options: RequestInit = {}) => {
       const res = await ctx.api(path, options);
       if (!res.ok) {
-        const err = await res.json().catch(() => ({ detail: res.statusText }));
-        throw new Error(err.detail || `Request failed with status ${res.status}`);
+        const err = await res.json().catch(() => ({ message: res.statusText }));
+        let msg = err.message || err.detail || err.error || `Request failed with status ${res.status}`;
+        if (typeof msg === "object") {
+          try {
+            msg = JSON.stringify(msg);
+          } catch {
+            msg = String(msg);
+          }
+        }
+        if (typeof msg === "string" && msg.trim().startsWith("{")) {
+          try {
+            const parsed = JSON.parse(msg.trim());
+            if (parsed.error || parsed.message) {
+              msg = parsed.error || parsed.message;
+            }
+          } catch {}
+        }
+        throw new Error(msg);
       }
       return res.json();
     },
@@ -360,9 +376,13 @@ function NginxPageBody({ ctx }: { ctx: PackageContext }) {
         method: "POST",
         body: JSON.stringify(body),
       });
-      setSyntaxResult({ ok: res.valid, output: res.output });
-      if (res.valid) {
+      const isValid = Boolean(res.valid);
+      const outputText = res.output || res.error || (isValid ? "Syntax is ok" : "Syntax error detected");
+      setSyntaxResult({ ok: isValid, output: outputText });
+      if (isValid) {
         setToast("Nginx configuration syntax is valid (OK).");
+      } else {
+        setToast("Syntax Error: Configuration test failed.");
       }
     } catch (e: any) {
       setSyntaxResult({ ok: false, output: e.message });
@@ -381,8 +401,10 @@ function NginxPageBody({ ctx }: { ctx: PackageContext }) {
       });
       setToast("Global nginx.conf saved and service reloaded.");
       setSyntaxResult(null);
+      await loadConfig();
     } catch (e: any) {
       setToast(`Save failed: ${e.message}`);
+      setSyntaxResult({ ok: false, output: e.message });
     } finally {
       setConfigSaving(false);
     }
@@ -837,9 +859,7 @@ function NginxPageBody({ ctx }: { ctx: PackageContext }) {
                   <TableHead>
                     <TableRow>
                       <TableCell>Domain / Server Name</TableCell>
-                      <TableCell>Port</TableCell>
                       <TableCell>SSL</TableCell>
-                      <TableCell>Document Root</TableCell>
                       <TableCell>Status</TableCell>
                       <TableCell align="right">Actions</TableCell>
                     </TableRow>
@@ -847,7 +867,7 @@ function NginxPageBody({ ctx }: { ctx: PackageContext }) {
                   <TableBody>
                     {filteredVhosts.length === 0 ? (
                       <TableRow>
-                        <TableCell colSpan={6} align="center" sx={{ py: 4, color: "text.secondary" }}>
+                        <TableCell colSpan={4} align="center" sx={{ py: 4, color: "text.secondary" }}>
                           No server blocks found.
                         </TableCell>
                       </TableRow>
@@ -856,9 +876,6 @@ function NginxPageBody({ ctx }: { ctx: PackageContext }) {
                         <TableRow key={vh.domain} hover>
                           <TableCell sx={{ fontFamily: MONO, fontWeight: 600 }}>
                             {vh.domain}
-                          </TableCell>
-                          <TableCell sx={{ fontFamily: MONO }}>
-                            {vh.port || 80}
                           </TableCell>
                           <TableCell>
                             {vh.ssl ? (
@@ -871,9 +888,6 @@ function NginxPageBody({ ctx }: { ctx: PackageContext }) {
                             ) : (
                               <Chip label="HTTP" size="small" />
                             )}
-                          </TableCell>
-                          <TableCell sx={{ fontFamily: MONO, fontSize: "0.75rem", color: "text.secondary" }}>
-                            {vh.root || "/var/www/html"}
                           </TableCell>
                           <TableCell>
                             <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
