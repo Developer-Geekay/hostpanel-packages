@@ -566,7 +566,7 @@ function ApachePageBody({ ctx }: { ctx: PackageContext }) {
           )}
         </Stack>
 
-        <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", flexShrink: 0 }}>
+        <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", flexWrap: "wrap", gap: 0.75 }}>
           {/* Refresh */}
           <Tooltip title="Refresh Status" arrow>
             <span>
@@ -796,11 +796,14 @@ function ApachePageBody({ ctx }: { ctx: PackageContext }) {
         <Tabs
           value={tab}
           onChange={(_, val) => setTab(val)}
+          variant="scrollable"
+          scrollButtons="auto"
+          allowScrollButtonsMobile
           sx={{
             borderBottom: "1px solid",
             borderColor: "divider",
             px: 1,
-            "& .MuiTab-root": { textTransform: "none", fontWeight: 600, minHeight: 44, fontSize: "0.8125rem" },
+            "& .MuiTab-root": { textTransform: "none", fontWeight: 600, minHeight: 44, fontSize: "0.8125rem", whiteSpace: "nowrap" },
           }}
         >
           <Tab label={`Virtual Hosts (${totalSitesCount})`} value="vhosts" />
@@ -841,8 +844,8 @@ function ApachePageBody({ ctx }: { ctx: PackageContext }) {
                 </Button>
               </Stack>
 
-              <TableContainer component={Paper} variant="outlined">
-                <Table size="small">
+              <TableContainer component={Paper} variant="outlined" sx={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+                <Table size="small" sx={{ minWidth: 650 }}>
                   <TableHead>
                     <TableRow>
                       <TableCell>ServerName / Domain</TableCell>
@@ -951,8 +954,8 @@ function ApachePageBody({ ctx }: { ctx: PackageContext }) {
                 </Typography>
               </Stack>
 
-              <TableContainer component={Paper} variant="outlined">
-                <Table size="small">
+              <TableContainer component={Paper} variant="outlined" sx={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+                <Table size="small" sx={{ minWidth: 500 }}>
                   <TableHead>
                     <TableRow>
                       <TableCell>Module Name</TableCell>

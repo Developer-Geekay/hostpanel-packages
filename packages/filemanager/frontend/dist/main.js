@@ -63778,7 +63778,7 @@ function gF({ ctx: e }) {
         spacing: 2,
         sx: { justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 1.5 },
         children: [
-          /* @__PURE__ */ F.jsx(Sr, { component: "form", onSubmit: fn, sx: { display: "flex", flex: 1, minWidth: 320, maxWidth: 650 }, children: /* @__PURE__ */ F.jsx(
+          /* @__PURE__ */ F.jsx(Sr, { component: "form", onSubmit: fn, sx: { display: "flex", flex: 1, minWidth: { xs: "100%", sm: 320 }, maxWidth: { xs: "100%", sm: 650 } }, children: /* @__PURE__ */ F.jsx(
             di,
             {
               fullWidth: !0,
@@ -63794,7 +63794,7 @@ function gF({ ctx: e }) {
               }
             }
           ) }),
-          /* @__PURE__ */ F.jsxs(an, { direction: "row", spacing: 1, sx: { flexWrap: "wrap" }, children: [
+          /* @__PURE__ */ F.jsxs(an, { direction: "row", spacing: 1, sx: { flexWrap: "wrap", gap: 1 }, children: [
             /* @__PURE__ */ F.jsx(
               nt,
               {
@@ -63884,10 +63884,10 @@ function gF({ ctx: e }) {
             startAdornment: /* @__PURE__ */ F.jsx(Wd, { position: "start", children: /* @__PURE__ */ F.jsx(mO, { sx: { fontSize: 18, color: "text.disabled" } }) })
           }
         },
-        sx: { width: 340 }
+        sx: { width: { xs: "100%", sm: 340 } }
       }
     ),
-    /* @__PURE__ */ F.jsx(pF, { label: `Directory Contents (${he.length} items)`, padded: !1, children: /* @__PURE__ */ F.jsx(eO, { children: /* @__PURE__ */ F.jsxs(J_, { size: "small", children: [
+    /* @__PURE__ */ F.jsx(pF, { label: `Directory Contents (${he.length} items)`, padded: !1, children: /* @__PURE__ */ F.jsx(eO, { sx: { overflowX: "auto", WebkitOverflowScrolling: "touch" }, children: /* @__PURE__ */ F.jsxs(J_, { size: "small", sx: { minWidth: 650 }, children: [
       /* @__PURE__ */ F.jsx(nv, { children: /* @__PURE__ */ F.jsxs(Wn, { children: [
         /* @__PURE__ */ F.jsx(je, { sx: { fontWeight: 600, fontSize: "0.75rem", textTransform: "uppercase" }, children: "Name" }),
         /* @__PURE__ */ F.jsx(je, { sx: { fontWeight: 600, fontSize: "0.75rem", textTransform: "uppercase" }, children: "Size" }),

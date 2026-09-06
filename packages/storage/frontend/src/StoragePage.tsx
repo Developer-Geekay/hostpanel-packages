@@ -499,7 +499,7 @@ function StoragePageBody({ ctx }: { ctx: PackageContext }) {
           </Typography>
         </Box>
 
-        <Stack direction="row" spacing={1} sx={{ alignItems: "center", flexShrink: 0 }}>
+        <Stack direction="row" spacing={1} sx={{ alignItems: "center", flexWrap: "wrap", gap: 1 }}>
           <Button
             variant="outlined"
             size="small"
@@ -539,8 +539,8 @@ function StoragePageBody({ ctx }: { ctx: PackageContext }) {
       )}
 
       {/* ── Top Stat Cards ─────────────────────────────────────────────────── */}
-      <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
-        <Card sx={{ flex: 1, minWidth: 200, bgcolor: "background.paper" }}>
+      <Stack direction={{ xs: "column", sm: "row" }} spacing={2} sx={{ flexWrap: "wrap" }}>
+        <Card sx={{ flex: { xs: "1 1 100%", sm: "1 1 calc(50% - 16px)", md: 1 }, bgcolor: "background.paper" }}>
           <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
             <MicroLabel sx={{ mb: 0.5 }}>S3 BUCKETS</MicroLabel>
             <Typography variant="h6" sx={{ fontWeight: 700, mb: 0.5 }}>
@@ -552,7 +552,7 @@ function StoragePageBody({ ctx }: { ctx: PackageContext }) {
           </CardContent>
         </Card>
 
-        <Card sx={{ flex: 1, minWidth: 200, bgcolor: "background.paper" }}>
+        <Card sx={{ flex: { xs: "1 1 100%", sm: "1 1 calc(50% - 16px)", md: 1 }, bgcolor: "background.paper" }}>
           <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
             <MicroLabel sx={{ mb: 0.5 }}>TOTAL OBJECTS</MicroLabel>
             <Typography variant="h6" sx={{ fontWeight: 700, mb: 0.5 }}>
@@ -564,7 +564,7 @@ function StoragePageBody({ ctx }: { ctx: PackageContext }) {
           </CardContent>
         </Card>
 
-        <Card sx={{ flex: 1, minWidth: 200, bgcolor: "background.paper" }}>
+        <Card sx={{ flex: { xs: "1 1 100%", sm: "1 1 calc(50% - 16px)", md: 1 }, bgcolor: "background.paper" }}>
           <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
             <MicroLabel sx={{ mb: 0.5 }}>STORAGE USED</MicroLabel>
             <Typography variant="h6" sx={{ fontWeight: 700, fontFamily: MONO, mb: 0.5 }}>
@@ -576,7 +576,7 @@ function StoragePageBody({ ctx }: { ctx: PackageContext }) {
           </CardContent>
         </Card>
 
-        <Card sx={{ flex: 1, minWidth: 200, bgcolor: "background.paper" }}>
+        <Card sx={{ flex: { xs: "1 1 100%", sm: "1 1 calc(50% - 16px)", md: 1 }, bgcolor: "background.paper" }}>
           <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
             <MicroLabel sx={{ mb: 0.5 }}>S3 SERVICE STATUS</MicroLabel>
             <Stack direction="row" spacing={1} sx={{ alignItems: "center", mb: 0.5 }}>
@@ -600,6 +600,7 @@ function StoragePageBody({ ctx }: { ctx: PackageContext }) {
             onChange={(_, val) => setTabIndex(val)}
             variant="scrollable"
             scrollButtons="auto"
+            allowScrollButtonsMobile
           >
             <Tab
               icon={<FolderIcon fontSize="small" />}
@@ -663,8 +664,8 @@ function StoragePageBody({ ctx }: { ctx: PackageContext }) {
               </Button>
             </Stack>
 
-            <TableContainer>
-              <Table size="small">
+            <TableContainer sx={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+              <Table size="small" sx={{ minWidth: 720 }}>
                 <TableHead>
                   <TableRow>
                     <TableCell sx={{ fontWeight: 600 }}>Bucket Name</TableCell>
@@ -850,8 +851,8 @@ function StoragePageBody({ ctx }: { ctx: PackageContext }) {
                 <CircularProgress size={32} />
               </Box>
             ) : (
-              <TableContainer>
-                <Table size="small">
+              <TableContainer sx={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+                <Table size="small" sx={{ minWidth: 650 }}>
                   <TableHead>
                     <TableRow>
                       <TableCell sx={{ fontWeight: 600 }}>Name</TableCell>
@@ -998,8 +999,8 @@ function StoragePageBody({ ctx }: { ctx: PackageContext }) {
               </Button>
             </Stack>
 
-            <TableContainer>
-              <Table size="small">
+            <TableContainer sx={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+              <Table size="small" sx={{ minWidth: 650 }}>
                 <TableHead>
                   <TableRow>
                     <TableCell sx={{ fontWeight: 600 }}>Access Key ID</TableCell>
@@ -1111,6 +1112,9 @@ function StoragePageBody({ ctx }: { ctx: PackageContext }) {
             <Tabs
               value={guideTab}
               onChange={(_, v) => setGuideTab(v)}
+              variant="scrollable"
+              scrollButtons="auto"
+              allowScrollButtonsMobile
               sx={{ borderBottom: 1, borderColor: "divider", mb: 2 }}
             >
               <Tab label="AWS CLI" />

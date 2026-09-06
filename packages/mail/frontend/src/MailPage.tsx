@@ -447,7 +447,7 @@ function MailPageBody({ ctx }: { ctx: PackageContext }) {
           </Typography>
         </Stack>
 
-        <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", flexShrink: 0 }}>
+        <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", flexWrap: "wrap", gap: 0.75 }}>
           {/* Refresh */}
           <Tooltip title="Refresh Status" arrow>
             <span>
@@ -507,8 +507,8 @@ function MailPageBody({ ctx }: { ctx: PackageContext }) {
       </Stack>
 
       {/* 4 Overview Stat Cards */}
-      <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
-        <Card variant="outlined" sx={{ flex: 1 }}>
+      <Stack direction={{ xs: "column", sm: "row" }} spacing={2} sx={{ flexWrap: "wrap" }}>
+        <Card variant="outlined" sx={{ flex: { xs: "1 1 100%", sm: "1 1 calc(50% - 16px)", md: 1 } }}>
           <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
             <MicroLabel>MAIL SERVER STATUS</MicroLabel>
             <Typography variant="h6" sx={{ fontWeight: 700, mt: 0.5 }}>
@@ -520,7 +520,7 @@ function MailPageBody({ ctx }: { ctx: PackageContext }) {
           </CardContent>
         </Card>
 
-        <Card variant="outlined" sx={{ flex: 1 }}>
+        <Card variant="outlined" sx={{ flex: { xs: "1 1 100%", sm: "1 1 calc(50% - 16px)", md: 1 } }}>
           <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
             <MicroLabel>ACTIVE DOMAINS</MicroLabel>
             <Typography variant="h6" sx={{ fontWeight: 700, mt: 0.5 }}>
@@ -532,7 +532,7 @@ function MailPageBody({ ctx }: { ctx: PackageContext }) {
           </CardContent>
         </Card>
 
-        <Card variant="outlined" sx={{ flex: 1 }}>
+        <Card variant="outlined" sx={{ flex: { xs: "1 1 100%", sm: "1 1 calc(50% - 16px)", md: 1 } }}>
           <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
             <MicroLabel>TOTAL MAILBOXES</MicroLabel>
             <Typography variant="h6" sx={{ fontWeight: 700, mt: 0.5 }}>
@@ -544,7 +544,7 @@ function MailPageBody({ ctx }: { ctx: PackageContext }) {
           </CardContent>
         </Card>
 
-        <Card variant="outlined" sx={{ flex: 1 }}>
+        <Card variant="outlined" sx={{ flex: { xs: "1 1 100%", sm: "1 1 calc(50% - 16px)", md: 1 } }}>
           <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
             <MicroLabel>QUEUE COUNT</MicroLabel>
             <Typography variant="h6" sx={{ fontWeight: 700, mt: 0.5 }}>
@@ -562,6 +562,9 @@ function MailPageBody({ ctx }: { ctx: PackageContext }) {
         <Tabs
           value={tab}
           onChange={(_, val) => setTab(val)}
+          variant="scrollable"
+          scrollButtons="auto"
+          allowScrollButtonsMobile
           sx={{
             borderBottom: "1px solid",
             borderColor: "divider",
@@ -613,8 +616,8 @@ function MailPageBody({ ctx }: { ctx: PackageContext }) {
                 </Button>
               </Stack>
 
-              <TableContainer component={Paper} variant="outlined">
-                <Table size="small">
+              <TableContainer component={Paper} variant="outlined" sx={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+                <Table size="small" sx={{ minWidth: 680 }}>
                   <TableHead>
                     <TableRow>
                       <TableCell>Email Address</TableCell>
@@ -918,8 +921,8 @@ function MailPageBody({ ctx }: { ctx: PackageContext }) {
                 </Button>
               </Stack>
 
-              <TableContainer component={Paper} variant="outlined">
-                <Table size="small">
+              <TableContainer component={Paper} variant="outlined" sx={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+                <Table size="small" sx={{ minWidth: 680 }}>
                   <TableHead>
                     <TableRow>
                       <TableCell>Source Address</TableCell>
@@ -1015,8 +1018,8 @@ function MailPageBody({ ctx }: { ctx: PackageContext }) {
                 </Button>
               </Stack>
 
-              <TableContainer component={Paper} variant="outlined">
-                <Table size="small">
+              <TableContainer component={Paper} variant="outlined" sx={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+                <Table size="small" sx={{ minWidth: 680 }}>
                   <TableHead>
                     <TableRow>
                       <TableCell>Domain Name</TableCell>
@@ -1111,8 +1114,8 @@ function MailPageBody({ ctx }: { ctx: PackageContext }) {
                     Mail queue is clean. No outbound or delayed messages pending.
                   </Typography>
                 ) : (
-                  <TableContainer component={Paper} variant="outlined">
-                    <Table size="small">
+                  <TableContainer component={Paper} variant="outlined" sx={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+                    <Table size="small" sx={{ minWidth: 680 }}>
                       <TableHead>
                         <TableRow>
                           <TableCell>Queue ID</TableCell>

@@ -7,7 +7,7 @@
     {
       "name": "apache",
       "label": "Apache HTTP Server",
-      "version": "3.0.2",
+      "version": "3.0.3",
       "category": "Web Server",
       "description": "Production-grade Apache HTTP Server web server package",
       "unit": "hostpanel-apached.service",
@@ -22,7 +22,7 @@
     {
       "name": "filemanager",
       "label": "File Manager",
-      "version": "3.0.5",
+      "version": "3.0.6",
       "category": "File & Storage",
       "description": "Web-based file browser, syntax-highlighted code editor, and asset manager",
       "unit": "hostpanel-filemanagerd.service",
@@ -52,7 +52,7 @@
     {
       "name": "mail",
       "label": "Mail Accounts & Domains",
-      "version": "3.0.0",
+      "version": "3.0.1",
       "category": "Email",
       "description": "HostPanel Mail Accounts & Domains package",
       "unit": "hostpanel-maild.service",
@@ -67,7 +67,7 @@
     {
       "name": "mongodb",
       "label": "MongoDB",
-      "version": "3.0.2",
+      "version": "3.0.3",
       "category": "Database",
       "description": "High-performance MongoDB database engine package",
       "unit": "hostpanel-mongodbd.service",
@@ -97,7 +97,7 @@
     {
       "name": "nginx",
       "label": "Nginx Web Server",
-      "version": "3.0.2",
+      "version": "3.0.3",
       "category": "Web Server",
       "description": "Production-grade Nginx Web Server web server package",
       "unit": "hostpanel-nginxd.service",
@@ -112,7 +112,7 @@
     {
       "name": "nodejs",
       "label": "Node.js",
-      "version": "3.0.1",
+      "version": "3.0.2",
       "category": "Runtime",
       "description": "HostPanel Node.js package",
       "unit": "hostpanel-nodejsd.service",
@@ -157,7 +157,7 @@
     {
       "name": "ssl",
       "label": "SSL / TLS Certificates",
-      "version": "3.0.5",
+      "version": "3.0.6",
       "category": "Security",
       "description": "HostPanel SSL / TLS Certificates package",
       "unit": "hostpanel-ssld.service",
@@ -172,7 +172,7 @@
     {
       "name": "storage",
       "label": "Object Storage (S3)",
-      "version": "3.1.2",
+      "version": "3.1.3",
       "category": "File & Storage",
       "description": "HostPanel S3-compatible Object Storage with AWS SigV4, bucket management, access keys, and object explorer",
       "unit": "hostpanel-storaged.service",
@@ -217,7 +217,7 @@
     {
       "name": "wireguard",
       "label": "WireGuard VPN",
-      "version": "3.0.4",
+      "version": "3.0.5",
       "category": "Network & Security",
       "description": "Fast, modern VPN server with automated peer management and QR codes",
       "unit": "hostpanel-wireguardd.service",

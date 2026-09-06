@@ -514,7 +514,7 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
           </Typography>
         </Box>
 
-        <Stack direction="row" spacing={1} sx={{ alignItems: "center", flexShrink: 0 }}>
+        <Stack direction="row" spacing={1} sx={{ alignItems: "center", flexWrap: "wrap", gap: 1 }}>
           {/* Refresh */}
           <Tooltip title="Refresh Status" arrow>
             <span>
@@ -677,7 +677,13 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
       {/* Main Bordered Tabs Container */}
       <Panel padded={false}>
         <Box sx={{ borderBottom: 1, borderColor: "divider", px: 2 }}>
-          <Tabs value={tab} onChange={(_, v) => setTab(v)}>
+          <Tabs
+            value={tab}
+            onChange={(_, v) => setTab(v)}
+            variant="scrollable"
+            scrollButtons="auto"
+            allowScrollButtonsMobile
+          >
             <Tab label={`Applications (${apps.length})`} />
             <Tab label="Node Runtimes" />
             <Tab label="Live Console Logs" />
@@ -711,8 +717,8 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
               />
             </Stack>
 
-            <TableContainer>
-              <Table size="medium">
+            <TableContainer sx={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+              <Table size="medium" sx={{ minWidth: 680 }}>
                 <TableHead>
                   <TableRow>
                     <TableCell sx={{ fontWeight: 600, fontSize: "0.75rem", textTransform: "uppercase" }}>
@@ -1054,31 +1060,33 @@ function NodejsBody({ ctx }: { ctx: PackageContext }) {
 
             <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", md: "1fr 1fr" }, gap: 2.5 }}>
               <Panel label="Filesystem Sandboxes (/opt/hostpanel)" padded={false}>
-                <Table size="small">
-                  <TableHead>
-                    <TableRow>
-                      <TableCell sx={{ fontWeight: 600, fontSize: "0.75rem" }}>Sandbox Purpose</TableCell>
-                      <TableCell sx={{ fontWeight: 600, fontSize: "0.75rem" }}>Enforced Path</TableCell>
-                    </TableRow>
-                  </TableHead>
-                  <TableBody>
-                    {[
-                      { purpose: "Node Runtime Binaries", path: "/opt/hostpanel/runtimes/node/" },
-                      { purpose: "Application Data & Roots", path: "/opt/hostpanel/data/apps/" },
-                      { purpose: "Configuration & Env Files", path: "/opt/hostpanel/etc/nodejs/" },
-                      { purpose: "Application Logs", path: "/opt/hostpanel/logs/nodejs/" },
-                      { purpose: "Daemon & App PIDs", path: "/opt/hostpanel/run/nodejs/" },
-                      { purpose: "Reverse Proxy Ports", path: "31000 – 31999 (Allocated)" },
-                    ].map((row) => (
-                      <TableRow key={row.path}>
-                        <TableCell sx={{ fontSize: "0.8125rem" }}>{row.purpose}</TableCell>
-                        <TableCell sx={{ fontFamily: MONO, fontSize: "0.75rem", color: "text.secondary" }}>
-                          {row.path}
-                        </TableCell>
+                <TableContainer sx={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+                  <Table size="small">
+                    <TableHead>
+                      <TableRow>
+                        <TableCell sx={{ fontWeight: 600, fontSize: "0.75rem" }}>Sandbox Purpose</TableCell>
+                        <TableCell sx={{ fontWeight: 600, fontSize: "0.75rem" }}>Enforced Path</TableCell>
                       </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
+                    </TableHead>
+                    <TableBody>
+                      {[
+                        { purpose: "Node Runtime Binaries", path: "/opt/hostpanel/runtimes/node/" },
+                        { purpose: "Application Data & Roots", path: "/opt/hostpanel/data/apps/" },
+                        { purpose: "Configuration & Env Files", path: "/opt/hostpanel/etc/nodejs/" },
+                        { purpose: "Application Logs", path: "/opt/hostpanel/logs/nodejs/" },
+                        { purpose: "Daemon & App PIDs", path: "/opt/hostpanel/run/nodejs/" },
+                        { purpose: "Reverse Proxy Ports", path: "31000 – 31999 (Allocated)" },
+                      ].map((row) => (
+                        <TableRow key={row.path}>
+                          <TableCell sx={{ fontSize: "0.8125rem" }}>{row.purpose}</TableCell>
+                          <TableCell sx={{ fontFamily: MONO, fontSize: "0.75rem", color: "text.secondary" }}>
+                            {row.path}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </TableContainer>
               </Panel>
 
               <Panel label="System Daemon & Security Grant" padded={true}>

@@ -22686,7 +22686,7 @@ function $$({ ctx: e }) {
               " • Port 27017 • Socket: /opt/hostpanel/run/mongodb/mongodb-27017.sock"
             ] })
           ] }),
-          /* @__PURE__ */ u.jsxs(Qe, { direction: "row", spacing: 0.75, sx: { alignItems: "center", flexShrink: 0 }, children: [
+          /* @__PURE__ */ u.jsxs(Qe, { direction: "row", spacing: 0.75, sx: { alignItems: "center", flexWrap: "wrap", gap: 0.75 }, children: [
             /* @__PURE__ */ u.jsx(Pn, { title: "Refresh Status", arrow: !0, children: /* @__PURE__ */ u.jsx("span", { children: /* @__PURE__ */ u.jsx(
               Ht,
               {
@@ -22777,8 +22777,8 @@ function $$({ ctx: e }) {
         ]
       }
     ),
-    /* @__PURE__ */ u.jsxs(Qe, { direction: { xs: "column", md: "row" }, spacing: 2, children: [
-      /* @__PURE__ */ u.jsx(Xu, { variant: "outlined", sx: { flex: 1 }, children: /* @__PURE__ */ u.jsxs(qu, { sx: { p: 2, "&:last-child": { pb: 2 } }, children: [
+    /* @__PURE__ */ u.jsxs(Qe, { direction: { xs: "column", md: "row" }, spacing: 2, sx: { flexWrap: "wrap" }, children: [
+      /* @__PURE__ */ u.jsx(Xu, { variant: "outlined", sx: { flex: { xs: "1 1 100%", sm: "1 1 calc(50% - 16px)", md: 1 } }, children: /* @__PURE__ */ u.jsxs(qu, { sx: { p: 2, "&:last-child": { pb: 2 } }, children: [
         /* @__PURE__ */ u.jsx(td, { children: "DAEMON STATUS" }),
         /* @__PURE__ */ u.jsx(Ve, { variant: "h6", sx: { fontWeight: 700, mt: 0.5 }, children: wl ? "Online" : "Offline" }),
         /* @__PURE__ */ u.jsxs(Ve, { variant: "caption", sx: { color: "text.secondary" }, children: [
@@ -22788,12 +22788,12 @@ function $$({ ctx: e }) {
           (r == null ? void 0 : r.uptime) || "0s"
         ] })
       ] }) }),
-      /* @__PURE__ */ u.jsx(Xu, { variant: "outlined", sx: { flex: 1 }, children: /* @__PURE__ */ u.jsxs(qu, { sx: { p: 2, "&:last-child": { pb: 2 } }, children: [
+      /* @__PURE__ */ u.jsx(Xu, { variant: "outlined", sx: { flex: { xs: "1 1 100%", sm: "1 1 calc(50% - 16px)", md: 1 } }, children: /* @__PURE__ */ u.jsxs(qu, { sx: { p: 2, "&:last-child": { pb: 2 } }, children: [
         /* @__PURE__ */ u.jsx(td, { children: "ENGINE VERSION" }),
         /* @__PURE__ */ u.jsx(Ve, { variant: "h6", sx: { fontWeight: 700, mt: 0.5 }, children: (r == null ? void 0 : r.version) || "MongoDB 8.0" }),
         /* @__PURE__ */ u.jsx(Ve, { variant: "caption", sx: { color: "text.secondary" }, children: "Port: 27017 • Socket: /opt/hostpanel/run/mongodb/mongodb-27017.sock" })
       ] }) }),
-      /* @__PURE__ */ u.jsx(Xu, { variant: "outlined", sx: { flex: 1 }, children: /* @__PURE__ */ u.jsxs(qu, { sx: { p: 2, "&:last-child": { pb: 2 } }, children: [
+      /* @__PURE__ */ u.jsx(Xu, { variant: "outlined", sx: { flex: { xs: "1 1 100%", sm: "1 1 calc(50% - 16px)", md: 1 } }, children: /* @__PURE__ */ u.jsxs(qu, { sx: { p: 2, "&:last-child": { pb: 2 } }, children: [
         /* @__PURE__ */ u.jsx(td, { children: "DATABASES & COLLECTIONS" }),
         /* @__PURE__ */ u.jsxs(Ve, { variant: "h6", sx: { fontWeight: 700, mt: 0.5 }, children: [
           c.length,
@@ -22808,14 +22808,25 @@ function $$({ ctx: e }) {
       ] }) })
     ] }),
     /* @__PURE__ */ u.jsxs(An, { children: [
-      /* @__PURE__ */ u.jsxs(m$, { value: t, onChange: (z, ee) => n(ee), sx: { borderBottom: 1, borderColor: "divider", px: 2 }, children: [
-        /* @__PURE__ */ u.jsx(Zl, { value: "databases", label: `Databases (${c.length})` }),
-        /* @__PURE__ */ u.jsx(Zl, { value: "users", label: `Users & Roles (${m.length})` }),
-        /* @__PURE__ */ u.jsx(Zl, { value: "query", label: "⚡ Collections & Documents" }),
-        /* @__PURE__ */ u.jsx(Zl, { value: "service", label: "Service & Configuration" })
-      ] }),
+      /* @__PURE__ */ u.jsxs(
+        m$,
+        {
+          value: t,
+          onChange: (z, ee) => n(ee),
+          variant: "scrollable",
+          scrollButtons: "auto",
+          allowScrollButtonsMobile: !0,
+          sx: { borderBottom: 1, borderColor: "divider", px: 2 },
+          children: [
+            /* @__PURE__ */ u.jsx(Zl, { value: "databases", label: `Databases (${c.length})` }),
+            /* @__PURE__ */ u.jsx(Zl, { value: "users", label: `Users & Roles (${m.length})` }),
+            /* @__PURE__ */ u.jsx(Zl, { value: "query", label: "⚡ Collections & Documents" }),
+            /* @__PURE__ */ u.jsx(Zl, { value: "service", label: "Service & Configuration" })
+          ]
+        }
+      ),
       t === "databases" && /* @__PURE__ */ u.jsxs(Xt, { sx: { p: 2 }, children: [
-        /* @__PURE__ */ u.jsxs(Qe, { direction: "row", spacing: 2, sx: { justifyContent: "space-between", alignItems: "center", mb: 2 }, children: [
+        /* @__PURE__ */ u.jsxs(Qe, { direction: "row", spacing: 2, sx: { justifyContent: "space-between", alignItems: "center", mb: 2, flexWrap: "wrap", gap: 1 }, children: [
           /* @__PURE__ */ u.jsx(
             mn,
             {
@@ -22833,7 +22844,7 @@ function $$({ ctx: e }) {
           ),
           /* @__PURE__ */ u.jsx(Ct, { variant: "contained", size: "small", startIcon: /* @__PURE__ */ u.jsx(Ju, {}), onClick: () => $(!0), children: "New Database" })
         ] }),
-        /* @__PURE__ */ u.jsx(Vg, { children: /* @__PURE__ */ u.jsxs(Wg, { size: "small", children: [
+        /* @__PURE__ */ u.jsx(Vg, { sx: { overflowX: "auto", WebkitOverflowScrolling: "touch" }, children: /* @__PURE__ */ u.jsxs(Wg, { size: "small", sx: { minWidth: 650 }, children: [
           /* @__PURE__ */ u.jsx(Yg, { children: /* @__PURE__ */ u.jsxs(ri, { children: [
             /* @__PURE__ */ u.jsx(Wt, { sx: { fontWeight: 600 }, children: "Database Name" }),
             /* @__PURE__ */ u.jsx(Wt, { sx: { fontWeight: 600 }, children: "Size" }),
@@ -22860,7 +22871,7 @@ function $$({ ctx: e }) {
         ] }) })
       ] }),
       t === "users" && /* @__PURE__ */ u.jsxs(Xt, { sx: { p: 2 }, children: [
-        /* @__PURE__ */ u.jsxs(Qe, { direction: "row", spacing: 2, sx: { justifyContent: "space-between", alignItems: "center", mb: 2 }, children: [
+        /* @__PURE__ */ u.jsxs(Qe, { direction: "row", spacing: 2, sx: { justifyContent: "space-between", alignItems: "center", mb: 2, flexWrap: "wrap", gap: 1 }, children: [
           /* @__PURE__ */ u.jsx(
             mn,
             {
@@ -22878,7 +22889,7 @@ function $$({ ctx: e }) {
           ),
           /* @__PURE__ */ u.jsx(Ct, { variant: "contained", size: "small", startIcon: /* @__PURE__ */ u.jsx(qg, {}), onClick: () => G(!0), children: "New User" })
         ] }),
-        /* @__PURE__ */ u.jsx(Vg, { children: /* @__PURE__ */ u.jsxs(Wg, { size: "small", children: [
+        /* @__PURE__ */ u.jsx(Vg, { sx: { overflowX: "auto", WebkitOverflowScrolling: "touch" }, children: /* @__PURE__ */ u.jsxs(Wg, { size: "small", sx: { minWidth: 650 }, children: [
           /* @__PURE__ */ u.jsx(Yg, { children: /* @__PURE__ */ u.jsxs(ri, { children: [
             /* @__PURE__ */ u.jsx(Wt, { sx: { fontWeight: 600 }, children: "Username" }),
             /* @__PURE__ */ u.jsx(Wt, { sx: { fontWeight: 600 }, children: "Auth Database" }),

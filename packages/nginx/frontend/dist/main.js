@@ -40906,7 +40906,7 @@ function pP({ ctx: e }) {
             ),
             r?.version && /* @__PURE__ */ N.jsx(Fe, { variant: "body2", sx: { color: "text.secondary", fontFamily: pn, fontSize: "0.8125rem" }, children: r.version })
           ] }),
-          /* @__PURE__ */ N.jsxs(qe, { direction: "row", spacing: 0.75, sx: { alignItems: "center", flexShrink: 0 }, children: [
+          /* @__PURE__ */ N.jsxs(qe, { direction: "row", spacing: 0.75, sx: { alignItems: "center", flexWrap: "wrap", gap: 0.75 }, children: [
             /* @__PURE__ */ N.jsx(di, { title: "Refresh Status", arrow: !0, children: /* @__PURE__ */ N.jsx("span", { children: /* @__PURE__ */ N.jsx(
               Hr,
               {
@@ -41105,6 +41105,9 @@ function pP({ ctx: e }) {
         {
           value: t,
           onChange: (Z, te) => n(te),
+          variant: "scrollable",
+          scrollButtons: "auto",
+          allowScrollButtonsMobile: !0,
           sx: {
             borderBottom: "1px solid",
             borderColor: "divider",
@@ -41149,7 +41152,7 @@ function pP({ ctx: e }) {
               }
             )
           ] }),
-          /* @__PURE__ */ N.jsx(Gv, { component: gn, variant: "outlined", children: /* @__PURE__ */ N.jsxs(Uv, { size: "small", children: [
+          /* @__PURE__ */ N.jsx(Gv, { component: gn, variant: "outlined", sx: { overflowX: "auto", WebkitOverflowScrolling: "touch" }, children: /* @__PURE__ */ N.jsxs(Uv, { size: "small", sx: { minWidth: 650 }, children: [
             /* @__PURE__ */ N.jsx(Qv, { children: /* @__PURE__ */ N.jsxs(Mo, { children: [
               /* @__PURE__ */ N.jsx(Jt, { children: "Domain / Server Name" }),
               /* @__PURE__ */ N.jsx(Jt, { children: "SSL" }),
@@ -41284,7 +41287,7 @@ function pP({ ctx: e }) {
               /* @__PURE__ */ N.jsx("strong", { children: d.length })
             ] })
           ] }),
-          /* @__PURE__ */ N.jsx(Gv, { component: gn, variant: "outlined", children: /* @__PURE__ */ N.jsxs(Uv, { size: "small", children: [
+          /* @__PURE__ */ N.jsx(Gv, { component: gn, variant: "outlined", sx: { overflowX: "auto", WebkitOverflowScrolling: "touch" }, children: /* @__PURE__ */ N.jsxs(Uv, { size: "small", sx: { minWidth: 500 }, children: [
             /* @__PURE__ */ N.jsx(Qv, { children: /* @__PURE__ */ N.jsxs(Mo, { children: [
               /* @__PURE__ */ N.jsx(Jt, { children: "Module Name" }),
               /* @__PURE__ */ N.jsx(Jt, { children: "Type" }),

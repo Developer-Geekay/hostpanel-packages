@@ -732,7 +732,7 @@ function FileManagerBody({ ctx }: { ctx: PackageContext }) {
         spacing={2}
         sx={{ justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 1.5 }}
       >
-        <Box component="form" onSubmit={handleJumpToPath} sx={{ display: "flex", flex: 1, minWidth: 320, maxWidth: 650 }}>
+        <Box component="form" onSubmit={handleJumpToPath} sx={{ display: "flex", flex: 1, minWidth: { xs: "100%", sm: 320 }, maxWidth: { xs: "100%", sm: 650 } }}>
           <TextField
             fullWidth
             size="small"
@@ -758,7 +758,7 @@ function FileManagerBody({ ctx }: { ctx: PackageContext }) {
           />
         </Box>
 
-        <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap" }}>
+        <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap", gap: 1 }}>
           <Button
             variant="outlined"
             size="small"
@@ -843,13 +843,13 @@ function FileManagerBody({ ctx }: { ctx: PackageContext }) {
             ),
           },
         }}
-        sx={{ width: 340 }}
+        sx={{ width: { xs: "100%", sm: 340 } }}
       />
 
       {/* FILES TABLE PANEL */}
       <Panel label={`Directory Contents (${filtered.length} items)`} padded={false}>
-        <TableContainer>
-          <Table size="small">
+        <TableContainer sx={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+          <Table size="small" sx={{ minWidth: 650 }}>
             <TableHead>
               <TableRow>
                 <TableCell sx={{ fontWeight: 600, fontSize: "0.75rem", textTransform: "uppercase" }}>Name</TableCell>

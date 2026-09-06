@@ -41099,7 +41099,7 @@ function pP({ ctx: e }) {
             ),
             r?.version && /* @__PURE__ */ D.jsx(ze, { variant: "body2", sx: { color: "text.secondary", fontFamily: Jt, fontSize: "0.8125rem" }, children: r.version })
           ] }),
-          /* @__PURE__ */ D.jsxs(et, { direction: "row", spacing: 0.75, sx: { alignItems: "center", flexShrink: 0 }, children: [
+          /* @__PURE__ */ D.jsxs(et, { direction: "row", spacing: 0.75, sx: { alignItems: "center", flexWrap: "wrap", gap: 0.75 }, children: [
             /* @__PURE__ */ D.jsx(pi, { title: "Refresh Status", arrow: !0, children: /* @__PURE__ */ D.jsx("span", { children: /* @__PURE__ */ D.jsx(
               Vr,
               {
@@ -41298,11 +41298,14 @@ function pP({ ctx: e }) {
         {
           value: t,
           onChange: (Y, q) => n(q),
+          variant: "scrollable",
+          scrollButtons: "auto",
+          allowScrollButtonsMobile: !0,
           sx: {
             borderBottom: "1px solid",
             borderColor: "divider",
             px: 1,
-            "& .MuiTab-root": { textTransform: "none", fontWeight: 600, minHeight: 44, fontSize: "0.8125rem" }
+            "& .MuiTab-root": { textTransform: "none", fontWeight: 600, minHeight: 44, fontSize: "0.8125rem", whiteSpace: "nowrap" }
           },
           children: [
             /* @__PURE__ */ D.jsx(Ps, { label: `Virtual Hosts (${ai})`, value: "vhosts" }),
@@ -41342,7 +41345,7 @@ function pP({ ctx: e }) {
               }
             )
           ] }),
-          /* @__PURE__ */ D.jsx(Yv, { component: dn, variant: "outlined", children: /* @__PURE__ */ D.jsxs(Vv, { size: "small", children: [
+          /* @__PURE__ */ D.jsx(Yv, { component: dn, variant: "outlined", sx: { overflowX: "auto", WebkitOverflowScrolling: "touch" }, children: /* @__PURE__ */ D.jsxs(Vv, { size: "small", sx: { minWidth: 650 }, children: [
             /* @__PURE__ */ D.jsx(Xv, { children: /* @__PURE__ */ D.jsxs(To, { children: [
               /* @__PURE__ */ D.jsx(Et, { children: "ServerName / Domain" }),
               /* @__PURE__ */ D.jsx(Et, { children: "Port" }),
@@ -41417,7 +41420,7 @@ function pP({ ctx: e }) {
               " Enabled)"
             ] })
           ] }),
-          /* @__PURE__ */ D.jsx(Yv, { component: dn, variant: "outlined", children: /* @__PURE__ */ D.jsxs(Vv, { size: "small", children: [
+          /* @__PURE__ */ D.jsx(Yv, { component: dn, variant: "outlined", sx: { overflowX: "auto", WebkitOverflowScrolling: "touch" }, children: /* @__PURE__ */ D.jsxs(Vv, { size: "small", sx: { minWidth: 500 }, children: [
             /* @__PURE__ */ D.jsx(Xv, { children: /* @__PURE__ */ D.jsxs(To, { children: [
               /* @__PURE__ */ D.jsx(Et, { children: "Module Name" }),
               /* @__PURE__ */ D.jsx(Et, { children: "Status" }),

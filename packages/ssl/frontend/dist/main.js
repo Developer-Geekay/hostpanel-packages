@@ -23255,7 +23255,7 @@ function K$({ ctx: e }) {
             ),
             /* @__PURE__ */ d.jsx(Be, { variant: "body2", sx: { color: "text.secondary" }, children: "hostpanel-ssld.service • User hp-ssl • Isolation /opt/hostpanel/etc/ssl" })
           ] }),
-          /* @__PURE__ */ d.jsxs(He, { direction: "row", spacing: 0.75, sx: { alignItems: "center", flexShrink: 0 }, children: [
+          /* @__PURE__ */ d.jsxs(He, { direction: "row", spacing: 0.75, sx: { alignItems: "center", flexWrap: "wrap", gap: 0.75 }, children: [
             /* @__PURE__ */ d.jsx(yo, { title: "Refresh Status", arrow: !0, children: /* @__PURE__ */ d.jsx("span", { children: /* @__PURE__ */ d.jsx(
               mo,
               {
@@ -23302,13 +23302,13 @@ function K$({ ctx: e }) {
         ]
       }
     ),
-    /* @__PURE__ */ d.jsxs(He, { direction: { xs: "column", sm: "row" }, spacing: 2, children: [
-      /* @__PURE__ */ d.jsx(jl, { variant: "outlined", sx: { flex: 1 }, children: /* @__PURE__ */ d.jsxs(Al, { sx: { p: 2, "&:last-child": { pb: 2 } }, children: [
+    /* @__PURE__ */ d.jsxs(He, { direction: { xs: "column", sm: "row" }, spacing: 2, sx: { flexWrap: "wrap" }, children: [
+      /* @__PURE__ */ d.jsx(jl, { variant: "outlined", sx: { flex: { xs: "1 1 100%", sm: "1 1 calc(50% - 16px)", md: 1 } }, children: /* @__PURE__ */ d.jsxs(Al, { sx: { p: 2, "&:last-child": { pb: 2 } }, children: [
         /* @__PURE__ */ d.jsx(Sr, { children: "SSL DAEMON STATUS" }),
         /* @__PURE__ */ d.jsx(Be, { variant: "h6", sx: { fontWeight: 700, mt: 0.5 }, children: xt ? "Online" : "Offline" }),
         /* @__PURE__ */ d.jsx(Be, { variant: "caption", sx: { color: "text.secondary" }, children: r?.version || "OpenSSL Core" })
       ] }) }),
-      /* @__PURE__ */ d.jsx(jl, { variant: "outlined", sx: { flex: 1 }, children: /* @__PURE__ */ d.jsxs(Al, { sx: { p: 2, "&:last-child": { pb: 2 } }, children: [
+      /* @__PURE__ */ d.jsx(jl, { variant: "outlined", sx: { flex: { xs: "1 1 100%", sm: "1 1 calc(50% - 16px)", md: 1 } }, children: /* @__PURE__ */ d.jsxs(Al, { sx: { p: 2, "&:last-child": { pb: 2 } }, children: [
         /* @__PURE__ */ d.jsx(Sr, { children: "ACTIVE CERTIFICATES" }),
         /* @__PURE__ */ d.jsxs(Be, { variant: "h6", sx: { fontWeight: 700, mt: 0.5 }, children: [
           c.length,
@@ -23322,7 +23322,7 @@ function K$({ ctx: e }) {
           " Custom"
         ] })
       ] }) }),
-      /* @__PURE__ */ d.jsx(jl, { variant: "outlined", sx: { flex: 1 }, children: /* @__PURE__ */ d.jsxs(Al, { sx: { p: 2, "&:last-child": { pb: 2 } }, children: [
+      /* @__PURE__ */ d.jsx(jl, { variant: "outlined", sx: { flex: { xs: "1 1 100%", sm: "1 1 calc(50% - 16px)", md: 1 } }, children: /* @__PURE__ */ d.jsxs(Al, { sx: { p: 2, "&:last-child": { pb: 2 } }, children: [
         /* @__PURE__ */ d.jsx(Sr, { children: "EXPIRING SOON (< 30 DAYS)" }),
         /* @__PURE__ */ d.jsxs(He, { direction: "row", spacing: 1, sx: { alignItems: "center", mt: 0.5 }, children: [
           /* @__PURE__ */ d.jsx(Be, { variant: "h6", sx: { fontWeight: 700 }, children: Qn }),
@@ -23339,7 +23339,7 @@ function K$({ ctx: e }) {
         ] }),
         /* @__PURE__ */ d.jsx(Be, { variant: "caption", sx: { color: "text.secondary" }, children: Qn === 0 ? "All certificates healthy" : "Certificates need renewal" })
       ] }) }),
-      /* @__PURE__ */ d.jsx(jl, { variant: "outlined", sx: { flex: 1 }, children: /* @__PURE__ */ d.jsxs(Al, { sx: { p: 2, "&:last-child": { pb: 2 } }, children: [
+      /* @__PURE__ */ d.jsx(jl, { variant: "outlined", sx: { flex: { xs: "1 1 100%", sm: "1 1 calc(50% - 16px)", md: 1 } }, children: /* @__PURE__ */ d.jsxs(Al, { sx: { p: 2, "&:last-child": { pb: 2 } }, children: [
         /* @__PURE__ */ d.jsx(Sr, { children: "ACME AUTO-RENEWAL" }),
         /* @__PURE__ */ d.jsx(Be, { variant: "h6", sx: { fontWeight: 700, mt: 0.5, color: "success.main" }, children: "Active" }),
         /* @__PURE__ */ d.jsx(Be, { variant: "caption", sx: { color: "text.secondary" }, children: "Automated Daily Cron Checks" })
@@ -23351,6 +23351,9 @@ function K$({ ctx: e }) {
         {
           value: t,
           onChange: (_, Ie) => n(Ie),
+          variant: "scrollable",
+          scrollButtons: "auto",
+          allowScrollButtonsMobile: !0,
           sx: {
             borderBottom: "1px solid",
             borderColor: "divider",
@@ -23375,7 +23378,7 @@ function K$({ ctx: e }) {
               spacing: 1.5,
               sx: { justifyContent: "space-between", alignItems: { sm: "center" } },
               children: [
-                /* @__PURE__ */ d.jsxs(He, { direction: "row", spacing: 1.5, sx: { flex: 1, maxWidth: { sm: 480 } }, children: [
+                /* @__PURE__ */ d.jsxs(He, { direction: { xs: "column", sm: "row" }, spacing: 1.5, sx: { flex: 1, maxWidth: { sm: 480 } }, children: [
                   /* @__PURE__ */ d.jsx(
                     Nr,
                     {
@@ -23420,7 +23423,7 @@ function K$({ ctx: e }) {
               ]
             }
           ),
-          /* @__PURE__ */ d.jsx(JM, { component: Rn, variant: "outlined", children: /* @__PURE__ */ d.jsxs(DM, { size: "small", children: [
+          /* @__PURE__ */ d.jsx(JM, { component: Rn, variant: "outlined", sx: { overflowX: "auto", WebkitOverflowScrolling: "touch" }, children: /* @__PURE__ */ d.jsxs(DM, { size: "small", sx: { minWidth: 650 }, children: [
             /* @__PURE__ */ d.jsx(o$, { children: /* @__PURE__ */ d.jsxs(Ku, { children: [
               /* @__PURE__ */ d.jsx(_n, { children: "Domain" }),
               /* @__PURE__ */ d.jsx(_n, { children: "Issuer" }),

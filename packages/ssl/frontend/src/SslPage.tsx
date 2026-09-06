@@ -416,7 +416,7 @@ function SslPageBody({ ctx }: { ctx: PackageContext }) {
           </Typography>
         </Stack>
 
-        <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", flexShrink: 0 }}>
+        <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", flexWrap: "wrap", gap: 0.75 }}>
           {/* Refresh */}
           <Tooltip title="Refresh Status" arrow>
             <span>
@@ -474,8 +474,8 @@ function SslPageBody({ ctx }: { ctx: PackageContext }) {
       </Stack>
 
       {/* 4 Overview Stat Cards */}
-      <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
-        <Card variant="outlined" sx={{ flex: 1 }}>
+      <Stack direction={{ xs: "column", sm: "row" }} spacing={2} sx={{ flexWrap: "wrap" }}>
+        <Card variant="outlined" sx={{ flex: { xs: "1 1 100%", sm: "1 1 calc(50% - 16px)", md: 1 } }}>
           <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
             <MicroLabel>SSL DAEMON STATUS</MicroLabel>
             <Typography variant="h6" sx={{ fontWeight: 700, mt: 0.5 }}>
@@ -487,7 +487,7 @@ function SslPageBody({ ctx }: { ctx: PackageContext }) {
           </CardContent>
         </Card>
 
-        <Card variant="outlined" sx={{ flex: 1 }}>
+        <Card variant="outlined" sx={{ flex: { xs: "1 1 100%", sm: "1 1 calc(50% - 16px)", md: 1 } }}>
           <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
             <MicroLabel>ACTIVE CERTIFICATES</MicroLabel>
             <Typography variant="h6" sx={{ fontWeight: 700, mt: 0.5 }}>
@@ -500,7 +500,7 @@ function SslPageBody({ ctx }: { ctx: PackageContext }) {
           </CardContent>
         </Card>
 
-        <Card variant="outlined" sx={{ flex: 1 }}>
+        <Card variant="outlined" sx={{ flex: { xs: "1 1 100%", sm: "1 1 calc(50% - 16px)", md: 1 } }}>
           <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
             <MicroLabel>EXPIRING SOON (&lt; 30 DAYS)</MicroLabel>
             <Stack direction="row" spacing={1} sx={{ alignItems: "center", mt: 0.5 }}>
@@ -523,7 +523,7 @@ function SslPageBody({ ctx }: { ctx: PackageContext }) {
           </CardContent>
         </Card>
 
-        <Card variant="outlined" sx={{ flex: 1 }}>
+        <Card variant="outlined" sx={{ flex: { xs: "1 1 100%", sm: "1 1 calc(50% - 16px)", md: 1 } }}>
           <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
             <MicroLabel>ACME AUTO-RENEWAL</MicroLabel>
             <Typography variant="h6" sx={{ fontWeight: 700, mt: 0.5, color: "success.main" }}>
@@ -541,6 +541,9 @@ function SslPageBody({ ctx }: { ctx: PackageContext }) {
         <Tabs
           value={tab}
           onChange={(_, val) => setTab(val)}
+          variant="scrollable"
+          scrollButtons="auto"
+          allowScrollButtonsMobile
           sx={{
             borderBottom: "1px solid",
             borderColor: "divider",
@@ -564,7 +567,7 @@ function SslPageBody({ ctx }: { ctx: PackageContext }) {
                 spacing={1.5}
                 sx={{ justifyContent: "space-between", alignItems: { sm: "center" } }}
               >
-                <Stack direction="row" spacing={1.5} sx={{ flex: 1, maxWidth: { sm: 480 } }}>
+                <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} sx={{ flex: 1, maxWidth: { sm: 480 } }}>
                   <TextField
                     size="small"
                     placeholder="Search by domain or issuer..."
@@ -606,8 +609,8 @@ function SslPageBody({ ctx }: { ctx: PackageContext }) {
                 </Stack>
               </Stack>
 
-              <TableContainer component={Paper} variant="outlined">
-                <Table size="small">
+              <TableContainer component={Paper} variant="outlined" sx={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+                <Table size="small" sx={{ minWidth: 650 }}>
                   <TableHead>
                     <TableRow>
                       <TableCell>Domain</TableCell>

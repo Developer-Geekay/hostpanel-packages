@@ -579,7 +579,7 @@ function NginxPageBody({ ctx }: { ctx: PackageContext }) {
           )}
         </Stack>
 
-        <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", flexShrink: 0 }}>
+        <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", flexWrap: "wrap", gap: 0.75 }}>
           {/* Refresh */}
           <Tooltip title="Refresh Status" arrow>
             <span>
@@ -809,6 +809,9 @@ function NginxPageBody({ ctx }: { ctx: PackageContext }) {
         <Tabs
           value={tab}
           onChange={(_, val) => setTab(val)}
+          variant="scrollable"
+          scrollButtons="auto"
+          allowScrollButtonsMobile
           sx={{
             borderBottom: "1px solid",
             borderColor: "divider",
@@ -854,8 +857,8 @@ function NginxPageBody({ ctx }: { ctx: PackageContext }) {
                 </Button>
               </Stack>
 
-              <TableContainer component={Paper} variant="outlined">
-                <Table size="small">
+              <TableContainer component={Paper} variant="outlined" sx={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+                <Table size="small" sx={{ minWidth: 650 }}>
                   <TableHead>
                     <TableRow>
                       <TableCell>Domain / Server Name</TableCell>
@@ -1031,8 +1034,8 @@ function NginxPageBody({ ctx }: { ctx: PackageContext }) {
                 </Typography>
               </Stack>
 
-              <TableContainer component={Paper} variant="outlined">
-                <Table size="small">
+              <TableContainer component={Paper} variant="outlined" sx={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+                <Table size="small" sx={{ minWidth: 500 }}>
                   <TableHead>
                     <TableRow>
                       <TableCell>Module Name</TableCell>

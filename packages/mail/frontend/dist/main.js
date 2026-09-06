@@ -22910,7 +22910,7 @@ function T$({ ctx: e }) {
             ),
             /* @__PURE__ */ c.jsx(it, { variant: "body2", sx: { color: "text.secondary" }, children: "Postfix / Dovecot • 100% Isolated in /opt/hostpanel" })
           ] }),
-          /* @__PURE__ */ c.jsxs(we, { direction: "row", spacing: 0.75, sx: { alignItems: "center", flexShrink: 0 }, children: [
+          /* @__PURE__ */ c.jsxs(we, { direction: "row", spacing: 0.75, sx: { alignItems: "center", flexWrap: "wrap", gap: 0.75 }, children: [
             /* @__PURE__ */ c.jsx(xr, { title: "Refresh Status", arrow: !0, children: /* @__PURE__ */ c.jsx("span", { children: /* @__PURE__ */ c.jsx(
               br,
               {
@@ -22960,8 +22960,8 @@ function T$({ ctx: e }) {
         ]
       }
     ),
-    /* @__PURE__ */ c.jsxs(we, { direction: { xs: "column", sm: "row" }, spacing: 2, children: [
-      /* @__PURE__ */ c.jsx(Ll, { variant: "outlined", sx: { flex: 1 }, children: /* @__PURE__ */ c.jsxs(zl, { sx: { p: 2, "&:last-child": { pb: 2 } }, children: [
+    /* @__PURE__ */ c.jsxs(we, { direction: { xs: "column", sm: "row" }, spacing: 2, sx: { flexWrap: "wrap" }, children: [
+      /* @__PURE__ */ c.jsx(Ll, { variant: "outlined", sx: { flex: { xs: "1 1 100%", sm: "1 1 calc(50% - 16px)", md: 1 } }, children: /* @__PURE__ */ c.jsxs(zl, { sx: { p: 2, "&:last-child": { pb: 2 } }, children: [
         /* @__PURE__ */ c.jsx(pi, { children: "MAIL SERVER STATUS" }),
         /* @__PURE__ */ c.jsxs(it, { variant: "h6", sx: { fontWeight: 700, mt: 0.5 }, children: [
           r?.postfix || "Online",
@@ -22970,7 +22970,7 @@ function T$({ ctx: e }) {
         ] }),
         /* @__PURE__ */ c.jsx(it, { variant: "caption", sx: { color: "text.secondary" }, children: "SMTP 25/587 • IMAP 993" })
       ] }) }),
-      /* @__PURE__ */ c.jsx(Ll, { variant: "outlined", sx: { flex: 1 }, children: /* @__PURE__ */ c.jsxs(zl, { sx: { p: 2, "&:last-child": { pb: 2 } }, children: [
+      /* @__PURE__ */ c.jsx(Ll, { variant: "outlined", sx: { flex: { xs: "1 1 100%", sm: "1 1 calc(50% - 16px)", md: 1 } }, children: /* @__PURE__ */ c.jsxs(zl, { sx: { p: 2, "&:last-child": { pb: 2 } }, children: [
         /* @__PURE__ */ c.jsx(pi, { children: "ACTIVE DOMAINS" }),
         /* @__PURE__ */ c.jsxs(it, { variant: "h6", sx: { fontWeight: 700, mt: 0.5 }, children: [
           l.length,
@@ -22979,7 +22979,7 @@ function T$({ ctx: e }) {
         ] }),
         /* @__PURE__ */ c.jsx(it, { variant: "caption", sx: { color: "text.secondary" }, children: "DKIM Keys Generated & Managed" })
       ] }) }),
-      /* @__PURE__ */ c.jsx(Ll, { variant: "outlined", sx: { flex: 1 }, children: /* @__PURE__ */ c.jsxs(zl, { sx: { p: 2, "&:last-child": { pb: 2 } }, children: [
+      /* @__PURE__ */ c.jsx(Ll, { variant: "outlined", sx: { flex: { xs: "1 1 100%", sm: "1 1 calc(50% - 16px)", md: 1 } }, children: /* @__PURE__ */ c.jsxs(zl, { sx: { p: 2, "&:last-child": { pb: 2 } }, children: [
         /* @__PURE__ */ c.jsx(pi, { children: "TOTAL MAILBOXES" }),
         /* @__PURE__ */ c.jsxs(it, { variant: "h6", sx: { fontWeight: 700, mt: 0.5 }, children: [
           u.length,
@@ -22991,7 +22991,7 @@ function T$({ ctx: e }) {
           " MB Stored"
         ] })
       ] }) }),
-      /* @__PURE__ */ c.jsx(Ll, { variant: "outlined", sx: { flex: 1 }, children: /* @__PURE__ */ c.jsxs(zl, { sx: { p: 2, "&:last-child": { pb: 2 } }, children: [
+      /* @__PURE__ */ c.jsx(Ll, { variant: "outlined", sx: { flex: { xs: "1 1 100%", sm: "1 1 calc(50% - 16px)", md: 1 } }, children: /* @__PURE__ */ c.jsxs(zl, { sx: { p: 2, "&:last-child": { pb: 2 } }, children: [
         /* @__PURE__ */ c.jsx(pi, { children: "QUEUE COUNT" }),
         /* @__PURE__ */ c.jsxs(it, { variant: "h6", sx: { fontWeight: 700, mt: 0.5 }, children: [
           r?.queue_count ?? f.length,
@@ -23006,6 +23006,9 @@ function T$({ ctx: e }) {
         {
           value: t,
           onChange: (z, _) => n(_),
+          variant: "scrollable",
+          scrollButtons: "auto",
+          allowScrollButtonsMobile: !0,
           sx: {
             borderBottom: "1px solid",
             borderColor: "divider",
@@ -23053,7 +23056,7 @@ function T$({ ctx: e }) {
               }
             )
           ] }),
-          /* @__PURE__ */ c.jsx(Kl, { component: cn, variant: "outlined", children: /* @__PURE__ */ c.jsxs(Hl, { size: "small", children: [
+          /* @__PURE__ */ c.jsx(Kl, { component: cn, variant: "outlined", sx: { overflowX: "auto", WebkitOverflowScrolling: "touch" }, children: /* @__PURE__ */ c.jsxs(Hl, { size: "small", sx: { minWidth: 680 }, children: [
             /* @__PURE__ */ c.jsx(Yl, { children: /* @__PURE__ */ c.jsxs(Wn, { children: [
               /* @__PURE__ */ c.jsx(be, { children: "Email Address" }),
               /* @__PURE__ */ c.jsx(be, { children: "Domain" }),
@@ -23288,7 +23291,7 @@ function T$({ ctx: e }) {
               }
             )
           ] }),
-          /* @__PURE__ */ c.jsx(Kl, { component: cn, variant: "outlined", children: /* @__PURE__ */ c.jsxs(Hl, { size: "small", children: [
+          /* @__PURE__ */ c.jsx(Kl, { component: cn, variant: "outlined", sx: { overflowX: "auto", WebkitOverflowScrolling: "touch" }, children: /* @__PURE__ */ c.jsxs(Hl, { size: "small", sx: { minWidth: 680 }, children: [
             /* @__PURE__ */ c.jsx(Yl, { children: /* @__PURE__ */ c.jsxs(Wn, { children: [
               /* @__PURE__ */ c.jsx(be, { children: "Source Address" }),
               /* @__PURE__ */ c.jsx(be, { children: "Domain" }),
@@ -23353,7 +23356,7 @@ function T$({ ctx: e }) {
               }
             )
           ] }),
-          /* @__PURE__ */ c.jsx(Kl, { component: cn, variant: "outlined", children: /* @__PURE__ */ c.jsxs(Hl, { size: "small", children: [
+          /* @__PURE__ */ c.jsx(Kl, { component: cn, variant: "outlined", sx: { overflowX: "auto", WebkitOverflowScrolling: "touch" }, children: /* @__PURE__ */ c.jsxs(Hl, { size: "small", sx: { minWidth: 680 }, children: [
             /* @__PURE__ */ c.jsx(Yl, { children: /* @__PURE__ */ c.jsxs(Wn, { children: [
               /* @__PURE__ */ c.jsx(be, { children: "Domain Name" }),
               /* @__PURE__ */ c.jsx(be, { children: "DKIM Status" }),
@@ -23419,7 +23422,7 @@ function T$({ ctx: e }) {
                   children: "Flush Queue"
                 }
               ),
-              children: f.length === 0 ? /* @__PURE__ */ c.jsx(it, { variant: "body2", sx: { color: "text.secondary", py: 1 }, children: "Mail queue is clean. No outbound or delayed messages pending." }) : /* @__PURE__ */ c.jsx(Kl, { component: cn, variant: "outlined", children: /* @__PURE__ */ c.jsxs(Hl, { size: "small", children: [
+              children: f.length === 0 ? /* @__PURE__ */ c.jsx(it, { variant: "body2", sx: { color: "text.secondary", py: 1 }, children: "Mail queue is clean. No outbound or delayed messages pending." }) : /* @__PURE__ */ c.jsx(Kl, { component: cn, variant: "outlined", sx: { overflowX: "auto", WebkitOverflowScrolling: "touch" }, children: /* @__PURE__ */ c.jsxs(Hl, { size: "small", sx: { minWidth: 680 }, children: [
                 /* @__PURE__ */ c.jsx(Yl, { children: /* @__PURE__ */ c.jsxs(Wn, { children: [
                   /* @__PURE__ */ c.jsx(be, { children: "Queue ID" }),
                   /* @__PURE__ */ c.jsx(be, { children: "Sender" }),

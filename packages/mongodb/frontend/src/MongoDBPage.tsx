@@ -503,7 +503,7 @@ function MongoDBPageBody({ ctx }: { ctx: PackageContext }) {
           </Typography>
         </Stack>
 
-        <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", flexShrink: 0 }}>
+        <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", flexWrap: "wrap", gap: 0.75 }}>
           {/* Refresh */}
           <Tooltip title="Refresh Status" arrow>
             <span>
@@ -616,8 +616,8 @@ function MongoDBPageBody({ ctx }: { ctx: PackageContext }) {
       </Stack>
 
       {/* Overview Stat Cards */}
-      <Stack direction={{ xs: "column", md: "row" }} spacing={2}>
-        <Card variant="outlined" sx={{ flex: 1 }}>
+      <Stack direction={{ xs: "column", md: "row" }} spacing={2} sx={{ flexWrap: "wrap" }}>
+        <Card variant="outlined" sx={{ flex: { xs: "1 1 100%", sm: "1 1 calc(50% - 16px)", md: 1 } }}>
           <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
             <MicroLabel>DAEMON STATUS</MicroLabel>
             <Typography variant="h6" sx={{ fontWeight: 700, mt: 0.5 }}>
@@ -629,7 +629,7 @@ function MongoDBPageBody({ ctx }: { ctx: PackageContext }) {
           </CardContent>
         </Card>
 
-        <Card variant="outlined" sx={{ flex: 1 }}>
+        <Card variant="outlined" sx={{ flex: { xs: "1 1 100%", sm: "1 1 calc(50% - 16px)", md: 1 } }}>
           <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
             <MicroLabel>ENGINE VERSION</MicroLabel>
             <Typography variant="h6" sx={{ fontWeight: 700, mt: 0.5 }}>
@@ -641,7 +641,7 @@ function MongoDBPageBody({ ctx }: { ctx: PackageContext }) {
           </CardContent>
         </Card>
 
-        <Card variant="outlined" sx={{ flex: 1 }}>
+        <Card variant="outlined" sx={{ flex: { xs: "1 1 100%", sm: "1 1 calc(50% - 16px)", md: 1 } }}>
           <CardContent sx={{ p: 2, "&:last-child": { pb: 2 } }}>
             <MicroLabel>DATABASES & COLLECTIONS</MicroLabel>
             <Typography variant="h6" sx={{ fontWeight: 700, mt: 0.5 }}>
@@ -656,7 +656,14 @@ function MongoDBPageBody({ ctx }: { ctx: PackageContext }) {
 
       {/* Tabs */}
       <Paper>
-        <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ borderBottom: 1, borderColor: "divider", px: 2 }}>
+        <Tabs
+          value={tab}
+          onChange={(_, v) => setTab(v)}
+          variant="scrollable"
+          scrollButtons="auto"
+          allowScrollButtonsMobile
+          sx={{ borderBottom: 1, borderColor: "divider", px: 2 }}
+        >
           <Tab value="databases" label={`Databases (${databases.length})`} />
           <Tab value="users" label={`Users & Roles (${users.length})`} />
           <Tab value="query" label="⚡ Collections & Documents" />
@@ -666,7 +673,7 @@ function MongoDBPageBody({ ctx }: { ctx: PackageContext }) {
         {/* Tab 1: Databases */}
         {tab === "databases" && (
           <Box sx={{ p: 2 }}>
-            <Stack direction="row" spacing={2} sx={{ justifyContent: "space-between", alignItems: "center", mb: 2 }}>
+            <Stack direction="row" spacing={2} sx={{ justifyContent: "space-between", alignItems: "center", mb: 2, flexWrap: "wrap", gap: 1 }}>
               <TextField
                 size="small"
                 placeholder="Search databases..."
@@ -688,8 +695,8 @@ function MongoDBPageBody({ ctx }: { ctx: PackageContext }) {
               </Button>
             </Stack>
 
-            <TableContainer>
-              <Table size="small">
+            <TableContainer sx={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+              <Table size="small" sx={{ minWidth: 650 }}>
                 <TableHead>
                   <TableRow>
                     <TableCell sx={{ fontWeight: 600 }}>Database Name</TableCell>
@@ -740,7 +747,7 @@ function MongoDBPageBody({ ctx }: { ctx: PackageContext }) {
         {/* Tab 2: Users & Roles */}
         {tab === "users" && (
           <Box sx={{ p: 2 }}>
-            <Stack direction="row" spacing={2} sx={{ justifyContent: "space-between", alignItems: "center", mb: 2 }}>
+            <Stack direction="row" spacing={2} sx={{ justifyContent: "space-between", alignItems: "center", mb: 2, flexWrap: "wrap", gap: 1 }}>
               <TextField
                 size="small"
                 placeholder="Search users..."
@@ -762,8 +769,8 @@ function MongoDBPageBody({ ctx }: { ctx: PackageContext }) {
               </Button>
             </Stack>
 
-            <TableContainer>
-              <Table size="small">
+            <TableContainer sx={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+              <Table size="small" sx={{ minWidth: 650 }}>
                 <TableHead>
                   <TableRow>
                     <TableCell sx={{ fontWeight: 600 }}>Username</TableCell>

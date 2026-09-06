@@ -458,7 +458,7 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
           />
         </Stack>
 
-        <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", flexShrink: 0 }}>
+        <Stack direction="row" spacing={0.75} sx={{ alignItems: "center", flexWrap: "wrap", gap: 0.75 }}>
           {/* Refresh */}
           <Tooltip title="Refresh Status" arrow>
             <span>
@@ -618,6 +618,7 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
           onChange={(_, v) => setTab(v)}
           variant="scrollable"
           scrollButtons="auto"
+          allowScrollButtonsMobile
           sx={{
             borderBottom: "1px solid",
             borderColor: "divider",
@@ -634,8 +635,8 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
         {/* ── Tab 1: VPN Client Peers Table ───────────────────────────────── */}
         {tab === 0 && (
           <Box>
-            <TableContainer>
-              <Table size="medium">
+            <TableContainer sx={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+              <Table size="medium" sx={{ minWidth: 700 }}>
                 <TableHead>
                   <TableRow sx={{ bgcolor: "action.hover" }}>
                     <TableCell sx={{ width: 40 }}></TableCell>

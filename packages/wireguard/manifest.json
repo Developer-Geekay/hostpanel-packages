@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "feature": "wireguard",
   "label": "WireGuard VPN",
-  "version": "3.0.4",
+  "version": "3.0.5",
   "requires_core": [
     3,
     0,

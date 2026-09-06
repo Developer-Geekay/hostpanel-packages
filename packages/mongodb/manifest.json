@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "feature": "mongodb",
   "label": "MongoDB",
-  "version": "3.0.2",
+  "version": "3.0.3",
   "requires_core": [
     3,
     0,

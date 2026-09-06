@@ -24583,7 +24583,7 @@ function N3({ ctx: e }) {
               }
             )
           ] }),
-          /* @__PURE__ */ c.jsxs(Fe, { direction: "row", spacing: 0.75, sx: { alignItems: "center", flexShrink: 0 }, children: [
+          /* @__PURE__ */ c.jsxs(Fe, { direction: "row", spacing: 0.75, sx: { alignItems: "center", flexWrap: "wrap", gap: 0.75 }, children: [
             /* @__PURE__ */ c.jsx(xr, { title: "Refresh Status", arrow: !0, children: /* @__PURE__ */ c.jsx("span", { children: /* @__PURE__ */ c.jsx(
               Wn,
               {
@@ -24706,6 +24706,7 @@ function N3({ ctx: e }) {
           onChange: (z, X) => n(X),
           variant: "scrollable",
           scrollButtons: "auto",
+          allowScrollButtonsMobile: !0,
           sx: {
             borderBottom: "1px solid",
             borderColor: "divider",
@@ -24720,7 +24721,7 @@ function N3({ ctx: e }) {
           ]
         }
       ),
-      t === 0 && /* @__PURE__ */ c.jsx(Ae, { children: /* @__PURE__ */ c.jsx(qM, { children: /* @__PURE__ */ c.jsxs(zM, { size: "medium", children: [
+      t === 0 && /* @__PURE__ */ c.jsx(Ae, { children: /* @__PURE__ */ c.jsx(qM, { sx: { overflowX: "auto", WebkitOverflowScrolling: "touch" }, children: /* @__PURE__ */ c.jsxs(zM, { size: "medium", sx: { minWidth: 700 }, children: [
         /* @__PURE__ */ c.jsx(n4, { children: /* @__PURE__ */ c.jsxs(vd, { sx: { bgcolor: "action.hover" }, children: [
           /* @__PURE__ */ c.jsx(Qt, { sx: { width: 40 } }),
           /* @__PURE__ */ c.jsx(Qt, { children: /* @__PURE__ */ c.jsx(Bt, { children: "Peer Name" }) }),
