@@ -1157,7 +1157,11 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
             )}
 
             {createdPeer?.config && (
-              <QRCodeCanvas text={createdPeer.config} size={220} />
+              <QRCodeCanvas
+                text={createdPeer.config}
+                size={240}
+                filename={`${createdPeer.name || "wireguard"}-profile`}
+              />
             )}
 
             <Chip
@@ -1233,7 +1237,11 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
             )}
 
             {qrModalConfig ? (
-              <QRCodeCanvas text={qrModalConfig} size={220} />
+              <QRCodeCanvas
+                text={qrModalConfig}
+                size={240}
+                filename={`${qrModalPeer?.name || "wireguard"}-profile`}
+              />
             ) : (
               <CircularProgress size={32} />
             )}
