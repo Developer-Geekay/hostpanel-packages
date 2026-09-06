@@ -18,12 +18,12 @@ RestartSec=5
 
 NoNewPrivileges=no
 
-ProtectSystem=strict
+ProtectSystem=full
 ProtectKernelTunables=yes
 MemoryMax=512M
 TasksMax=128
 
-ReadWritePaths=/opt/hostpanel/data/storage /opt/hostpanel/data/backups /opt/hostpanel/etc/storage /opt/hostpanel/logs/storage /opt/hostpanel/run/storage
+ReadWritePaths=/opt/hostpanel/data/storage /opt/hostpanel/data/backups /opt/hostpanel/etc/storage /opt/hostpanel/logs/storage /opt/hostpanel/run/storage /data
 
 [Install]
 WantedBy=multi-user.target

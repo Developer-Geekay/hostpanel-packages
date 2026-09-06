@@ -32,7 +32,21 @@ else
 fi
 
 HP_BASE_ROOT="${HP_BASE_ROOT:-/opt/hostpanel}"
-HP_STORAGE_ROOT="${HP_STORAGE_ROOT:-/opt/hostpanel/data/storage/buckets}"
+HP_DEFAULT_STORAGE_ROOT="/data/storage/buckets"
+HP_STORAGE_ROOT="${HP_STORAGE_ROOT:-}"
+
+if [ -z "$HP_STORAGE_ROOT" ]; then
+    DB_PATH="/opt/hostpanel/data/storage/storage.db"
+    if [ -f "$DB_PATH" ]; then
+        if command -v sqlite3 >/dev/null 2>&1; then
+            HP_STORAGE_ROOT="$(sqlite3 "$DB_PATH" "SELECT value FROM storage_settings WHERE key='storage_path' LIMIT 1;" 2>/dev/null || true)"
+        elif command -v python3 >/dev/null 2>&1; then
+            HP_STORAGE_ROOT="$(python3 -c "import sqlite3; conn = sqlite3.connect('$DB_PATH'); row = conn.execute(\"SELECT value FROM storage_settings WHERE key='storage_path' LIMIT 1\").fetchone(); print(row[0] if row and row[0] else '')" 2>/dev/null || true)"
+        fi
+    fi
+fi
+HP_STORAGE_ROOT="${HP_STORAGE_ROOT:-$HP_DEFAULT_STORAGE_ROOT}"
+
 HP_ETC_STORAGE="${HP_ETC_STORAGE:-/opt/hostpanel/etc/storage}"
 HP_LOGS_STORAGE="${HP_LOGS_STORAGE:-/opt/hostpanel/logs/storage}"
 HP_RUN_STORAGE="${HP_RUN_STORAGE:-/opt/hostpanel/run/storage}"
@@ -47,28 +61,30 @@ valid_bucket_name() {
 
 # ── engine-status ────────────────────────────────────────────────────────────
 op_engine_status() {
-    if [ -d "$HP_STORAGE_ROOT" ]; then
-        printf '{"ok":true,"installed":true,"storage_root":"%s"}\n' "$HP_STORAGE_ROOT"
-        return 0
+    local is_installed=false
+    if [ -d "$HP_STORAGE_ROOT" ] && [ -d "/opt/hostpanel/data/storage" ]; then
+        is_installed=true
     fi
-    printf '{"ok":false,"installed":false}\n'
-    return 1
+    printf '{"ok":true,"installed":%s,"storage_root":"%s"}\n' "$is_installed" "$HP_STORAGE_ROOT"
+    return 0
 }
 
 # ── storage-init ─────────────────────────────────────────────────────────────
 op_storage_init() {
     if is_dryrun; then
-        echo "WOULD-EXEC: initialize storage directories under $HP_BASE_ROOT" >&2
+        echo "WOULD-EXEC: initialize storage directories under $HP_BASE_ROOT and $HP_STORAGE_ROOT" >&2
         printf '{"ok":true,"initialized":true}\n'
         return 0
     fi
 
     mkdir -p "$HP_STORAGE_ROOT" "$HP_ETC_STORAGE" "$HP_LOGS_STORAGE" "$HP_RUN_STORAGE" "/opt/hostpanel/data/storage"
+    touch "/opt/hostpanel/data/storage/storage.db" 2>/dev/null || true
 
     if getent passwd hp-storage >/dev/null 2>&1; then
-        chown -R hp-storage:hp-storage "/opt/hostpanel/data/storage" "$HP_ETC_STORAGE" "$HP_LOGS_STORAGE" "$HP_RUN_STORAGE" 2>/dev/null || true
+        chown -R hp-storage:hp-storage "$HP_STORAGE_ROOT" "/opt/hostpanel/data/storage" "$HP_ETC_STORAGE" "$HP_LOGS_STORAGE" "$HP_RUN_STORAGE" 2>/dev/null || true
     fi
     chmod 0775 "$HP_STORAGE_ROOT" "$HP_ETC_STORAGE" "$HP_LOGS_STORAGE" "$HP_RUN_STORAGE" "/opt/hostpanel/data/storage"
+    [ -f "/opt/hostpanel/data/storage/storage.db" ] && chmod 0664 "/opt/hostpanel/data/storage/storage.db" 2>/dev/null || true
 
     # Configure UFW firewall for S3 port 9000 if UFW is active
     if command -v ufw >/dev/null 2>&1; then

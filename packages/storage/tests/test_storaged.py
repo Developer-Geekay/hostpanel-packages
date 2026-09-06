@@ -265,7 +265,7 @@ def test_meta(svc):
     assert res.status_code == 200
     data = res.json()
     assert data["package"] == "storage"
-    assert data["version"] == "3.1.0"
+    assert data["version"] == "3.1.2"
     assert "s3_port" in data
 
 
@@ -275,9 +275,15 @@ def test_settings(svc):
     data = res.json()
     assert data["s3_port"] == 9000
 
-    res2 = svc.client.post("/settings", json={"s3_port": "9100"})
+    custom_path = str(svc.storage_root / "custom_data")
+    res2 = svc.client.post("/settings", json={"s3_port": "9100", "storage_path": custom_path})
     assert res2.status_code == 200
     assert res2.json()["saved"] is True
+    assert "VERB=storage-init" in ops_log(svc)
+
+    res3 = svc.client.get("/settings")
+    assert res3.json()["storage_path"] == custom_path
+    assert res3.json()["s3_port"] == 9100
 
 
 # ── Operations Introspection ──────────────────────────────────────────────────

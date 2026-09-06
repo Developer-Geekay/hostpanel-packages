@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "feature": "storage",
   "label": "Object Storage (S3)",
-  "version": "3.1.1",
+  "version": "3.1.2",
   "requires_core": [
     3,
     0,
@@ -31,11 +31,13 @@
     "sudoers": "hostpanel-storaged"
   },
   "sandbox": {
+    "protect_system": "full",
     "read_write_paths": [
       "/opt/hostpanel/data/storage",
       "/opt/hostpanel/etc/storage",
       "/opt/hostpanel/logs/storage",
       "/opt/hostpanel/run/storage",
+      "/data",
       "/tmp"
     ]
   },

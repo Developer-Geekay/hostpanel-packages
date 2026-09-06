@@ -112,6 +112,11 @@ function StoragePageBody({ ctx }: { ctx: PackageContext }) {
   const [settings, setSettings] = useState<StorageSettings | null>(null);
   const [meta, setMeta] = useState<ServiceMeta | null>(null);
 
+  // Settings tab form state
+  const [editStoragePath, setEditStoragePath] = useState("");
+  const [editS3Port, setEditS3Port] = useState<number | string>(9000);
+  const [savingSettings, setSavingSettings] = useState(false);
+
   // Search filter
   const [searchFilter, setSearchFilter] = useState("");
 
@@ -175,10 +180,18 @@ function StoragePageBody({ ctx }: { ctx: PackageContext }) {
       if (sRes.ok) {
         const data = await sRes.json();
         setSettings(data);
+        if (data.storage_path) {
+          setEditStoragePath((prev) => prev || data.storage_path);
+        }
+        if (data.s3_port) {
+          setEditS3Port((prev) => prev || data.s3_port);
+        }
       }
       if (mRes.ok) {
         const data = await mRes.json();
         setMeta(data);
+        setEditStoragePath((prev) => prev || data.storage_root || "/data/storage/buckets");
+        setEditS3Port((prev) => prev || data.s3_port || 9000);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -186,6 +199,35 @@ function StoragePageBody({ ctx }: { ctx: PackageContext }) {
       setLoading(false);
     }
   }, [ctx]);
+
+  const handleSaveSettings = async () => {
+    const trimmed = editStoragePath.trim();
+    if (!trimmed) {
+      setError("Bucket storage root path cannot be empty.");
+      return;
+    }
+    setSavingSettings(true);
+    try {
+      const res = await ctx.api("/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          storage_path: trimmed,
+          s3_port: Number(editS3Port) || 9000,
+        }),
+      });
+      if (!res.ok) {
+        const b = await res.json().catch(() => ({}));
+        throw new Error(b.detail ?? `HTTP ${res.status}`);
+      }
+      setToast("Storage settings updated successfully.");
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSavingSettings(false);
+    }
+  };
 
   useEffect(() => {
     refresh();
@@ -1204,32 +1246,49 @@ acl = private`}
         {tabIndex === 4 && (
           <Box sx={{ p: 2 }}>
             <Stack spacing={3} sx={{ maxWidth: 640 }}>
-              <Panel label="S3 Protocol Server Configuration">
-                <Stack spacing={2}>
+              <Panel label="S3 Storage & Protocol Configuration">
+                <Stack spacing={2.5}>
                   <TextField
                     size="small"
+                    label="Bucket Storage Root Path"
+                    value={editStoragePath}
+                    onChange={(e) => setEditStoragePath(e.target.value)}
+                    helperText="Filesystem path where S3 bucket directories and objects are stored (e.g. /data/storage/buckets or /opt/hostpanel/data/storage/buckets)"
+                    fullWidth
+                    sx={{ "& input": { fontFamily: MONO, fontSize: "0.875rem" } }}
+                  />
+                  <TextField
+                    size="small"
+                    type="number"
                     label="S3 REST Port"
-                    value={meta?.s3_port ?? 9000}
-                    helperText="Standard port for incoming AWS S3 REST API calls (Default: 9000)"
-                    disabled
+                    value={editS3Port}
+                    onChange={(e) => setEditS3Port(e.target.value)}
+                    helperText="Port for incoming AWS S3 REST API calls (Default: 9000)"
+                    sx={{ maxWidth: 220 }}
                   />
-                  <TextField
-                    size="small"
-                    label="Data Storage Root Path"
-                    value={meta?.storage_root ?? "/opt/hostpanel/data/storage/buckets"}
-                    helperText="Enforces 100% HostPanel isolation under /opt/hostpanel"
-                    disabled
-                  />
+                  <Box sx={{ pt: 1 }}>
+                    <Button
+                      variant="contained"
+                      size="small"
+                      disabled={savingSettings || !editStoragePath.trim()}
+                      onClick={handleSaveSettings}
+                      startIcon={savingSettings ? <CircularProgress size={16} color="inherit" /> : <SettingsIcon />}
+                    >
+                      {savingSettings ? "Saving Settings..." : "Save Settings"}
+                    </Button>
+                  </Box>
                 </Stack>
               </Panel>
 
-              <Panel label="System Isolation & Architecture">
-                <Typography variant="body2" sx={{ color: "text.secondary", mb: 1 }}>
-                  HostPanel Object Storage is 100% self-contained. All buckets and metadata are stored exclusively within:
+              <Panel label="Storage Overview & System Isolation">
+                <Typography variant="body2" sx={{ color: "text.secondary", mb: 1.5 }}>
+                  HostPanel Object Storage is self-contained with isolated runtime permissions:
                 </Typography>
-                <Box component="ul" sx={{ pl: 2, m: 0, fontSize: "0.8125rem", fontFamily: MONO }}>
-                  <li>Buckets Directory: /opt/hostpanel/data/storage/buckets/</li>
-                  <li>SQLite Database: /opt/hostpanel/data/hostpanel.db</li>
+                <Box component="ul" sx={{ pl: 2.5, m: 0, fontSize: "0.8125rem", fontFamily: MONO, lineHeight: 1.8 }}>
+                  <li>Active Storage Root: <strong>{settings?.storage_path || meta?.storage_root || "/data/storage/buckets"}</strong></li>
+                  <li>Total Buckets: <strong>{settings?.bucket_count ?? buckets.length}</strong></li>
+                  <li>Total Disk Used: <strong>{settings?.total_size_formatted || "0 B"}</strong> ({settings?.total_objects ?? 0} objects)</li>
+                  <li>SQLite Database: /opt/hostpanel/data/storage/storage.db</li>
                   <li>Daemon Service: hostpanel-storaged.service (hp-storage)</li>
                   <li>S3 Protocol: AWS SigV4 Native on port {meta?.s3_port ?? 9000}</li>
                 </Box>

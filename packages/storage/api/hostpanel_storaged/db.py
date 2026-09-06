@@ -16,7 +16,7 @@ from typing import Iterator
 _log = logging.getLogger(__name__)
 
 DEFAULT_DB_PATH = "/opt/hostpanel/data/storage/storage.db"
-DEFAULT_STORAGE_ROOT = "/opt/hostpanel/data/storage/buckets"
+DEFAULT_STORAGE_ROOT = "/data/storage/buckets"
 
 
 def get_db_path() -> str:
@@ -26,7 +26,10 @@ def get_db_path() -> str:
 @contextlib.contextmanager
 def get_db() -> Iterator[sqlite3.Connection]:
     db_path = get_db_path()
-    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    try:
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        _log.warning("Could not create parent directory for %s: %s", db_path, exc)
     conn = sqlite3.connect(db_path, timeout=10.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
@@ -110,6 +113,7 @@ def init_storage_tables() -> None:
             # Default settings
             conn.execute("INSERT OR IGNORE INTO storage_settings (key, value) VALUES ('s3_port', '9000');")
             conn.execute("INSERT OR IGNORE INTO storage_settings (key, value) VALUES ('storage_path', ?);", (DEFAULT_STORAGE_ROOT,))
+            conn.execute("UPDATE storage_settings SET value = ? WHERE key = 'storage_path' AND value = '/opt/hostpanel/data/storage/buckets';", (DEFAULT_STORAGE_ROOT,))
         _log.info("Initialized storage tables in %s", get_db_path())
     except Exception as exc:
         _log.error("Failed initializing storage tables: %s", exc)
@@ -136,7 +140,12 @@ def get_bucket_path(bucket_name: str, custom_path: str | None = None) -> str:
     if custom_path and os.path.isabs(custom_path):
         return custom_path
     root = get_data_root()
-    return os.path.join(root, bucket_name)
+    p = os.path.join(root, bucket_name)
+    # Zero data loss fallback: check previous default path if bucket exists there
+    old_p = os.path.join("/opt/hostpanel/data/storage/buckets", bucket_name)
+    if not os.path.exists(p) and os.path.exists(old_p):
+        return old_p
+    return p
 
 
 def get_dir_stats(path: str) -> tuple[int, int]:

@@ -542,10 +542,26 @@ def build_router(manifest: M.Manifest, ops_script: str, *, use_sudo: bool = True
     @router.post("/settings")
     async def update_settings(body: UpdateSettingsRequest):
         if body.s3_port:
-            set_storage_setting("s3_port", body.s3_port)
+            try:
+                port_num = int(body.s3_port)
+                if not (1 <= port_num <= 65535):
+                    raise ValueError
+            except (ValueError, TypeError):
+                raise HTTPException(status_code=400, detail="Invalid S3 port (must be 1-65535)")
+            set_storage_setting("s3_port", str(port_num))
+
         if body.storage_path:
-            set_storage_setting("storage_path", body.storage_path)
-            Path(body.storage_path).mkdir(parents=True, exist_ok=True)
+            spath = body.storage_path.strip()
+            if not os.path.isabs(spath):
+                raise HTTPException(status_code=400, detail="Storage path must be an absolute path (e.g. /data/storage/buckets)")
+            if ".." in spath:
+                raise HTTPException(status_code=400, detail="Directory traversal is not allowed")
+            set_storage_setting("storage_path", spath)
+            try:
+                await run_json("storage.storage-init", {})
+            except OpsError as exc:
+                raise HTTPException(status_code=exc.http_status, detail=f"Failed initializing storage directory: {exc.message}")
+
         return {"ok": True, "saved": True}
 
     # ── Operations Introspection ──────────────────────────────────────────────
