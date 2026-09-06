@@ -58,14 +58,15 @@ import SettingsIcon from "@mui/icons-material/Settings";
 import ShieldIcon from "@mui/icons-material/Shield";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 
-import type {
-  CreatePeerRequest,
-  ImportPeerRequest,
-  PackageContext,
-  PeerItem,
-  ServerConfig,
-  ServiceMeta,
-  ServerStatus,
+import {
+  DNS_PRESETS,
+  type CreatePeerRequest,
+  type ImportPeerRequest,
+  type PackageContext,
+  type PeerItem,
+  type ServerConfig,
+  type ServiceMeta,
+  type ServerStatus,
 } from "./types";
 import {
   CONSOLE,
@@ -138,10 +139,10 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
     name: "",
     ip: "",
     allowed_ips: "0.0.0.0/0, ::/0",
-    dns: "1.1.1.1, 8.8.8.8",
+    dns: DNS_PRESETS[0].servers,
     preshared_key: "",
   });
-  const [dnsPreset, setDnsPreset] = useState("cloudflare");
+  const [dnsPreset, setDnsPreset] = useState(DNS_PRESETS[0].id);
   const [allowedPreset, setAllowedPreset] = useState("all");
   const [peerMode, setPeerMode] = useState<"create" | "import">("create");
   const [importPublicKey, setImportPublicKey] = useState("");
@@ -269,9 +270,10 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
             name: "",
             ip: "",
             allowed_ips: "0.0.0.0/0, ::/0",
-            dns: "1.1.1.1, 8.8.8.8",
+            dns: DNS_PRESETS[0].servers,
             preshared_key: "",
           });
+          setDnsPreset(DNS_PRESETS[0].id);
           setImportPublicKey("");
           loadAll();
         }
@@ -280,7 +282,7 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
           name: peerForm.name.trim(),
           ip: peerForm.ip?.trim() || undefined,
           allowed_ips: peerForm.allowed_ips || "0.0.0.0/0, ::/0",
-          dns: peerForm.dns || "1.1.1.1, 8.8.8.8",
+          dns: peerForm.dns || DNS_PRESETS[0].servers,
           preshared_key: peerForm.preshared_key ? peerForm.preshared_key : undefined,
         };
 
@@ -297,9 +299,10 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
             name: "",
             ip: "",
             allowed_ips: "0.0.0.0/0, ::/0",
-            dns: "1.1.1.1, 8.8.8.8",
+            dns: DNS_PRESETS[0].servers,
             preshared_key: "",
           });
+          setDnsPreset(DNS_PRESETS[0].id);
           loadAll();
         }
       }
@@ -659,6 +662,25 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
                               label={peer.ip}
                               sx={{ fontFamily: MONO, fontSize: "0.75rem" }}
                             />
+                            {peer.dns ? (
+                              <Typography
+                                variant="caption"
+                                sx={{
+                                  display: "block",
+                                  color: "text.secondary",
+                                  fontFamily: MONO,
+                                  fontSize: "0.6875rem",
+                                  mt: 0.5,
+                                  maxWidth: 160,
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                  whiteSpace: "nowrap",
+                                }}
+                                title={`DNS: ${peer.dns}`}
+                              >
+                                DNS: {peer.dns}
+                              </Typography>
+                            ) : null}
                           </TableCell>
                           <TableCell>
                             <Typography
@@ -852,7 +874,10 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
                 />
               )}
 
-              <Field label="DNS Resolver Preset">
+              <Field
+                label="DNS Resolver Preset"
+                hint="Curated privacy and security resolver presets or custom addresses"
+              >
                 <Select
                   fullWidth
                   size="small"
@@ -860,25 +885,78 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
                   onChange={(e) => {
                     const v = e.target.value;
                     setDnsPreset(v);
-                    if (v === "cloudflare") setPeerForm({ ...peerForm, dns: "1.1.1.1, 1.0.0.1" });
-                    else if (v === "google") setPeerForm({ ...peerForm, dns: "8.8.8.8, 8.8.4.4" });
+                    const found = DNS_PRESETS.find((p) => p.id === v);
+                    if (found && found.id !== "custom") {
+                      setPeerForm({ ...peerForm, dns: found.servers });
+                    }
                   }}
                 >
-                  <MenuItem value="cloudflare">Cloudflare DNS (1.1.1.1, 1.0.0.1)</MenuItem>
-                  <MenuItem value="google">Google DNS (8.8.8.8, 8.8.4.4)</MenuItem>
-                  <MenuItem value="custom">Custom DNS</MenuItem>
+                  {DNS_PRESETS.map((preset) => (
+                    <MenuItem key={preset.id} value={preset.id}>
+                      <Box sx={{ py: 0.5, width: "100%" }}>
+                        <Stack direction="row" spacing={1} sx={{ alignItems: "center", justifyContent: "space-between" }}>
+                          <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                            {preset.name}
+                          </Typography>
+                          {preset.servers ? (
+                            <Chip
+                              size="small"
+                              label={preset.servers}
+                              variant="outlined"
+                              sx={{ fontFamily: MONO, fontSize: "0.6875rem", height: 18 }}
+                            />
+                          ) : null}
+                        </Stack>
+                        <Typography variant="caption" sx={{ color: "text.secondary", display: "block", mt: 0.25 }}>
+                          {preset.description}
+                        </Typography>
+                      </Box>
+                    </MenuItem>
+                  ))}
                 </Select>
+
+                <Stack direction="row" spacing={0.75} sx={{ mt: 1, flexWrap: "wrap", gap: 0.5 }}>
+                  {DNS_PRESETS.map((p) => (
+                    <Chip
+                      key={p.id}
+                      size="small"
+                      label={p.shortLabel}
+                      variant={dnsPreset === p.id ? "filled" : "outlined"}
+                      color={dnsPreset === p.id ? "primary" : "default"}
+                      onClick={() => {
+                        setDnsPreset(p.id);
+                        if (p.id !== "custom") {
+                          setPeerForm({ ...peerForm, dns: p.servers });
+                        }
+                      }}
+                      sx={{ cursor: "pointer", fontSize: "0.75rem", height: 22 }}
+                    />
+                  ))}
+                </Stack>
               </Field>
 
-              {dnsPreset === "custom" && (
+              <Field
+                label="Client DNS Addresses"
+                hint="Comma-separated DNS server IPs assigned to this client profile"
+              >
                 <TextField
                   fullWidth
                   size="small"
-                  placeholder="1.1.1.1, 8.8.8.8"
+                  placeholder="e.g. 1.1.1.1, 1.0.0.1"
                   value={peerForm.dns}
-                  onChange={(e) => setPeerForm({ ...peerForm, dns: e.target.value })}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setPeerForm({ ...peerForm, dns: val });
+                    const match = DNS_PRESETS.find((p) => p.servers === val.trim());
+                    setDnsPreset(match ? match.id : "custom");
+                  }}
+                  slotProps={{
+                    input: {
+                      sx: { fontFamily: MONO, fontSize: "0.8125rem" },
+                    },
+                  }}
                 />
-              )}
+              </Field>
 
               <Stack direction="row" spacing={2} sx={{ pt: 1 }}>
                 <Button

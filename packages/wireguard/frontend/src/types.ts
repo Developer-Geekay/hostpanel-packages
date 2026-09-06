@@ -133,3 +133,63 @@ export interface ImportPeerRequest {
   dns?: string;
   preshared_key?: string;
 }
+
+export interface DnsPreset {
+  id: string;
+  name: string;
+  shortLabel: string;
+  servers: string;
+  description: string;
+}
+
+export const DNS_PRESETS: DnsPreset[] = [
+  {
+    id: "cloudflare",
+    name: "Cloudflare (Standard)",
+    shortLabel: "Cloudflare",
+    servers: "1.1.1.1, 1.0.0.1",
+    description: "Fast, privacy-first, zero logs",
+  },
+  {
+    id: "cloudflare-security",
+    name: "Cloudflare (Malware Blocking)",
+    shortLabel: "Cloudflare Security",
+    servers: "1.1.1.2, 1.0.0.2",
+    description: "Blocks known malware and phishing domains",
+  },
+  {
+    id: "google",
+    name: "Google Public DNS",
+    shortLabel: "Google",
+    servers: "8.8.8.8, 8.8.4.4",
+    description: "Global high-speed anycast resolvers",
+  },
+  {
+    id: "quad9",
+    name: "Quad9 (Security & Privacy)",
+    shortLabel: "Quad9",
+    servers: "9.9.9.9, 149.112.112.112",
+    description: "Threat-intelligence blocking, Swiss jurisdiction",
+  },
+  {
+    id: "adguard",
+    name: "AdGuard DNS (Ad & Tracker Blocking)",
+    shortLabel: "AdGuard",
+    servers: "94.140.14.14, 94.140.15.15",
+    description: "Blocks advertising and tracking domains network-wide",
+  },
+  {
+    id: "opendns",
+    name: "Cisco OpenDNS",
+    shortLabel: "OpenDNS",
+    servers: "208.67.222.222, 208.67.220.220",
+    description: "Anti-phishing intelligence and high reliability",
+  },
+  {
+    id: "custom",
+    name: "Custom DNS Server",
+    shortLabel: "Custom",
+    servers: "",
+    description: "Specify private LAN, Pi-hole, or custom DNS addresses",
+  },
+];

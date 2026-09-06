@@ -140,7 +140,7 @@ def test_health_unauthenticated(svc):
     """Health check endpoint requires no auth token."""
     res = svc.client.get("/health", headers={tokenlib.HEADER: ""})
     assert res.status_code == 200
-    assert res.json() == {"package": "wireguard", "version": "3.0.1", "ok": True}
+    assert res.json() == {"package": "wireguard", "version": "3.0.2", "ok": True}
 
 
 def test_missing_token_rejected(svc):

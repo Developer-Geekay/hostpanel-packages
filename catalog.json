@@ -217,7 +217,7 @@
     {
       "name": "wireguard",
       "label": "WireGuard VPN",
-      "version": "3.0.1",
+      "version": "3.0.2",
       "category": "Network & Security",
       "description": "Fast, modern VPN server with automated peer management and QR codes",
       "unit": "hostpanel-wireguardd.service",
