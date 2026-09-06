@@ -59,6 +59,10 @@ class RenamePeer(BaseModel):
     new_name: str
 
 
+class SetEndpoint(BaseModel):
+    endpoint: Optional[str] = ""
+
+
 def wants_stream(request: Request) -> bool:
     """True if caller requested text/event-stream."""
     accept = request.headers.get("accept", "")
@@ -206,6 +210,10 @@ def build_router(manifest: M.Manifest, ops_script: str, *,
     async def server_config():
         return await run_json("wireguard.server-config", {})
 
+    @router.post("/server/endpoint")
+    async def set_server_endpoint(request: Request, body: SetEndpoint):
+        return await dispatch(request, "wireguard.set-endpoint", {"endpoint": body.endpoint or ""})
+
     @router.get("/server/logs")
     async def server_logs():
         return await run_json("wireguard.server-logs", {})
@@ -257,12 +265,18 @@ def build_router(manifest: M.Manifest, ops_script: str, *,
         return await dispatch(request, "wireguard.delete-peer", {"id": id})
 
     @router.get("/peers/{id}/config")
-    async def get_peer_config(id: str):
-        return await run_json("wireguard.get-peer-config", {"id": id})
+    async def get_peer_config(id: str, endpoint: str = ""):
+        params: dict[str, Any] = {"id": id}
+        if endpoint:
+            params["endpoint"] = endpoint
+        return await run_json("wireguard.get-peer-config", params)
 
     @router.get("/peers/{id}/qrcode")
-    async def get_peer_qrcode(id: str):
-        return await run_json("wireguard.get-peer-qr", {"id": id})
+    async def get_peer_qrcode(id: str, endpoint: str = ""):
+        params: dict[str, Any] = {"id": id}
+        if endpoint:
+            params["endpoint"] = endpoint
+        return await run_json("wireguard.get-peer-qr", params)
 
     @router.post("/peers/generate-keys")
     async def generate_keys():

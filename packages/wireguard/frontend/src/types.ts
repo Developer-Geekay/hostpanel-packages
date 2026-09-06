@@ -78,6 +78,9 @@ export interface ServerConfig {
   mtu: number;
   public_key: string;
   endpoint: string;
+  custom_endpoint?: string;
+  lan_ip?: string;
+  wan_ip?: string;
   config_path: string;
   isolation_path: string;
   run_path: string;

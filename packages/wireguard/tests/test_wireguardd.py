@@ -60,6 +60,9 @@ case "$verb" in
   server-config)
     printf '{"interface":"wg0","listen_port":51820,"address":"10.8.0.1/24","subnet":"10.8.0.0/24","mtu":1420,"public_key":"SERVERPUBKEY123=","endpoint":"203.0.113.10","config_path":"/opt/hostpanel/etc/wireguard/wg0.conf","isolation_path":"/opt/hostpanel/etc/wireguard"}\n'
     ;;
+  set-endpoint)
+    printf '{"ok":true,"endpoint":"%s"}\n' "${1:-203.0.113.10}"
+    ;;
   server-logs)
     printf '{"logs":["2026-08-23T00:00:00Z [INFO] WireGuard server started","2026-08-23T00:01:00Z [INFO] Peer connected: phone"]}\n'
     ;;
@@ -140,7 +143,7 @@ def test_health_unauthenticated(svc):
     """Health check endpoint requires no auth token."""
     res = svc.client.get("/health", headers={tokenlib.HEADER: ""})
     assert res.status_code == 200
-    assert res.json() == {"package": "wireguard", "version": "3.0.3", "ok": True}
+    assert res.json() == {"package": "wireguard", "version": "3.0.4", "ok": True}
 
 
 def test_missing_token_rejected(svc):
@@ -212,6 +215,12 @@ def test_server_config(svc):
     assert data["listen_port"] == 51820
     assert data["config_path"] == "/opt/hostpanel/etc/wireguard/wg0.conf"
     assert data["isolation_path"] == "/opt/hostpanel/etc/wireguard"
+
+
+def test_set_endpoint(svc):
+    res = svc.client.post("/server/endpoint", json={"endpoint": "192.168.1.184"})
+    assert res.status_code == 200
+    assert res.json()["endpoint"] == "192.168.1.184"
 
 
 def test_server_logs(svc):

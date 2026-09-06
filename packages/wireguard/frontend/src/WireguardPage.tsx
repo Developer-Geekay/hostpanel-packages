@@ -100,6 +100,11 @@ function formatHandshake(timestamp: number): string {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
+function switchEndpointInConfig(confText: string, newEndpoint: string): string {
+  if (!confText || !newEndpoint) return confText;
+  return confText.replace(/^Endpoint\s*=\s*[^:\s\r\n]+(:51820)?/gm, `Endpoint = ${newEndpoint}:51820`);
+}
+
 /** Padding for a stat card's body.
  *
  *  MUI gives the last `CardContent` an extra 24px of bottom padding — a reading
@@ -153,6 +158,12 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
   // View QR modal
   const [qrModalPeer, setQrModalPeer] = useState<PeerItem | null>(null);
   const [qrModalConfig, setQrModalConfig] = useState<string>("");
+
+  // Endpoint management & modal toggle state
+  const [endpointInput, setEndpointInput] = useState("");
+  const [savingEndpoint, setSavingEndpoint] = useState(false);
+  const [createdPeerEndpoint, setCreatedPeerEndpoint] = useState("");
+  const [qrModalEndpoint, setQrModalEndpoint] = useState("");
 
   // Delete peer confirm dialog
   const [deletePeerTarget, setDeletePeerTarget] = useState<PeerItem | null>(null);
@@ -265,6 +276,7 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
 
         if (res?.peer) {
           setCreatedPeer(res.peer);
+          setCreatedPeerEndpoint(config?.endpoint || "");
           setTab(0);
           setPeerForm({
             name: "",
@@ -294,6 +306,7 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
 
         if (res?.peer) {
           setCreatedPeer(res.peer);
+          setCreatedPeerEndpoint(config?.endpoint || "");
           setTab(0);
           setPeerForm({
             name: "",
@@ -352,9 +365,30 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
     await runStreamOp(`Deleting Peer ${peer.name}`, `/peers/${encodeURIComponent(peer.id)}`, "DELETE");
   };
 
+  // Save or reset server endpoint
+  const handleSaveEndpoint = async (newEp: string) => {
+    setSavingEndpoint(true);
+    try {
+      const res = await json("/server/endpoint", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ endpoint: newEp }),
+      });
+      setToast(`WireGuard server endpoint set to: ${res?.endpoint || newEp}`);
+      setEndpointInput("");
+      const updatedCfg = await json("/server/config");
+      if (updatedCfg) setConfig(updatedCfg);
+    } catch (e: any) {
+      setToast(e.message || "Failed to update endpoint");
+    } finally {
+      setSavingEndpoint(false);
+    }
+  };
+
   // Open QR modal for existing peer
   const handleOpenQrModal = async (peer: PeerItem) => {
     setQrModalPeer(peer);
+    setQrModalEndpoint(config?.endpoint || "");
     try {
       const res = await json(`/peers/${encodeURIComponent(peer.id)}/config`);
       setQrModalConfig(res?.config || "");
@@ -996,7 +1030,6 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
               <Box>
                 <Panel label="Network & Public Keys">
                   <Stack spacing={2}>
-                    <Readout label="Public Endpoint" value={config?.endpoint ?? "—"} />
                     <Readout label="VPN Subnet" value={config?.subnet ?? "—"} />
                     <Box>
                       <MicroLabel>Server Public Key</MicroLabel>
@@ -1028,6 +1061,83 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
                         </IconButton>
                       </Stack>
                     </Box>
+                  </Stack>
+                </Panel>
+              </Box>
+
+              <Box sx={{ gridColumn: { xs: "span 1", sm: "span 2" } }}>
+                <Panel label="Server Public Endpoint & Connection Routing">
+                  <Stack spacing={1.5}>
+                    <Stack direction="row" spacing={1} sx={{ alignItems: "center" }}>
+                      <Typography sx={{ fontWeight: 700, fontSize: "1.1rem", fontFamily: MONO }}>
+                        {config?.endpoint ?? "—"}
+                      </Typography>
+                      {config?.custom_endpoint ? (
+                        <Chip label="Custom Override" size="small" color="primary" variant="outlined" />
+                      ) : (
+                        <Chip label="Auto-Detected" size="small" color="default" variant="outlined" />
+                      )}
+                    </Stack>
+                    <Typography variant="body2" sx={{ color: "text.secondary" }}>
+                      Endpoint embedded in client profiles &amp; QR codes. When testing on local Wi-Fi without router NAT hairpinning, select <strong>LAN IP</strong>. For remote or cellular (4G/5G) connections, select <strong>WAN IP</strong> or enter a domain name.
+                    </Typography>
+
+                    <Stack direction={{ xs: "column", sm: "row" }} spacing={1} sx={{ mt: 1, flexWrap: "wrap", gap: 1 }}>
+                      {config?.lan_ip && (
+                        <Button
+                          size="small"
+                          variant={config.endpoint === config.lan_ip ? "contained" : "outlined"}
+                          onClick={() => handleSaveEndpoint(config.lan_ip!)}
+                          disabled={savingEndpoint}
+                          sx={{ textTransform: "none", fontWeight: 600 }}
+                        >
+                          Use LAN IP ({config.lan_ip})
+                        </Button>
+                      )}
+                      {config?.wan_ip && config.wan_ip !== config.lan_ip && (
+                        <Button
+                          size="small"
+                          variant={config.endpoint === config.wan_ip ? "contained" : "outlined"}
+                          onClick={() => handleSaveEndpoint(config.wan_ip!)}
+                          disabled={savingEndpoint}
+                          sx={{ textTransform: "none", fontWeight: 600 }}
+                        >
+                          Use WAN IP ({config.wan_ip})
+                        </Button>
+                      )}
+                      {config?.custom_endpoint && (
+                        <Button
+                          size="small"
+                          variant="text"
+                          color="secondary"
+                          onClick={() => handleSaveEndpoint("auto")}
+                          disabled={savingEndpoint}
+                          sx={{ textTransform: "none" }}
+                        >
+                          Reset Auto-Detect
+                        </Button>
+                      )}
+                    </Stack>
+
+                    <Stack direction="row" spacing={1} sx={{ mt: 1, maxWidth: 500 }}>
+                      <TextField
+                        size="small"
+                        placeholder="Custom IP or Domain (e.g. vpn.example.com)"
+                        value={endpointInput}
+                        onChange={(e) => setEndpointInput(e.target.value)}
+                        sx={{ flex: 1 }}
+                        slotProps={{ input: { sx: { fontFamily: MONO, fontSize: "0.8125rem" } } }}
+                      />
+                      <Button
+                        variant="contained"
+                        size="small"
+                        disabled={!endpointInput.trim() || savingEndpoint}
+                        onClick={() => handleSaveEndpoint(endpointInput.trim())}
+                        sx={{ fontWeight: 600, textTransform: "none" }}
+                      >
+                        Set Endpoint
+                      </Button>
+                    </Stack>
                   </Stack>
                 </Panel>
               </Box>
@@ -1145,54 +1255,107 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
           Client Peer Created: {createdPeer?.name}
         </DialogTitle>
         <DialogContent dividers>
-          <Stack spacing={2.5} sx={{ alignItems: "center", py: 1 }}>
-            <Typography variant="body2" sx={{ color: "text.secondary", textAlign: "center" }}>
-              Scan this QR code with the WireGuard mobile app (iOS / Android) or download the <code>.conf</code> file for desktop.
-            </Typography>
+          {(() => {
+            const activeConfig = createdPeer?.config
+              ? switchEndpointInConfig(createdPeer.config, createdPeerEndpoint || config?.endpoint || "")
+              : "";
+            const currentEp = createdPeerEndpoint || config?.endpoint || "";
 
-            {createdPeer?.imported && (
-              <Alert severity="info" sx={{ width: "100%", fontSize: "0.8125rem" }}>
-                <strong>Client-Side Keys:</strong> This peer was registered using an imported public key. The private key remains exclusively on the client device.
-              </Alert>
-            )}
+            return (
+              <Stack spacing={2.5} sx={{ alignItems: "center", py: 1 }}>
+                <Typography variant="body2" sx={{ color: "text.secondary", textAlign: "center" }}>
+                  Scan this QR code with the WireGuard mobile app (iOS / Android) or download the <code>.conf</code> file for desktop.
+                </Typography>
 
-            {createdPeer?.config && (
-              <QRCodeCanvas
-                text={createdPeer.config}
-                size={240}
-                filename={`${createdPeer.name || "wireguard"}-profile`}
-              />
-            )}
+                {createdPeer?.imported && (
+                  <Alert severity="info" sx={{ width: "100%", fontSize: "0.8125rem" }}>
+                    <strong>Client-Side Keys:</strong> This peer was registered using an imported public key. The private key remains exclusively on the client device.
+                  </Alert>
+                )}
 
-            <Chip
-              label={`Assigned IP: ${createdPeer?.ip || "10.8.0.x"}`}
-              color="primary"
-              sx={{ fontWeight: 700, fontFamily: MONO }}
-            />
+                {/* Connection Endpoint Switcher */}
+                {(config?.lan_ip || config?.wan_ip) && (
+                  <Box sx={{ width: "100%", bgcolor: "action.hover", p: 1.5, borderRadius: 1.5 }}>
+                    <MicroLabel sx={{ mb: 0.75 }}>Connection Endpoint Destination</MicroLabel>
+                    <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap", gap: 1 }}>
+                      {config?.lan_ip && (
+                        <Chip
+                          label={`LAN Wi-Fi: ${config.lan_ip}`}
+                          clickable
+                          color={currentEp === config.lan_ip ? "primary" : "default"}
+                          onClick={() => setCreatedPeerEndpoint(config.lan_ip!)}
+                          sx={{ fontWeight: 600, fontFamily: MONO, fontSize: "0.75rem" }}
+                        />
+                      )}
+                      {config?.wan_ip && config.wan_ip !== config.lan_ip && (
+                        <Chip
+                          label={`WAN / 4G / 5G: ${config.wan_ip}`}
+                          clickable
+                          color={currentEp === config.wan_ip ? "primary" : "default"}
+                          onClick={() => setCreatedPeerEndpoint(config.wan_ip!)}
+                          sx={{ fontWeight: 600, fontFamily: MONO, fontSize: "0.75rem" }}
+                        />
+                      )}
+                      {config?.endpoint && config.endpoint !== config.lan_ip && config.endpoint !== config.wan_ip && (
+                        <Chip
+                          label={`Custom: ${config.endpoint}`}
+                          clickable
+                          color={currentEp === config.endpoint ? "primary" : "default"}
+                          onClick={() => setCreatedPeerEndpoint(config.endpoint)}
+                          sx={{ fontWeight: 600, fontFamily: MONO, fontSize: "0.75rem" }}
+                        />
+                      )}
+                    </Stack>
+                    <Typography variant="caption" sx={{ color: "text.secondary", mt: 0.75, display: "block" }}>
+                      {currentEp === config?.lan_ip
+                        ? "✓ Local LAN endpoint: Phone connects directly inside Wi-Fi (bypasses router NAT loopback drops)."
+                        : "ℹ WAN IP endpoint: For cellular (4G/5G). Ensure your home router forwards UDP port 51820 to " + (config?.lan_ip || "the server") + "."}
+                    </Typography>
+                  </Box>
+                )}
 
-            <Box sx={{ width: "100%" }}>
-              <MicroLabel sx={{ mb: 0.5 }}>Client Configuration File</MicroLabel>
-              <TextField
-                fullWidth
-                multiline
-                rows={6}
-                value={createdPeer?.config || ""}
-                slotProps={{
-                  input: {
-                    readOnly: true,
-                    sx: { fontFamily: MONO, fontSize: "0.75rem" },
-                  },
-                }}
-              />
-            </Box>
-          </Stack>
+                {activeConfig && (
+                  <QRCodeCanvas
+                    text={activeConfig}
+                    size={240}
+                    filename={`${createdPeer?.name || "wireguard"}-profile`}
+                  />
+                )}
+
+                <Chip
+                  label={`Assigned IP: ${createdPeer?.ip || "10.8.0.x"}`}
+                  color="primary"
+                  sx={{ fontWeight: 700, fontFamily: MONO }}
+                />
+
+                <Box sx={{ width: "100%" }}>
+                  <MicroLabel sx={{ mb: 0.5 }}>Client Configuration File</MicroLabel>
+                  <TextField
+                    fullWidth
+                    multiline
+                    rows={6}
+                    value={activeConfig}
+                    slotProps={{
+                      input: {
+                        readOnly: true,
+                        sx: { fontFamily: MONO, fontSize: "0.75rem" },
+                      },
+                    }}
+                  />
+                </Box>
+              </Stack>
+            );
+          })()}
         </DialogContent>
         <DialogActions sx={{ p: 2 }}>
           <Button
             startIcon={<ContentCopyIcon />}
             onClick={() => {
-              if (createdPeer?.config) {
-                navigator.clipboard.writeText(createdPeer.config);
+              const activeConfig = createdPeer?.config
+                ? switchEndpointInConfig(createdPeer.config, createdPeerEndpoint || config?.endpoint || "")
+                : "";
+              if (activeConfig) {
+                navigator.clipboard.writeText(activeConfig);
                 setToast("Configuration copied to clipboard");
               }
             }}
@@ -1203,8 +1366,11 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
             variant="contained"
             startIcon={<DownloadIcon />}
             onClick={() => {
-              if (createdPeer?.name && createdPeer?.config) {
-                downloadConfFile(createdPeer.name, createdPeer.config);
+              const activeConfig = createdPeer?.config
+                ? switchEndpointInConfig(createdPeer.config, createdPeerEndpoint || config?.endpoint || "")
+                : "";
+              if (createdPeer?.name && activeConfig) {
+                downloadConfFile(createdPeer.name, activeConfig);
               }
             }}
             sx={{ fontWeight: 700 }}
@@ -1229,46 +1395,99 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
           WireGuard Profile: {qrModalPeer?.name} ({qrModalPeer?.ip})
         </DialogTitle>
         <DialogContent dividers>
-          <Stack spacing={2} sx={{ alignItems: "center", py: 1 }}>
-            {qrModalPeer?.imported && (
-              <Alert severity="info" sx={{ width: "100%", fontSize: "0.8125rem" }}>
-                <strong>Client-Side Keys:</strong> This peer uses an externally generated keypair. When using the config template below, replace <code>&lt;CLIENT_PRIVATE_KEY&gt;</code> with the client's private key.
-              </Alert>
-            )}
+          {(() => {
+            const activeConfig = qrModalConfig
+              ? switchEndpointInConfig(qrModalConfig, qrModalEndpoint || config?.endpoint || "")
+              : "";
+            const currentEp = qrModalEndpoint || config?.endpoint || "";
 
-            {qrModalConfig ? (
-              <QRCodeCanvas
-                text={qrModalConfig}
-                size={240}
-                filename={`${qrModalPeer?.name || "wireguard"}-profile`}
-              />
-            ) : (
-              <CircularProgress size={32} />
-            )}
+            return (
+              <Stack spacing={2} sx={{ alignItems: "center", py: 1 }}>
+                {qrModalPeer?.imported && (
+                  <Alert severity="info" sx={{ width: "100%", fontSize: "0.8125rem" }}>
+                    <strong>Client-Side Keys:</strong> This peer uses an externally generated keypair. When using the config template below, replace <code>&lt;CLIENT_PRIVATE_KEY&gt;</code> with the client's private key.
+                  </Alert>
+                )}
 
-            <Box sx={{ width: "100%" }}>
-              <MicroLabel sx={{ mb: 0.5 }}>Client Configuration (.conf)</MicroLabel>
-              <TextField
-                fullWidth
-                multiline
-                rows={6}
-                value={qrModalConfig}
-                slotProps={{
-                  input: {
-                    readOnly: true,
-                    sx: { fontFamily: MONO, fontSize: "0.75rem" },
-                  },
-                }}
-              />
-            </Box>
-          </Stack>
+                {/* Connection Endpoint Switcher */}
+                {(config?.lan_ip || config?.wan_ip) && (
+                  <Box sx={{ width: "100%", bgcolor: "action.hover", p: 1.5, borderRadius: 1.5 }}>
+                    <MicroLabel sx={{ mb: 0.75 }}>Connection Endpoint Destination</MicroLabel>
+                    <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap", gap: 1 }}>
+                      {config?.lan_ip && (
+                        <Chip
+                          label={`LAN Wi-Fi: ${config.lan_ip}`}
+                          clickable
+                          color={currentEp === config.lan_ip ? "primary" : "default"}
+                          onClick={() => setQrModalEndpoint(config.lan_ip!)}
+                          sx={{ fontWeight: 600, fontFamily: MONO, fontSize: "0.75rem" }}
+                        />
+                      )}
+                      {config?.wan_ip && config.wan_ip !== config.lan_ip && (
+                        <Chip
+                          label={`WAN / 4G / 5G: ${config.wan_ip}`}
+                          clickable
+                          color={currentEp === config.wan_ip ? "primary" : "default"}
+                          onClick={() => setQrModalEndpoint(config.wan_ip!)}
+                          sx={{ fontWeight: 600, fontFamily: MONO, fontSize: "0.75rem" }}
+                        />
+                      )}
+                      {config?.endpoint && config.endpoint !== config.lan_ip && config.endpoint !== config.wan_ip && (
+                        <Chip
+                          label={`Custom: ${config.endpoint}`}
+                          clickable
+                          color={currentEp === config.endpoint ? "primary" : "default"}
+                          onClick={() => setQrModalEndpoint(config.endpoint)}
+                          sx={{ fontWeight: 600, fontFamily: MONO, fontSize: "0.75rem" }}
+                        />
+                      )}
+                    </Stack>
+                    <Typography variant="caption" sx={{ color: "text.secondary", mt: 0.75, display: "block" }}>
+                      {currentEp === config?.lan_ip
+                        ? "✓ Local LAN endpoint: Phone connects directly inside Wi-Fi (bypasses router NAT loopback drops)."
+                        : "ℹ WAN IP endpoint: For cellular (4G/5G). Ensure your home router forwards UDP port 51820 to " + (config?.lan_ip || "the server") + "."}
+                    </Typography>
+                  </Box>
+                )}
+
+                {activeConfig ? (
+                  <QRCodeCanvas
+                    text={activeConfig}
+                    size={240}
+                    filename={`${qrModalPeer?.name || "wireguard"}-profile`}
+                  />
+                ) : (
+                  <CircularProgress size={32} />
+                )}
+
+                <Box sx={{ width: "100%" }}>
+                  <MicroLabel sx={{ mb: 0.5 }}>Client Configuration (.conf)</MicroLabel>
+                  <TextField
+                    fullWidth
+                    multiline
+                    rows={6}
+                    value={activeConfig}
+                    slotProps={{
+                      input: {
+                        readOnly: true,
+                        sx: { fontFamily: MONO, fontSize: "0.75rem" },
+                      },
+                    }}
+                  />
+                </Box>
+              </Stack>
+            );
+          })()}
         </DialogContent>
         <DialogActions sx={{ p: 2 }}>
           <Button
             startIcon={<ContentCopyIcon />}
             onClick={() => {
-              if (qrModalConfig) {
-                navigator.clipboard.writeText(qrModalConfig);
+              const activeConfig = qrModalConfig
+                ? switchEndpointInConfig(qrModalConfig, qrModalEndpoint || config?.endpoint || "")
+                : "";
+              if (activeConfig) {
+                navigator.clipboard.writeText(activeConfig);
                 setToast("Configuration copied to clipboard");
               }
             }}
@@ -1279,8 +1498,11 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
             variant="contained"
             startIcon={<DownloadIcon />}
             onClick={() => {
-              if (qrModalPeer?.name && qrModalConfig) {
-                downloadConfFile(qrModalPeer.name, qrModalConfig);
+              const activeConfig = qrModalConfig
+                ? switchEndpointInConfig(qrModalConfig, qrModalEndpoint || config?.endpoint || "")
+                : "";
+              if (qrModalPeer?.name && activeConfig) {
+                downloadConfFile(qrModalPeer.name, activeConfig);
               }
             }}
             sx={{ fontWeight: 700 }}

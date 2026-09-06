@@ -27,6 +27,7 @@ _ARGV: dict[str, tuple[str, tuple[str, ...]]] = {
     "wireguard.server-restart":  ("server-restart",  ()),
     "wireguard.server-toggle":   ("server-toggle",   ("enabled",)),
     "wireguard.server-config":   ("server-config",   ()),
+    "wireguard.set-endpoint":    ("set-endpoint",    ("endpoint",)),
     "wireguard.server-logs":     ("server-logs",     ()),
     "wireguard.list-peers":      ("list-peers",      ()),
     "wireguard.create-peer":     ("create-peer",     ("name", "ip", "allowed_ips", "dns")),
@@ -34,14 +35,17 @@ _ARGV: dict[str, tuple[str, tuple[str, ...]]] = {
     "wireguard.toggle-peer":     ("toggle-peer",     ("id", "enabled")),
     "wireguard.rename-peer":     ("rename-peer",     ("id", "new_name")),
     "wireguard.delete-peer":     ("delete-peer",     ("id",)),
-    "wireguard.get-peer-config": ("get-peer-config", ("id",)),
-    "wireguard.get-peer-qr":     ("get-peer-qr",     ("id",)),
+    "wireguard.get-peer-config": ("get-peer-config", ("id", "endpoint")),
+    "wireguard.get-peer-qr":     ("get-peer-qr",     ("id", "endpoint")),
 }
 
 # Parameters in _ARGV that can be omitted from the request and defaulted to ""
 _OPTIONAL_POSITIONAL: dict[str, set[str]] = {
     "wireguard.create-peer": {"ip", "allowed_ips", "dns"},
     "wireguard.import-peer": {"ip", "allowed_ips", "dns"},
+    "wireguard.set-endpoint": {"endpoint"},
+    "wireguard.get-peer-config": {"endpoint"},
+    "wireguard.get-peer-qr": {"endpoint"},
 }
 
 

@@ -234,9 +234,9 @@ ListenPort = 51820
 PrivateKey = $priv_key
 SaveConfig = false
 
-# PostUp/PostDown NAT masquerade & IPv4 routing for clients
-PostUp = sysctl -w net.ipv4.ip_forward=1; iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o $iface -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o $iface -j MASQUERADE
+# PostUp/PostDown NAT masquerade & bidirectional IPv4 forwarding for clients
+PostUp = sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true; iptables -I FORWARD 1 -i wg0 -j ACCEPT; iptables -I FORWARD 1 -o wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o $iface -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT 2>/dev/null || true; iptables -D FORWARD -o wg0 -j ACCEPT 2>/dev/null || true; iptables -t nat -D POSTROUTING -o $iface -j MASQUERADE 2>/dev/null || true
 EOF
 
     # Append peers
@@ -289,6 +289,17 @@ is_server_running() {
 
 # ── Public Endpoint Detector ──────────────────────────────────────────────────
 get_public_endpoint() {
+    # 0. Check custom endpoint override file under /opt/hostpanel/etc/wireguard/endpoint
+    local custom_ep_file="$HP_WG_DIR/endpoint"
+    if [ -f "$custom_ep_file" ]; then
+        local custom_ep
+        custom_ep="$(cat "$custom_ep_file" 2>/dev/null | tr -d ' \r\n')"
+        if [ -n "$custom_ep" ]; then
+            echo "$custom_ep"
+            return 0
+        fi
+    fi
+
     # 1. In dry-run mode, return fixed documentation IP
     if is_dryrun; then
         echo "203.0.113.10"
@@ -644,14 +655,49 @@ case "$verb" in
 
     server_pubkey="$(cat "$HP_SERVER_PUBKEY" 2>/dev/null || echo "")"
     endpoint="$(get_public_endpoint)"
+    custom_ep=""
+    if [ -f "$HP_WG_DIR/endpoint" ]; then
+        custom_ep="$(cat "$HP_WG_DIR/endpoint" 2>/dev/null | tr -d ' \r\n')"
+    fi
+    lan_ip="$(hostname -I 2>/dev/null | awk '{print $1}' || echo "127.0.0.1")"
+    wan_ip=""
+    if [ -f "$HP_WG_RUN/endpoint_ip.cache" ]; then
+        wan_ip="$(cat "$HP_WG_RUN/endpoint_ip.cache" 2>/dev/null || echo "")"
+    fi
+    if [ -z "$wan_ip" ] && ! is_dryrun && command -v curl >/dev/null 2>&1; then
+        wan_ip="$(curl -4 -s --max-time 2 https://api.ipify.org 2>/dev/null || echo "")"
+    fi
+    [ -n "$wan_ip" ] || wan_ip="$endpoint"
 
-    # The paths are reported rather than restated in the UI. This script is the
-    # only thing that knows where they actually are, so a UI that hardcodes them
-    # is a copy that drifts — which is exactly how the panel came to display a
-    # loopback port the service had never used.
-    printf '{"interface":"wg0","listen_port":51820,"address":"10.8.0.1/24","subnet":"10.8.0.0/24","mtu":1420,"public_key":"%s","endpoint":"%s","config_path":"%s","isolation_path":"%s","run_path":"%s","logs_path":"%s","peers_path":"%s","runtime_path":"%s"}\n' \
-        "$(json_escape "$server_pubkey")" "$(json_escape "$endpoint")" "$(json_escape "$HP_WG_CONF")" "$(json_escape "$HP_WG_DIR")" \
+    printf '{"interface":"wg0","listen_port":51820,"address":"10.8.0.1/24","subnet":"10.8.0.0/24","mtu":1420,"public_key":"%s","endpoint":"%s","custom_endpoint":"%s","lan_ip":"%s","wan_ip":"%s","config_path":"%s","isolation_path":"%s","run_path":"%s","logs_path":"%s","peers_path":"%s","runtime_path":"%s"}\n' \
+        "$(json_escape "$server_pubkey")" "$(json_escape "$endpoint")" "$(json_escape "$custom_ep")" "$(json_escape "$lan_ip")" "$(json_escape "$wan_ip")" "$(json_escape "$HP_WG_CONF")" "$(json_escape "$HP_WG_DIR")" \
         "$(json_escape "$HP_WG_RUN")" "$(json_escape "$HP_WG_LOGS")" "$(json_escape "$HP_WG_PEERS_DIR")" "$(json_escape "$HP_WG_RUNTIME")"
+    ;;
+
+  set-endpoint)
+    [ $# -ge 0 ] && [ $# -le 1 ] || die "usage: set-endpoint [endpoint|auto]" 12
+    ep_val="${1:-auto}"
+    ensure_dirs
+    if [ "$ep_val" = "auto" ] || [ -z "$ep_val" ]; then
+        rm -f "$HP_WG_DIR/endpoint"
+        rm -f "$HP_WG_RUN/endpoint_ip.cache"
+        new_ep="$(get_public_endpoint)"
+    else
+        echo "$ep_val" | grep -Eq '^[a-zA-Z0-9.-]{1,253}$' || die "invalid endpoint format '$ep_val'" 12
+        echo "$ep_val" > "$HP_WG_DIR/endpoint"
+        new_ep="$ep_val"
+    fi
+
+    # Update all existing peer .conf files with the new endpoint
+    if [ -d "$HP_WG_PEERS_DIR" ]; then
+        for pf in "$HP_WG_PEERS_DIR"/*.conf; do
+            [ -f "$pf" ] || continue
+            sed -i "s/^Endpoint = .*:51820/Endpoint = $new_ep:51820/" "$pf" 2>/dev/null || true
+        done
+    fi
+
+    echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') [INFO] WireGuard server endpoint set to: $new_ep" >> "$HP_LOG_FILE" 2>/dev/null || true
+    printf '{"ok":true,"endpoint":"%s"}\n' "$(json_escape "$new_ep")"
     ;;
 
   server-logs)
@@ -1026,8 +1072,9 @@ JSONEOF
     ;;
 
   get-peer-config)
-    require_argc 1 $# "get-peer-config <id>"
+    [ $# -ge 1 ] && [ $# -le 2 ] || die "usage: get-peer-config <id> [endpoint]" 12
     id="$1"
+    override_ep="${2:-}"
     echo "$id" | grep -Eq '^[a-zA-Z0-9_-]{1,64}$' || die "invalid peer id '$id'" 12
 
     peer_conf="$HP_WG_PEERS_DIR/$id.conf"
@@ -1040,8 +1087,10 @@ JSONEOF
     p_imported="$(json_bare "$peer_json" imported)"
     [ -n "$p_imported" ] || p_imported="false"
 
+    target_ep="${override_ep:-$(get_public_endpoint)}"
+
     if [ -f "$peer_conf" ]; then
-        conf_content="$(cat "$peer_conf")"
+        conf_content="$(sed "s/^Endpoint = .*:51820/Endpoint = $target_ep:51820/" "$peer_conf")"
     else
         conf_content=""
     fi
@@ -1051,8 +1100,9 @@ JSONEOF
     ;;
 
   get-peer-qr)
-    require_argc 1 $# "get-peer-qr <id>"
+    [ $# -ge 1 ] && [ $# -le 2 ] || die "usage: get-peer-qr <id> [endpoint]" 12
     id="$1"
+    override_ep="${2:-}"
     echo "$id" | grep -Eq '^[a-zA-Z0-9_-]{1,64}$' || die "invalid peer id '$id'" 12
 
     peer_conf="$HP_WG_PEERS_DIR/$id.conf"
@@ -1062,9 +1112,11 @@ JSONEOF
     p_imported="$(json_bare "$peer_json" imported)"
     [ -n "$p_imported" ] || p_imported="false"
 
+    target_ep="${override_ep:-$(get_public_endpoint)}"
+
     conf_content=""
     if [ -f "$peer_conf" ]; then
-        conf_content="$(cat "$peer_conf")"
+        conf_content="$(sed "s/^Endpoint = .*:51820/Endpoint = $target_ep:51820/" "$peer_conf")"
     fi
     printf '{"id":"%s","imported":%s,"config":"%s","qr_data":"%s"}\n' \
         "$(json_escape "$id")" "$p_imported" "$(json_escape "$conf_content")" "$(json_escape "$conf_content")" 
