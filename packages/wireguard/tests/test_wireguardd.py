@@ -70,6 +70,16 @@ case "$verb" in
     echo "Creating peer $1" >&2
     printf '{"ok":true,"peer":{"id":"%s","name":"%s","ip":"%s","public_key":"NEWCLIENTPUBKEY=","allowed_ips":"%s","dns":"%s","created_at":"2026-08-23T00:05:00Z","enabled":true,"config":"[Interface]\\nPrivateKey = PRIVKEY=\\nAddress = %s/24\\nDNS = %s\\n\\n[Peer]\\nPublicKey = SERVERPUBKEY123=\\nEndpoint = 203.0.113.10:51820\\nAllowedIPs = %s\\n"}}\n' "$1" "$1" "${2:-10.8.0.3}" "${3:-0.0.0.0/0, ::/0}" "${4:-1.1.1.1}" "${2:-10.8.0.3}" "${4:-1.1.1.1}" "${3:-0.0.0.0/0, ::/0}"
     ;;
+  import-peer)
+    echo "Importing peer $1" >&2
+    printf '{"ok":true,"peer":{"id":"%s","name":"%s","ip":"%s","public_key":"%s","allowed_ips":"%s","dns":"%s","created_at":"2026-08-23T00:05:00Z","enabled":true,"imported":true,"config":"[Interface]\\nAddress = %s/24\\nDNS = %s\\n\\n[Peer]\\nPublicKey = SERVERPUBKEY123=\\nEndpoint = 203.0.113.10:51820\\nAllowedIPs = %s\\n"}}\n' "$1" "$1" "${3:-10.8.0.4}" "$2" "${4:-0.0.0.0/0, ::/0}" "${5:-1.1.1.1}" "${3:-10.8.0.4}" "${5:-1.1.1.1}" "${4:-0.0.0.0/0, ::/0}"
+    ;;
+  toggle-peer)
+    printf '{"ok":true,"id":"%s","enabled":%s}\n' "$1" "$([ "$2" = "1" ] && echo true || echo false)"
+    ;;
+  rename-peer)
+    printf '{"ok":true,"id":"%s","name":"%s"}\n' "$1" "$2"
+    ;;
   delete-peer)
     printf '{"ok":true,"id":"%s","deleted":true}\n' "$1"
     ;;
@@ -97,9 +107,20 @@ def svc(tmp_path, monkeypatch):
 
     token = tokenlib.generate()
     monkeypatch.setenv("HP_PACKAGE_TOKEN", token)
-    monkeypatch.setenv("HP_OPS_SCRIPT", str(script))
-    monkeypatch.setenv("HP_TEST_LOG", str(log))
+    monkeypatch.setenv("HP_OPS_SCRIPT", str(script).replace("\\", "/"))
+    monkeypatch.setenv("HP_TEST_LOG", str(log).replace("\\", "/"))
     monkeypatch.setenv("HP_OPS_SUDO", "0")
+
+    if sys.platform == "win32":
+        from portald.sdk import ops
+        orig_build_argv = ops._build_argv
+        def win_build_argv(spec):
+            argv = orig_build_argv(spec)
+            git_bash = r"C:\Program Files\Git\bin\bash.exe"
+            if os.path.exists(git_bash):
+                return [git_bash, *argv]
+            return argv
+        monkeypatch.setattr(ops, "_build_argv", win_build_argv)
 
     from hostpanel_wireguardd import main as wgd
 
@@ -119,7 +140,7 @@ def test_health_unauthenticated(svc):
     """Health check endpoint requires no auth token."""
     res = svc.client.get("/health", headers={tokenlib.HEADER: ""})
     assert res.status_code == 200
-    assert res.json() == {"package": "wireguard", "version": "3.0.0", "ok": True}
+    assert res.json() == {"package": "wireguard", "version": "3.0.1", "ok": True}
 
 
 def test_missing_token_rejected(svc):
@@ -295,4 +316,40 @@ def test_operations_introspection(svc):
     data = res.json()
     assert data["package"] == "wireguard"
     assert "wireguard.create-peer" in data["operations"]
+    assert "wireguard.import-peer" in data["operations"]
+    assert "wireguard.toggle-peer" in data["operations"]
+    assert "wireguard.rename-peer" in data["operations"]
     assert "wireguard.server-status" in data["operations"]
+
+
+def test_import_peer(svc):
+    res = svc.client.post("/peers/import", json={
+        "name": "imported_client",
+        "public_key": "CLIENTPUBKEY1234567890123456789012345678901=",
+        "ip": "10.8.0.10",
+        "allowed_ips": "0.0.0.0/0, ::/0",
+        "dns": "1.1.1.1",
+        "preshared_key": "secretpsk==",
+    })
+    assert res.status_code == 200
+    peer = res.json()["peer"]
+    assert peer["name"] == "imported_client"
+    assert peer["imported"] is True
+    log = ops_log(svc)
+    assert "VERB=import-peer" in log
+    assert "SECRET=preshared_key" in log
+
+
+def test_toggle_peer(svc):
+    res = svc.client.post("/peers/phone/toggle", json={"enabled": False})
+    assert res.status_code == 200
+    assert res.json()["enabled"] is False
+    assert "VERB=toggle-peer" in ops_log(svc)
+
+
+def test_rename_peer(svc):
+    res = svc.client.post("/peers/phone/rename", json={"new_name": "new_phone"})
+    assert res.status_code == 200
+    assert res.json()["name"] == "new_phone"
+    assert "VERB=rename-peer" in ops_log(svc)
+

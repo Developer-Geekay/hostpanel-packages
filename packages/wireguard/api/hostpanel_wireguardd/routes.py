@@ -42,6 +42,23 @@ class CreatePeer(BaseModel):
     preshared_key: Optional[str] = None
 
 
+class ImportPeer(BaseModel):
+    name: str
+    public_key: str
+    ip: Optional[str] = None
+    allowed_ips: Optional[str] = "0.0.0.0/0, ::/0"
+    dns: Optional[str] = "1.1.1.1, 8.8.8.8"
+    preshared_key: Optional[str] = None
+
+
+class TogglePeer(BaseModel):
+    enabled: str | bool
+
+
+class RenamePeer(BaseModel):
+    new_name: str
+
+
 def wants_stream(request: Request) -> bool:
     """True if caller requested text/event-stream."""
     accept = request.headers.get("accept", "")
@@ -211,6 +228,29 @@ def build_router(manifest: M.Manifest, ops_script: str, *,
         if body.preshared_key:
             params["preshared_key"] = body.preshared_key
         return await dispatch(request, "wireguard.create-peer", params)
+
+    @router.post("/peers/import")
+    async def import_peer(request: Request, body: ImportPeer):
+        params: dict[str, Any] = {
+            "name": body.name,
+            "public_key": body.public_key,
+            "allowed_ips": body.allowed_ips or "0.0.0.0/0, ::/0",
+            "dns": body.dns or "1.1.1.1, 8.8.8.8",
+        }
+        if body.ip:
+            params["ip"] = body.ip
+        if body.preshared_key:
+            params["preshared_key"] = body.preshared_key
+        return await dispatch(request, "wireguard.import-peer", params)
+
+    @router.post("/peers/{id}/toggle")
+    async def toggle_peer(request: Request, id: str, body: TogglePeer):
+        enabled_str = "1" if (body.enabled is True or body.enabled in ("1", "true", "True")) else "0"
+        return await dispatch(request, "wireguard.toggle-peer", {"id": id, "enabled": enabled_str})
+
+    @router.post("/peers/{id}/rename")
+    async def rename_peer(request: Request, id: str, body: RenamePeer):
+        return await dispatch(request, "wireguard.rename-peer", {"id": id, "new_name": body.new_name})
 
     @router.delete("/peers/{id}")
     async def delete_peer(request: Request, id: str):

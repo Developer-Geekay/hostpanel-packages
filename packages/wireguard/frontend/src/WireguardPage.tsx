@@ -3,8 +3,11 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {  Box,
+import {
+  Alert,
+  Box,
   Button,
+  ButtonGroup,
   Card,
   CardContent,
   Chip,
@@ -12,7 +15,8 @@ import {  Box,
   Dialog,
   DialogActions,
   DialogContent,
-  DialogTitle,  IconButton,
+  DialogTitle,
+  IconButton,
   MenuItem,
   Paper,
   Select,
@@ -42,6 +46,9 @@ import RestartAltIcon from "@mui/icons-material/RestartAlt";
 import QrCode2Icon from "@mui/icons-material/QrCode2";
 import DownloadIcon from "@mui/icons-material/Download";
 import DeleteIcon from "@mui/icons-material/Delete";
+import EditIcon from "@mui/icons-material/Edit";
+import ToggleOnIcon from "@mui/icons-material/ToggleOn";
+import ToggleOffIcon from "@mui/icons-material/ToggleOff";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import RouterIcon from "@mui/icons-material/Router";
 import PeopleIcon from "@mui/icons-material/People";
@@ -53,6 +60,7 @@ import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 
 import type {
   CreatePeerRequest,
+  ImportPeerRequest,
   PackageContext,
   PeerItem,
   ServerConfig,
@@ -135,6 +143,8 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
   });
   const [dnsPreset, setDnsPreset] = useState("cloudflare");
   const [allowedPreset, setAllowedPreset] = useState("all");
+  const [peerMode, setPeerMode] = useState<"create" | "import">("create");
+  const [importPublicKey, setImportPublicKey] = useState("");
 
   // Newly created peer modal
   const [createdPeer, setCreatedPeer] = useState<PeerItem | null>(null);
@@ -145,6 +155,10 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
 
   // Delete peer confirm dialog
   const [deletePeerTarget, setDeletePeerTarget] = useState<PeerItem | null>(null);
+
+  // Rename peer dialog
+  const [renamePeerTarget, setRenamePeerTarget] = useState<PeerItem | null>(null);
+  const [renameValue, setRenameValue] = useState("");
 
   const abortRef = useRef<AbortController | null>(null);
 
@@ -220,44 +234,112 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
   const handleServerRestart = () =>
     runStreamOp("Restarting WireGuard Server", "/server/restart", "POST");
 
-  // Create Peer Submit
+  // Create or Import Peer Submit
   const handleCreatePeerSubmit = async () => {
     if (!peerForm.name.trim()) {
       setToast("Peer name is required");
       return;
     }
+    if (peerMode === "import" && !importPublicKey.trim()) {
+      setToast("Client public key is required for import");
+      return;
+    }
     setLoading(true);
     try {
-      const payload: CreatePeerRequest = {
-        name: peerForm.name.trim(),
-        ip: peerForm.ip?.trim() || undefined,
-        allowed_ips: peerForm.allowed_ips || "0.0.0.0/0, ::/0",
-        dns: peerForm.dns || "1.1.1.1, 8.8.8.8",
-        preshared_key: peerForm.preshared_key ? peerForm.preshared_key : undefined,
-      };
+      if (peerMode === "import") {
+        const payload: ImportPeerRequest = {
+          name: peerForm.name.trim(),
+          public_key: importPublicKey.trim(),
+          ip: peerForm.ip?.trim() || undefined,
+          allowed_ips: peerForm.allowed_ips || "0.0.0.0/0, ::/0",
+          dns: peerForm.dns || "1.1.1.1, 8.8.8.8",
+          preshared_key: peerForm.preshared_key ? peerForm.preshared_key : undefined,
+        };
 
-      const res = await json("/peers/create", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-
-      if (res?.peer) {
-        setCreatedPeer(res.peer);
-        setTab(0);
-        setPeerForm({
-          name: "",
-          ip: "",
-          allowed_ips: "0.0.0.0/0, ::/0",
-          dns: "1.1.1.1, 8.8.8.8",
-          preshared_key: "",
+        const res = await json("/peers/import", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
         });
-        loadAll();
+
+        if (res?.peer) {
+          setCreatedPeer(res.peer);
+          setTab(0);
+          setPeerForm({
+            name: "",
+            ip: "",
+            allowed_ips: "0.0.0.0/0, ::/0",
+            dns: "1.1.1.1, 8.8.8.8",
+            preshared_key: "",
+          });
+          setImportPublicKey("");
+          loadAll();
+        }
+      } else {
+        const payload: CreatePeerRequest = {
+          name: peerForm.name.trim(),
+          ip: peerForm.ip?.trim() || undefined,
+          allowed_ips: peerForm.allowed_ips || "0.0.0.0/0, ::/0",
+          dns: peerForm.dns || "1.1.1.1, 8.8.8.8",
+          preshared_key: peerForm.preshared_key ? peerForm.preshared_key : undefined,
+        };
+
+        const res = await json("/peers/create", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+
+        if (res?.peer) {
+          setCreatedPeer(res.peer);
+          setTab(0);
+          setPeerForm({
+            name: "",
+            ip: "",
+            allowed_ips: "0.0.0.0/0, ::/0",
+            dns: "1.1.1.1, 8.8.8.8",
+            preshared_key: "",
+          });
+          loadAll();
+        }
       }
     } catch (e: any) {
-      setToast(e.message || "Failed to create client peer");
+      setToast(e.message || "Failed to create or import client peer");
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Toggle Peer Enable/Disable
+  const handleTogglePeer = async (peer: PeerItem) => {
+    try {
+      await json(`/peers/${encodeURIComponent(peer.id)}/toggle`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: !peer.enabled }),
+      });
+      setToast(`Peer ${peer.name} ${peer.enabled ? "disabled" : "enabled"}`);
+      loadAll();
+    } catch (e: any) {
+      setToast(e.message || "Failed to toggle peer");
+    }
+  };
+
+  // Rename Peer Submit
+  const handleRenamePeerSubmit = async () => {
+    if (!renamePeerTarget || !renameValue.trim()) return;
+    try {
+      await json(`/peers/${encodeURIComponent(renamePeerTarget.id)}/rename`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ new_name: renameValue.trim() }),
+      });
+      setToast(`Peer renamed to ${renameValue.trim()}`);
+      setRenamePeerTarget(null);
+      setRenameValue("");
+      loadAll();
+    } catch (e: any) {
+      setToast(e.message || "Failed to rename peer");
     }
   };
 
@@ -551,14 +633,22 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
                         peer.last_handshake > 0 &&
                         Math.floor(Date.now() / 1000) - peer.last_handshake < 180;
                       return (
-                        <TableRow key={peer.id} hover>
+                        <TableRow key={peer.id} hover sx={{ opacity: peer.enabled ? 1 : 0.6 }}>
                           <TableCell>
-                            <Dot ok={hasRecentHandshake} size={8} />
+                            <Dot ok={peer.enabled && hasRecentHandshake} size={8} />
                           </TableCell>
                           <TableCell>
-                            <Typography sx={{ fontWeight: 600, fontSize: "0.875rem" }}>
-                              {peer.name}
-                            </Typography>
+                            <Stack direction="row" spacing={0.5} sx={{ alignItems: "center", flexWrap: "wrap" }}>
+                              <Typography sx={{ fontWeight: 600, fontSize: "0.875rem" }}>
+                                {peer.name}
+                              </Typography>
+                              {!peer.enabled && (
+                                <Chip size="small" label="DISABLED" color="default" sx={{ fontSize: "0.65rem", height: 18 }} />
+                              )}
+                              {peer.imported && (
+                                <Chip size="small" label="IMPORTED" color="info" variant="outlined" sx={{ fontSize: "0.65rem", height: 18 }} />
+                              )}
+                            </Stack>
                             <Typography variant="caption" sx={{ color: "text.disabled", fontFamily: MONO }}>
                               id: {peer.id}
                             </Typography>
@@ -595,7 +685,32 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
                             </Typography>
                           </TableCell>
                           <TableCell align="right">
-                            <Stack direction="row" spacing={1} sx={{ justifyContent: "flex-end" }}>
+                            <Stack direction="row" spacing={0.5} sx={{ justifyContent: "flex-end" }}>
+                              <Tooltip title={peer.enabled ? "Disable Peer" : "Enable Peer"}>
+                                <IconButton
+                                  size="small"
+                                  onClick={() => handleTogglePeer(peer)}
+                                >
+                                  {peer.enabled ? (
+                                    <ToggleOnIcon fontSize="small" color="success" />
+                                  ) : (
+                                    <ToggleOffIcon fontSize="small" color="action" />
+                                  )}
+                                </IconButton>
+                              </Tooltip>
+
+                              <Tooltip title="Rename Peer">
+                                <IconButton
+                                  size="small"
+                                  onClick={() => {
+                                    setRenamePeerTarget(peer);
+                                    setRenameValue(peer.name);
+                                  }}
+                                >
+                                  <EditIcon fontSize="small" />
+                                </IconButton>
+                              </Tooltip>
+
                               <Tooltip title="View QR Code & Config">
                                 <IconButton
                                   size="small"
@@ -645,11 +760,30 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
         {tab === 1 && (
           <Box sx={{ p: PANEL_PAD, maxWidth: 640 }}>
             <Typography variant="h6" sx={{ fontWeight: 600, mb: 0.5 }}>
-              Create New VPN Client Profile
+              {peerMode === "import" ? "Import Existing VPN Client Profile" : "Create New VPN Client Profile"}
             </Typography>
             <Typography variant="body2" sx={{ color: "text.secondary", mb: 2 }}>
-              Generates cryptographic Curve25519 keypair, allocates next IP, and renders client QR code.
+              {peerMode === "import"
+                ? "Registers an existing client public key without storing private credentials on the server."
+                : "Generates cryptographic Curve25519 keypair, allocates next IP, and renders client QR code."}
             </Typography>
+
+            <Box sx={{ mb: 2.5 }}>
+              <ButtonGroup size="small">
+                <Button
+                  variant={peerMode === "create" ? "contained" : "outlined"}
+                  onClick={() => setPeerMode("create")}
+                >
+                  Generate New Keys
+                </Button>
+                <Button
+                  variant={peerMode === "import" ? "contained" : "outlined"}
+                  onClick={() => setPeerMode("import")}
+                >
+                  Import Existing Public Key
+                </Button>
+              </ButtonGroup>
+            </Box>
 
             <Stack spacing={2.5}>
               <Field label="Peer / Device Name" hint="Alphanumeric (e.g. phone, macbook, router)">
@@ -661,6 +795,23 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
                   onChange={(e) => setPeerForm({ ...peerForm, name: e.target.value })}
                 />
               </Field>
+
+              {peerMode === "import" && (
+                <Field label="Client Public Key" hint="Base64 Curve25519 public key (44 chars, e.g. from wg pubkey)">
+                  <TextField
+                    fullWidth
+                    size="small"
+                    placeholder="e.g. 7XpQ...="
+                    value={importPublicKey}
+                    onChange={(e) => setImportPublicKey(e.target.value)}
+                    slotProps={{
+                      input: {
+                        sx: { fontFamily: MONO, fontSize: "0.8125rem" },
+                      },
+                    }}
+                  />
+                </Field>
+              )}
 
               <Field label="Assigned Client IP" hint="Leave empty to auto-allocate next available 10.8.0.x">
                 <TextField
@@ -734,11 +885,11 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
                   variant="contained"
                   color="primary"
                   onClick={handleCreatePeerSubmit}
-                  disabled={loading || !peerForm.name.trim()}
+                  disabled={loading || !peerForm.name.trim() || (peerMode === "import" && !importPublicKey.trim())}
                   startIcon={loading ? <CircularProgress size={16} /> : <CheckCircleIcon />}
                   sx={{ fontWeight: 700 }}
                 >
-                  Generate Peer Profile &amp; QR Code
+                  {peerMode === "import" ? "Import Client Profile" : "Generate Peer Profile & QR Code"}
                 </Button>
               </Stack>
             </Stack>
@@ -921,6 +1072,12 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
               Scan this QR code with the WireGuard mobile app (iOS / Android) or download the <code>.conf</code> file for desktop.
             </Typography>
 
+            {createdPeer?.imported && (
+              <Alert severity="info" sx={{ width: "100%", fontSize: "0.8125rem" }}>
+                <strong>Client-Side Keys:</strong> This peer was registered using an imported public key. The private key remains exclusively on the client device.
+              </Alert>
+            )}
+
             {createdPeer?.config && (
               <QRCodeCanvas text={createdPeer.config} size={220} />
             )}
@@ -991,6 +1148,12 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
         </DialogTitle>
         <DialogContent dividers>
           <Stack spacing={2} sx={{ alignItems: "center", py: 1 }}>
+            {qrModalPeer?.imported && (
+              <Alert severity="info" sx={{ width: "100%", fontSize: "0.8125rem" }}>
+                <strong>Client-Side Keys:</strong> This peer uses an externally generated keypair. When using the config template below, replace <code>&lt;CLIENT_PRIVATE_KEY&gt;</code> with the client's private key.
+              </Alert>
+            )}
+
             {qrModalConfig ? (
               <QRCodeCanvas text={qrModalConfig} size={220} />
             ) : (
@@ -1072,6 +1235,43 @@ function WireguardBody({ ctx }: { ctx: PackageContext }) {
             onClick={() => deletePeerTarget && handleDeletePeer(deletePeerTarget)}
           >
             Revoke &amp; Delete
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* ── Modal: Rename Peer Dialog ────────────────────────────────────── */}
+      <Dialog
+        open={Boolean(renamePeerTarget)}
+        onClose={() => {
+          setRenamePeerTarget(null);
+          setRenameValue("");
+        }}
+        maxWidth="xs"
+        fullWidth
+      >
+        <DialogTitle sx={{ fontWeight: 700 }}>Rename Client Peer</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" sx={{ color: "text.secondary", mb: 2 }}>
+            Update display name for peer <code>{renamePeerTarget?.id}</code> ({renamePeerTarget?.ip}):
+          </Typography>
+          <TextField
+            fullWidth
+            autoFocus
+            size="small"
+            label="New Peer Name"
+            value={renameValue}
+            onChange={(e) => setRenameValue(e.target.value)}
+            placeholder="e.g. alice-laptop"
+          />
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button onClick={() => setRenamePeerTarget(null)}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={handleRenamePeerSubmit}
+            disabled={!renameValue.trim() || renameValue.trim() === renamePeerTarget?.name}
+          >
+            Save Name
           </Button>
         </DialogActions>
       </Dialog>

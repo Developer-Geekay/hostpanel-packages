@@ -109,6 +109,7 @@ export interface PeerItem {
   dns: string;
   created_at: string;
   enabled: boolean;
+  imported?: boolean;
   rx_bytes: number;
   tx_bytes: number;
   last_handshake: number;
@@ -118,6 +119,15 @@ export interface PeerItem {
 
 export interface CreatePeerRequest {
   name: string;
+  ip?: string;
+  allowed_ips?: string;
+  dns?: string;
+  preshared_key?: string;
+}
+
+export interface ImportPeerRequest {
+  name: string;
+  public_key: string;
   ip?: string;
   allowed_ips?: string;
   dns?: string;

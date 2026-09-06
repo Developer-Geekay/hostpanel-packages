@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "feature": "wireguard",
   "label": "WireGuard VPN",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "requires_core": [
     3,
     0,
@@ -165,6 +165,74 @@
         "preshared_key": {
           "secret": true,
           "required": false
+        }
+      }
+    },
+    "wireguard.import-peer": {
+      "verb": "import-peer",
+      "mutating": true,
+      "streams": true,
+      "audit_action": "wireguard.import_peer",
+      "timeout_ms": 15000,
+      "params": {
+        "name": {
+          "pattern": "^[a-zA-Z0-9_-]{1,32}$",
+          "required": true
+        },
+        "public_key": {
+          "pattern": "^[a-zA-Z0-9+/]{42,43}={0,2}$",
+          "required": true
+        },
+        "ip": {
+          "pattern": "^10\\.8\\.0\\.(?:[2-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|254)$",
+          "required": false
+        },
+        "allowed_ips": {
+          "required": false
+        },
+        "dns": {
+          "required": false
+        },
+        "preshared_key": {
+          "secret": true,
+          "required": false
+        }
+      }
+    },
+    "wireguard.toggle-peer": {
+      "verb": "toggle-peer",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "wireguard.toggle_peer",
+      "timeout_ms": 15000,
+      "params": {
+        "id": {
+          "pattern": "^[a-zA-Z0-9_-]{1,64}$",
+          "required": true
+        },
+        "enabled": {
+          "enum": [
+            "0",
+            "1"
+          ],
+          "required": true
+        }
+      }
+    },
+    "wireguard.rename-peer": {
+      "verb": "rename-peer",
+      "mutating": true,
+      "streams": false,
+      "audit_action": "wireguard.rename_peer",
+      "timeout_ms": 10000,
+      "params": {
+        "id": {
+          "pattern": "^[a-zA-Z0-9_-]{1,64}$",
+          "required": true
+        },
+        "new_name": {
+          "pattern": "^[a-zA-Z0-9_-]{1,32}$",
+          "required": true
         }
       }
     },

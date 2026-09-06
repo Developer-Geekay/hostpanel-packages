@@ -30,8 +30,8 @@ def svc(monkeypatch, tmp_path):
     ops_script.chmod(ops_script.stat().st_mode | stat.S_IEXEC)
 
     monkeypatch.setenv("HP_PACKAGE_TOKEN", token)
-    monkeypatch.setenv("HP_OPS_SCRIPT", str(ops_script))
-    monkeypatch.setenv("HP_CORE_LIB", str(ROOT / "hpcore" / "lib"))
+    monkeypatch.setenv("HP_OPS_SCRIPT", str(ops_script).replace("\\", "/"))
+    monkeypatch.setenv("HP_CORE_LIB", str(ROOT / "hpcore" / "lib").replace("\\", "/"))
     monkeypatch.setenv("HP_OPS_SUDO", "0")
     monkeypatch.setenv("HP_OPS_DRYRUN", "1")
 
@@ -43,9 +43,20 @@ def svc(monkeypatch, tmp_path):
     wg_run.mkdir(parents=True)
     wg_logs.mkdir(parents=True)
 
-    monkeypatch.setenv("HP_WG_DIR", str(wg_dir))
-    monkeypatch.setenv("HP_WG_RUN", str(wg_run))
-    monkeypatch.setenv("HP_WG_LOGS", str(wg_logs))
+    monkeypatch.setenv("HP_WG_DIR", str(wg_dir).replace("\\", "/"))
+    monkeypatch.setenv("HP_WG_RUN", str(wg_run).replace("\\", "/"))
+    monkeypatch.setenv("HP_WG_LOGS", str(wg_logs).replace("\\", "/"))
+
+    if sys.platform == "win32":
+        from portald.sdk import ops
+        orig_build_argv = ops._build_argv
+        def win_build_argv(spec):
+            argv = orig_build_argv(spec)
+            git_bash = r"C:\Program Files\Git\bin\bash.exe"
+            if os.path.exists(git_bash):
+                return [git_bash, *argv]
+            return argv
+        monkeypatch.setattr(ops, "_build_argv", win_build_argv)
 
     from hostpanel_wireguardd import main as wgd
 
@@ -116,7 +127,39 @@ def test_real_script_peer_lifecycle(svc):
     assert peers[0]["id"] == "work_laptop"
     assert peers[0]["ip"] == "10.8.0.2"
 
-    # 3. Get peer config & QR
+    # 3. Toggle peer (disable and re-enable)
+    res_toggle_off = svc.client.post("/peers/work_laptop/toggle", json={"enabled": False})
+    assert res_toggle_off.status_code == 200
+    assert res_toggle_off.json()["enabled"] is False
+
+    res_list_t = svc.client.get("/peers")
+    assert res_list_t.json()["peers"][0]["enabled"] is False
+
+    res_toggle_on = svc.client.post("/peers/work_laptop/toggle", json={"enabled": True})
+    assert res_toggle_on.status_code == 200
+    assert res_toggle_on.json()["enabled"] is True
+
+    # 4. Rename peer
+    res_ren = svc.client.post("/peers/work_laptop/rename", json={"new_name": "renamed_laptop"})
+    assert res_ren.status_code == 200
+    assert res_ren.json()["name"] == "renamed_laptop"
+
+    res_list_r = svc.client.get("/peers")
+    assert res_list_r.json()["peers"][0]["name"] == "renamed_laptop"
+
+    # 5. Import external peer
+    res_import = svc.client.post("/peers/import", json={
+        "name": "external_phone",
+        "public_key": "EXTERNALPUBKEY1234567890123456789012345678=",
+        "ip": "10.8.0.5",
+    })
+    assert res_import.status_code == 200
+    assert res_import.json()["peer"]["imported"] is True
+
+    res_list_imp = svc.client.get("/peers")
+    assert len(res_list_imp.json()["peers"]) == 2
+
+    # 6. Get peer config & QR
     res_cfg = svc.client.get("/peers/work_laptop/config")
     assert res_cfg.status_code == 200
     assert "[Interface]" in res_cfg.json()["config"]
@@ -125,13 +168,17 @@ def test_real_script_peer_lifecycle(svc):
     assert res_qr.status_code == 200
     assert "qr_data" in res_qr.json()
 
-    # 4. Delete peer
+    # 7. Delete peers
     res_del = svc.client.delete("/peers/work_laptop")
     assert res_del.status_code == 200
     assert res_del.json()["deleted"] is True
     assert not conf_file.exists()
 
-    # 5. List peers is empty
+    res_del_imp = svc.client.delete("/peers/external_phone")
+    assert res_del_imp.status_code == 200
+    assert res_del_imp.json()["deleted"] is True
+
+    # 8. List peers is empty
     res_list2 = svc.client.get("/peers")
     assert res_list2.status_code == 200
     assert len(res_list2.json()["peers"]) == 0

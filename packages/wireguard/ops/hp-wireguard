@@ -115,6 +115,9 @@ usage: hp-wireguard <verb> [args]
   server-logs
   list-peers
   create-peer       <name> [ip] [allowed_ips] [dns]  [optional: preshared_key on stdin]
+  import-peer       <name> <public_key> [ip] [allowed_ips] [dns]  [optional: preshared_key on stdin]
+  toggle-peer       <id> <enabled:0|1>
+  rename-peer       <id> <new_name>
   delete-peer       <id>
   get-peer-config   <id>
   get-peer-qr       <id>
@@ -207,12 +210,21 @@ ensure_server_keys() {
     fi
 }
 
+# ── Detect Outbound Network Interface ─────────────────────────────────────────
+get_outbound_iface() {
+    local iface
+    iface="$(ip route show default 2>/dev/null | awk '/default/ {for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -1)"
+    echo "${iface:-eth0}"
+}
+
 # ── Rebuild Server wg0.conf ───────────────────────────────────────────────────
 rebuild_wg0_conf() {
     ensure_server_keys
     local priv_key pub_key
     priv_key="$(cat "$HP_SERVER_KEY" 2>/dev/null || echo "")"
     pub_key="$(cat "$HP_SERVER_PUBKEY" 2>/dev/null || echo "")"
+    local iface
+    iface="$(get_outbound_iface)"
 
     local tmp_conf="$HP_WG_DIR/wg0.conf.tmp.$$"
     cat > "$tmp_conf" <<EOF
@@ -222,7 +234,9 @@ ListenPort = 51820
 PrivateKey = $priv_key
 SaveConfig = false
 
-# PostUp/PostDown firewall rules can be placed here if routing is enabled
+# PostUp/PostDown NAT masquerade & IPv4 routing for clients
+PostUp = sysctl -w net.ipv4.ip_forward=1; iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o $iface -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o $iface -j MASQUERADE
 EOF
 
     # Append peers
@@ -478,9 +492,11 @@ case "$verb" in
 
     echo "Starting WireGuard server wg0..." >&2
     if is_dryrun; then
+        echo "WOULD-EXEC: sysctl -w net.ipv4.ip_forward=1" >&2
         echo "WOULD-EXEC: wg-quick up $HP_WG_CONF" >&2
         echo "running" > "$HP_STATE_FILE"
     else
+        sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
         if [ -x "$WG_QUICK" ]; then
             # If interface exists, tear it down first to avoid RTNETLINK errors
             wg_env
@@ -655,6 +671,8 @@ case "$verb" in
             p_dns="$(grep -o '"dns":[[:space:]]*"[^"]*"' "$pf" | cut -d'"' -f4 || echo "1.1.1.1")"
             p_created="$(grep -o '"created_at":[[:space:]]*"[^"]*"' "$pf" | cut -d'"' -f4 || echo "")"
             p_enabled="$(grep -o '"enabled":[[:space:]]*[^,}]*' "$pf" | cut -d':' -f2 | tr -d ' ' || echo "true")"
+            p_imported="$(grep -o '"imported":[[:space:]]*[^,}]*' "$pf" | cut -d':' -f2 | tr -d ' ' || echo "false")"
+            [ -n "$p_imported" ] || p_imported="false"
 
             rx=0
             tx=0
@@ -670,8 +688,8 @@ case "$verb" in
             tx="${tx:-0}"
             hs="${hs:-0}"
 
-            printf '{"id":"%s","name":"%s","ip":"%s","public_key":"%s","allowed_ips":"%s","dns":"%s","created_at":"%s","enabled":%s,"rx_bytes":%s,"tx_bytes":%s,"last_handshake":%s,"endpoint":"%s"}' \
-                "$(json_escape "$p_id")" "$(json_escape "$p_name")" "$(json_escape "$p_ip")" "$(json_escape "$p_pub")" "$(json_escape "$p_allowed")" "$(json_escape "$p_dns")" "$(json_escape "$p_created")" "$p_enabled" "$rx" "$tx" "$hs" "$(json_escape "$ep")"
+            printf '{"id":"%s","name":"%s","ip":"%s","public_key":"%s","allowed_ips":"%s","dns":"%s","created_at":"%s","enabled":%s,"imported":%s,"rx_bytes":%s,"tx_bytes":%s,"last_handshake":%s,"endpoint":"%s"}' \
+                "$(json_escape "$p_id")" "$(json_escape "$p_name")" "$(json_escape "$p_ip")" "$(json_escape "$p_pub")" "$(json_escape "$p_allowed")" "$(json_escape "$p_dns")" "$(json_escape "$p_created")" "$p_enabled" "$p_imported" "$rx" "$tx" "$hs" "$(json_escape "$ep")"
         done
     fi
     printf ']}\n'
@@ -713,7 +731,7 @@ case "$verb" in
     if [ -z "$ip" ]; then
         ip="$(allocate_next_ip)"
     else
-        echo "$ip" | grep -Eq '^10\.8\.0\.(?:[2-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|254)$' \
+        echo "$ip" | grep -Eq '^10\.8\.0\.([2-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|254)$' \
             || die "invalid client IP '$ip' (must be in range 10.8.0.2 - 10.8.0.254)" 12
     fi
 
@@ -779,6 +797,185 @@ JSONEOF
         "$(json_escape "$id")" "$(json_escape "$name")" "$(json_escape "$ip")" "$(json_escape "$client_pub")" "$(json_escape "$allowed_ips")" "$(json_escape "$dns")" "$created_at" "$(json_escape "$conf_content")" 
     ;;
 
+  import-peer)
+    [ $# -ge 2 ] && [ $# -le 5 ] || die "usage: import-peer <name> <public_key> [ip] [allowed_ips] [dns]" 12
+    name="$1"
+    pubkey="$2"
+    ip="${3:-}"
+    allowed_ips="${4:-0.0.0.0/0, ::/0}"
+    dns="${5:-1.1.1.1, 8.8.8.8}"
+
+    # Validate peer name
+    echo "$name" | grep -Eq '^[a-zA-Z0-9_-]{1,32}$' || die "invalid peer name '$name' (want ^[a-zA-Z0-9_-]{1,32}\$)" 12
+
+    # Validate public key: Base64 44-char ending with = or 42-44 base64 chars
+    echo "$pubkey" | grep -Eq '^[A-Za-z0-9+/]{42,43}={0,2}$' || die "invalid WireGuard public key format" 12
+
+    # Read optional secret from stdin
+    preshared_key=""
+    if [ ! -t 0 ]; then
+        while IFS= read -r -d '' k && IFS= read -r -d '' v; do
+            if [ "$k" = "preshared_key" ]; then
+                preshared_key="$v"
+            fi
+        done || true
+    fi
+
+    ensure_dirs
+    ensure_server_keys
+
+    # Check peer uniqueness
+    id="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_-' '_')"
+    peer_json="$HP_WG_PEERS_DIR/$id.json"
+    peer_conf="$HP_WG_PEERS_DIR/$id.conf"
+
+    if [ -f "$peer_json" ]; then
+        die "peer '$name' already exists" 13
+    fi
+
+    # Check public key uniqueness
+    if [ -d "$HP_WG_PEERS_DIR" ]; then
+        for existing_pf in "$HP_WG_PEERS_DIR"/*.json; do
+            [ -f "$existing_pf" ] || continue
+            existing_pub="$(json_str "$existing_pf" public_key)"
+            if [ "$existing_pub" = "$pubkey" ]; then
+                existing_name="$(json_str "$existing_pf" name)"
+                die "public key is already registered by peer '${existing_name:-$existing_pf}'" 13
+            fi
+        done
+    fi
+
+    # Allocate or validate IP
+    if [ -z "$ip" ]; then
+        ip="$(allocate_next_ip)"
+    else
+        echo "$ip" | grep -Eq '^10\.8\.0\.([2-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|254)$' \
+            || die "invalid client IP '$ip' (must be in range 10.8.0.2 - 10.8.0.254)" 12
+    fi
+
+    server_pub="$(cat "$HP_SERVER_PUBKEY" 2>/dev/null || echo "")"
+    server_endpoint="$(get_public_endpoint)"
+    created_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+    # Generate Client Template Config File (.conf) with placeholder
+    cat > "$peer_conf" <<CONFEOF
+[Interface]
+# Client-generated key: replace with your private key
+PrivateKey = <CLIENT_PRIVATE_KEY>
+Address = $ip/24
+DNS = $dns
+MTU = 1420
+
+[Peer]
+PublicKey = $server_pub
+Endpoint = $server_endpoint:51820
+AllowedIPs = $allowed_ips
+PersistentKeepalive = 25
+CONFEOF
+    if [ -n "$preshared_key" ]; then
+        echo "PresharedKey = $preshared_key" >> "$peer_conf"
+    fi
+    chmod 0600 "$peer_conf" 2>/dev/null || true
+
+    # Save metadata JSON with imported=true
+    cat > "$peer_json" <<JSONEOF
+{
+  "id": "$(json_escape "$id")",
+  "name": "$(json_escape "$name")",
+  "ip": "$(json_escape "$ip")",
+  "public_key": "$(json_escape "$pubkey")",
+  "allowed_ips": "$(json_escape "$allowed_ips")",
+  "dns": "$(json_escape "$dns")",
+  "preshared_key": "$(json_escape "$preshared_key")",
+  "created_at": "$created_at",
+  "enabled": true,
+  "imported": true
+}
+JSONEOF
+    chmod 0600 "$peer_json" 2>/dev/null || true
+
+    # Rebuild server wg0.conf and sync live interface if running
+    rebuild_wg0_conf
+    if is_server_running && have_wg; then
+        if [ -n "$preshared_key" ]; then
+            psk_tmp="$(mktemp)"
+            echo "$preshared_key" > "$psk_tmp"
+            "$WG_BIN" set wg0 peer "$pubkey" allowed-ips "$ip/32" preshared-key "$psk_tmp" >&2 || warn "wg set failed for $pubkey"
+            rm -f "$psk_tmp"
+        else
+            "$WG_BIN" set wg0 peer "$pubkey" allowed-ips "$ip/32" >&2 || warn "wg set failed for $pubkey"
+        fi
+    fi
+
+    conf_content="$(cat "$peer_conf")"
+    echo "$created_at [INFO] Peer imported: $name ($ip) id=$id" >> "$HP_LOG_FILE" 2>/dev/null || true
+
+    printf '{"ok":true,"peer":{"id":"%s","name":"%s","ip":"%s","public_key":"%s","allowed_ips":"%s","dns":"%s","created_at":"%s","enabled":true,"imported":true,"config":"%s"}}\n' \
+        "$(json_escape "$id")" "$(json_escape "$name")" "$(json_escape "$ip")" "$(json_escape "$pubkey")" "$(json_escape "$allowed_ips")" "$(json_escape "$dns")" "$created_at" "$(json_escape "$conf_content")"
+    ;;
+
+  toggle-peer)
+    require_argc 2 $# "toggle-peer <id> <enabled:0|1>"
+    id="$1"
+    enabled_val="$2"
+    echo "$id" | grep -Eq '^[a-zA-Z0-9_-]{1,64}$' || die "invalid peer id '$id'" 12
+    case "$enabled_val" in
+        0|1) ;;
+        *) die "enabled must be 0 or 1" 12 ;;
+    esac
+
+    peer_json="$HP_WG_PEERS_DIR/$id.json"
+    [ -f "$peer_json" ] || die "peer '$id' not found" 10
+
+    p_pub="$(json_str "$peer_json" public_key)"
+    p_ip="$(json_str "$peer_json" ip)"
+    p_psk="$(json_str "$peer_json" preshared_key)"
+
+    if [ "$enabled_val" = "1" ]; then
+        python3 -c "import json; p=json.load(open('$peer_json')); p['enabled']=True; json.dump(p, open('$peer_json','w'), indent=2)" 2>/dev/null || \
+            sed -i 's/"enabled"[[:space:]]*:[[:space:]]*false/"enabled": true/' "$peer_json"
+        rebuild_wg0_conf
+        if is_server_running && have_wg && [ -n "$p_pub" ]; then
+            if [ -n "$p_psk" ]; then
+                psk_tmp="$(mktemp)"
+                echo "$p_psk" > "$psk_tmp"
+                "$WG_BIN" set wg0 peer "$p_pub" allowed-ips "$p_ip/32" preshared-key "$psk_tmp" >&2 || warn "wg set failed for $p_pub"
+                rm -f "$psk_tmp"
+            else
+                "$WG_BIN" set wg0 peer "$p_pub" allowed-ips "$p_ip/32" >&2 || warn "wg set failed for $p_pub"
+            fi
+        fi
+        echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') [INFO] Peer enabled: $id" >> "$HP_LOG_FILE" 2>/dev/null || true
+        echo "{\"ok\":true,\"id\":\"$(json_escape "$id")\",\"enabled\":true}"
+    else
+        python3 -c "import json; p=json.load(open('$peer_json')); p['enabled']=False; json.dump(p, open('$peer_json','w'), indent=2)" 2>/dev/null || \
+            sed -i 's/"enabled"[[:space:]]*:[[:space:]]*true/"enabled": false/' "$peer_json"
+        rebuild_wg0_conf
+        if is_server_running && have_wg && [ -n "$p_pub" ]; then
+            "$WG_BIN" set wg0 peer "$p_pub" remove >&2 || warn "wg set remove failed for $p_pub"
+        fi
+        echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') [INFO] Peer disabled: $id" >> "$HP_LOG_FILE" 2>/dev/null || true
+        echo "{\"ok\":true,\"id\":\"$(json_escape "$id")\",\"enabled\":false}"
+    fi
+    ;;
+
+  rename-peer)
+    require_argc 2 $# "rename-peer <id> <new_name>"
+    id="$1"
+    new_name="$2"
+    echo "$id" | grep -Eq '^[a-zA-Z0-9_-]{1,64}$' || die "invalid peer id '$id'" 12
+    echo "$new_name" | grep -Eq '^[a-zA-Z0-9_-]{1,32}$' || die "invalid peer name '$new_name' (want ^[a-zA-Z0-9_-]{1,32}\$)" 12
+
+    peer_json="$HP_WG_PEERS_DIR/$id.json"
+    [ -f "$peer_json" ] || die "peer '$id' not found" 10
+
+    python3 -c "import json; p=json.load(open('$peer_json')); p['name']='$new_name'; json.dump(p, open('$peer_json','w'), indent=2)" 2>/dev/null || \
+        sed -i "s/\"name\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"name\": \"$new_name\"/" "$peer_json"
+
+    echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') [INFO] Peer renamed: $id -> $new_name" >> "$HP_LOG_FILE" 2>/dev/null || true
+    echo "{\"ok\":true,\"id\":\"$(json_escape "$id")\",\"name\":\"$(json_escape "$new_name")\"}"
+    ;;
+
   delete-peer)
     require_argc 1 $# "delete-peer <id>"
     id="$1"
@@ -809,14 +1006,21 @@ JSONEOF
     peer_conf="$HP_WG_PEERS_DIR/$id.conf"
     peer_json="$HP_WG_PEERS_DIR/$id.json"
 
-    [ -f "$peer_conf" ] || die "peer config '$id' not found" 10
+    [ -f "$peer_json" ] || die "peer config '$id' not found" 10
 
-    conf_content="$(cat "$peer_conf")"
     p_name="$(json_str "$peer_json" name)"; [ -n "$p_name" ] || p_name="$id"
     p_ip="$(json_str "$peer_json" ip)"
+    p_imported="$(json_bare "$peer_json" imported)"
+    [ -n "$p_imported" ] || p_imported="false"
 
-    printf '{"id":"%s","name":"%s","ip":"%s","config":"%s"}\n' \
-        "$(json_escape "$id")" "$(json_escape "$p_name")" "$(json_escape "$p_ip")" "$(json_escape "$conf_content")" 
+    if [ -f "$peer_conf" ]; then
+        conf_content="$(cat "$peer_conf")"
+    else
+        conf_content=""
+    fi
+
+    printf '{"id":"%s","name":"%s","ip":"%s","imported":%s,"config":"%s"}\n' \
+        "$(json_escape "$id")" "$(json_escape "$p_name")" "$(json_escape "$p_ip")" "$p_imported" "$(json_escape "$conf_content")" 
     ;;
 
   get-peer-qr)
@@ -825,11 +1029,18 @@ JSONEOF
     echo "$id" | grep -Eq '^[a-zA-Z0-9_-]{1,64}$' || die "invalid peer id '$id'" 12
 
     peer_conf="$HP_WG_PEERS_DIR/$id.conf"
-    [ -f "$peer_conf" ] || die "peer config '$id' not found" 10
+    peer_json="$HP_WG_PEERS_DIR/$id.json"
+    [ -f "$peer_json" ] || die "peer config '$id' not found" 10
 
-    conf_content="$(cat "$peer_conf")"
-    printf '{"id":"%s","config":"%s","qr_data":"%s"}\n' \
-        "$(json_escape "$id")" "$(json_escape "$conf_content")" "$(json_escape "$conf_content")" 
+    p_imported="$(json_bare "$peer_json" imported)"
+    [ -n "$p_imported" ] || p_imported="false"
+
+    conf_content=""
+    if [ -f "$peer_conf" ]; then
+        conf_content="$(cat "$peer_conf")"
+    fi
+    printf '{"id":"%s","imported":%s,"config":"%s","qr_data":"%s"}\n' \
+        "$(json_escape "$id")" "$p_imported" "$(json_escape "$conf_content")" "$(json_escape "$conf_content")" 
     ;;
 
   *)
