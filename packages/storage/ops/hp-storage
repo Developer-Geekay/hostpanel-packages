@@ -45,6 +45,16 @@ valid_bucket_name() {
     no_traversal "$b"
 }
 
+# ── engine-status ────────────────────────────────────────────────────────────
+op_engine_status() {
+    if [ -d "$HP_STORAGE_ROOT" ]; then
+        printf '{"ok":true,"installed":true,"storage_root":"%s"}\n' "$HP_STORAGE_ROOT"
+        return 0
+    fi
+    printf '{"ok":false,"installed":false}\n'
+    return 1
+}
+
 # ── storage-init ─────────────────────────────────────────────────────────────
 op_storage_init() {
     if is_dryrun; then
@@ -53,12 +63,12 @@ op_storage_init() {
         return 0
     fi
 
-    mkdir -p "$HP_STORAGE_ROOT" "$HP_ETC_STORAGE" "$HP_LOGS_STORAGE" "$HP_RUN_STORAGE"
+    mkdir -p "$HP_STORAGE_ROOT" "$HP_ETC_STORAGE" "$HP_LOGS_STORAGE" "$HP_RUN_STORAGE" "/opt/hostpanel/data/storage"
 
     if getent passwd hp-storage >/dev/null 2>&1; then
         chown -R hp-storage:hp-storage "/opt/hostpanel/data/storage" "$HP_ETC_STORAGE" "$HP_LOGS_STORAGE" "$HP_RUN_STORAGE" 2>/dev/null || true
     fi
-    chmod 0755 "$HP_STORAGE_ROOT" "$HP_ETC_STORAGE" "$HP_LOGS_STORAGE" "$HP_RUN_STORAGE"
+    chmod 0775 "$HP_STORAGE_ROOT" "$HP_ETC_STORAGE" "$HP_LOGS_STORAGE" "$HP_RUN_STORAGE" "/opt/hostpanel/data/storage"
 
     # Configure UFW firewall for S3 port 9000 if UFW is active
     if command -v ufw >/dev/null 2>&1; then
@@ -199,6 +209,8 @@ op_firewall_allow() {
 verb="$1"; shift
 
 case "$verb" in
+    engine-status)    op_engine_status "$@" ;;
+    engine-install)   op_storage_init "$@" ;;
     storage-init)     op_storage_init "$@" ;;
     bucket-create)    op_bucket_create "$@" ;;
     bucket-delete)    op_bucket_delete "$@" ;;

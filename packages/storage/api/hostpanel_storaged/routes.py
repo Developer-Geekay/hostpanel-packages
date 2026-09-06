@@ -17,6 +17,9 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from portald.sdk import manifest as M
+from portald.sdk import ops
+from portald.sdk.errors import Code, OpsError
+from hostpanel_storaged import verbs
 from hostpanel_storaged.db import (
     generate_access_key_id,
     generate_secret_access_key,
@@ -82,6 +85,34 @@ def format_size(bytes_num: int) -> str:
 def build_router(manifest: M.Manifest, ops_script: str, *, use_sudo: bool = True) -> APIRouter:
     router = APIRouter()
 
+    def spec_for(op: str, params: Mapping[str, Any], *,
+                 timeout_ms: int | None = None) -> tuple[ops.OpsSpec, M.OpSpec]:
+        op_spec = manifest.operations.get(op)
+        if op_spec is None:
+            raise OpsError(Code.INTERNAL,
+                           f"operation {op!r} is not declared in the manifest")
+        try:
+            cleaned = M.validate_params(op_spec, {k: v for k, v in params.items()
+                                                  if v is not None})
+        except M.ManifestError as exc:
+            raise OpsError(Code.VALIDATION, str(exc)) from exc
+
+        verb, argv, secrets = verbs.build(op, cleaned)
+        return ops.OpsSpec(
+            script=ops_script,
+            verb=verb,
+            args=argv,
+            secrets=secrets,
+            timeout_ms=timeout_ms or op_spec.timeout_ms,
+            sudo=use_sudo,
+        ), op_spec
+
+    async def run_json(op: str, params: Mapping[str, Any]) -> dict[str, Any]:
+        spec, _ = spec_for(op, params)
+        result = await ops.run(spec)
+        result.raise_for_status()
+        return result.data()
+
     # ── Service Metadata ──────────────────────────────────────────────────────
 
     @router.get("/meta")
@@ -134,13 +165,20 @@ def build_router(manifest: M.Manifest, ops_script: str, *, use_sudo: bool = True
         if not name:
             raise HTTPException(status_code=400, detail="Bucket name is required")
 
-        b_path = get_bucket_path(name, body.custom_path)
+        # 1. Check if already exists in DB
         with get_db() as conn:
             existing = conn.execute("SELECT id FROM storage_buckets WHERE name = ?", (name,)).fetchone()
             if existing:
                 raise HTTPException(status_code=409, detail=f"Bucket '{name}' already exists")
 
-            Path(b_path).mkdir(parents=True, exist_ok=True)
+        # 2. Call root ops runner to create bucket directory with hp-storage ownership
+        try:
+            await run_json("storage.bucket-create", {"name": name})
+        except OpsError as exc:
+            raise HTTPException(status_code=exc.http_status, detail=exc.message) from exc
+
+        # 3. Insert bucket metadata into DB
+        with get_db() as conn:
             cur = conn.execute(
                 """INSERT INTO storage_buckets (name, owner, public_access, quota_mb, region, custom_path)
                    VALUES (?, 'admin', ?, ?, ?, ?)""",
@@ -183,10 +221,14 @@ def build_router(manifest: M.Manifest, ops_script: str, *, use_sudo: bool = True
             if not b_row:
                 raise HTTPException(status_code=404, detail="Bucket not found")
 
-            b_path = get_bucket_path(bucket_name, b_row["custom_path"])
-            if os.path.exists(b_path):
-                shutil.rmtree(b_path, ignore_errors=True)
+        # Call root ops runner to delete bucket directory cleanly
+        try:
+            await run_json("storage.bucket-delete", {"name": bucket_name})
+        except OpsError as exc:
+            if exc.code != Code.NOT_FOUND:
+                raise HTTPException(status_code=exc.http_status, detail=exc.message) from exc
 
+        with get_db() as conn:
             conn.execute("DELETE FROM storage_buckets WHERE name = ?", (bucket_name,))
             conn.execute("DELETE FROM storage_object_acls WHERE bucket_name = ?", (bucket_name,))
             conn.execute("DELETE FROM storage_presigned_urls WHERE bucket_name = ?", (bucket_name,))

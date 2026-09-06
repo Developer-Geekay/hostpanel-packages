@@ -15,7 +15,7 @@ from typing import Iterator
 
 _log = logging.getLogger(__name__)
 
-DEFAULT_DB_PATH = "/opt/hostpanel/data/hostpanel.db"
+DEFAULT_DB_PATH = "/opt/hostpanel/data/storage/storage.db"
 DEFAULT_STORAGE_ROOT = "/opt/hostpanel/data/storage/buckets"
 
 
@@ -113,6 +113,7 @@ def init_storage_tables() -> None:
         _log.info("Initialized storage tables in %s", get_db_path())
     except Exception as exc:
         _log.error("Failed initializing storage tables: %s", exc)
+        raise
 
 
 def get_storage_setting(key: str, default: str = "") -> str:

@@ -54,16 +54,62 @@ esac
 """
 
 
+FAKE_OPS_BAT = r"""@echo off
+set "VERB=%~1"
+shift
+echo VERB=%VERB%>> "%HP_TEST_LOG%"
+set "REST=%~1"
+:argloop
+shift
+if "%~1"=="" goto argdone
+set "REST=%REST% %~1"
+goto argloop
+:argdone
+echo ARGV=%REST%>> "%HP_TEST_LOG%"
+
+if "%VERB%"=="storage-init" (
+  echo storage directories initialized
+  exit /b 0
+)
+if "%VERB%"=="bucket-create" (
+  echo bucket %~1 directory ready
+  exit /b 0
+)
+if "%VERB%"=="bucket-delete" (
+  echo bucket %~1 deleted
+  exit /b 0
+)
+if "%VERB%"=="disk-usage" (
+  echo {"total_bytes":107374182400,"used_bytes":14200000000,"free_bytes":93174182400,"buckets_count":2,"buckets":[{"name":"demo-bucket","size_bytes":1048576,"objects_count":4}]}
+  exit /b 0
+)
+if "%VERB%"=="service-restart" (
+  echo service restarted
+  exit /b 0
+)
+if "%VERB%"=="firewall-allow" (
+  echo port %~1 allowed
+  exit /b 0
+)
+echo unknown verb %VERB% 1>&2
+exit /b 12
+"""
+
+
 @pytest.fixture
 def svc(tmp_path, monkeypatch):
-    script = tmp_path / "hp-storage-fake"
-    script.write_text(FAKE_OPS)
-    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    if sys.platform == "win32":
+        script = tmp_path / "hp-storage-fake.bat"
+        script.write_text(FAKE_OPS_BAT)
+    else:
+        script = tmp_path / "hp-storage-fake"
+        script.write_text(FAKE_OPS)
+        script.chmod(script.stat().st_mode | stat.S_IEXEC)
 
     log = tmp_path / "ops.log"
     log.touch()
 
-    db_path = tmp_path / "hostpanel.db"
+    db_path = tmp_path / "storage" / "storage.db"
     storage_root = tmp_path / "storage" / "buckets"
     storage_root.mkdir(parents=True, exist_ok=True)
 
@@ -88,7 +134,7 @@ def svc(tmp_path, monkeypatch):
 
 
 def ops_log(svc) -> str:
-    return svc.log.read_text()
+    return svc.log.read_text().replace("\r\n", "\n")
 
 
 # ── Authentication ────────────────────────────────────────────────────────────
@@ -150,6 +196,7 @@ def test_create_bucket(svc):
     assert buckets[0]["name"] == "media-bucket"
     assert buckets[0]["public_access"] is True
     assert buckets[0]["quota_mb"] == 2048
+    assert "VERB=bucket-create\nARGV=media-bucket" in ops_log(svc)
 
 
 def test_create_bucket_duplicate(svc):
@@ -176,6 +223,7 @@ def test_delete_bucket(svc):
     res = svc.client.delete("/buckets/delete-test")
     assert res.status_code == 200
     assert res.json()["deleted"] is True
+    assert "VERB=bucket-delete\nARGV=delete-test" in ops_log(svc)
 
     res2 = svc.client.get("/buckets")
     assert not any(x["name"] == "delete-test" for x in res2.json()["buckets"])
