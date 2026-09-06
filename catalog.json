@@ -67,7 +67,7 @@
     {
       "name": "mongodb",
       "label": "MongoDB",
-      "version": "3.0.1",
+      "version": "3.0.2",
       "category": "Database",
       "description": "High-performance MongoDB database engine package",
       "unit": "hostpanel-mongodbd.service",

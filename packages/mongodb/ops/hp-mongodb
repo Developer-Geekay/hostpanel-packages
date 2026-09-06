@@ -541,26 +541,50 @@ else:
 }
 
 cmd_user_list() {
+  local js="
+try {
+  var res = db.adminCommand({ usersInfo: { forAllDBs: true } });
+  print('HOSTPANEL_USERS_JSON:' + JSON.stringify(res.users || []));
+} catch(e) {
+  try {
+    var res2 = db.adminCommand({ usersInfo: 1 });
+    print('HOSTPANEL_USERS_JSON:' + JSON.stringify(res2.users || []));
+  } catch(e2) {
+    print('HOSTPANEL_USERS_JSON:[]');
+  }
+}
+"
   local res
-  res="$(run_mongo_eval "try { print(JSON.stringify(db.adminCommand({usersInfo: 1}).users)); } catch(e) { print('[]'); }" || echo "[]")"
+  res="$(run_mongo_eval "$js" 2>/dev/null || echo "")"
   local list="[]"
   list="$(python3 - "$res" <<'PYEOF'
 import sys, json
-raw = sys.argv[1].strip()
+raw = sys.argv[1] if len(sys.argv) > 1 else ""
 protected = {"root", "__system"}
 users = []
-try:
-    data = json.loads(raw)
-    for u in data:
-        uname = u.get("user", "")
-        if uname and uname not in protected:
-            users.append({
-                "username": uname,
-                "database": u.get("db", "admin"),
-                "roles": [r.get("role") for r in u.get("roles", [])]
-            })
-except Exception:
-    pass
+for line in raw.split("\n"):
+    line = line.strip()
+    if "HOSTPANEL_USERS_JSON:" in line:
+        try:
+            payload = line.split("HOSTPANEL_USERS_JSON:", 1)[1]
+            data = json.loads(payload)
+            for u in data:
+                uname = u.get("user", "")
+                if uname and uname not in protected:
+                    roles_list = []
+                    for r in u.get("roles", []):
+                        if isinstance(r, dict):
+                            roles_list.append(r.get("role", ""))
+                        elif isinstance(r, str):
+                            roles_list.append(r)
+                    users.append({
+                        "username": uname,
+                        "database": u.get("db", "admin"),
+                        "roles": [r for r in roles_list if r]
+                    })
+            break
+        except Exception:
+            pass
 print(json.dumps(users))
 PYEOF
 )"
@@ -593,11 +617,40 @@ cmd_user_create() {
     return $EXIT_INVALID_INPUT
   fi
 
-  local js="db.getSiblingDB('$db').createUser({user: '$username', pwd: '$password', roles: [{role: '$roles', db: '$db'}]}); print(JSON.stringify({ok: 1}));"
-  run_mongo_eval "$js" >/dev/null 2>&1 || true
+  local js="
+try {
+  db.getSiblingDB('$db').createUser({
+    user: '$username',
+    pwd: '$password',
+    roles: [{ role: '$roles', db: '$db' }]
+  });
+  print('HOSTPANEL_USER_OP:' + JSON.stringify({ok: true}));
+} catch(e) {
+  print('HOSTPANEL_USER_OP:' + JSON.stringify({ok: false, error: e.message || String(e)}));
+}
+"
+  local res
+  res="$(run_mongo_eval "$js" 2>&1 || true)"
+  local err_msg=""
+  local ok="false"
 
-  echo "{\"ok\":true,\"username\":\"$username\",\"database\":\"$db\",\"roles\":\"$roles\"}"
-  return $EXIT_SUCCESS
+  for line in $res; do
+    if [[ "$line" == *"HOSTPANEL_USER_OP:"* ]]; then
+      local payload="${line#*HOSTPANEL_USER_OP:}"
+      ok="$(python3 -c 'import sys, json; print(str(json.loads(sys.argv[1]).get("ok", False)).lower())' "$payload" 2>/dev/null || echo "false")"
+      err_msg="$(python3 -c 'import sys, json; print(json.loads(sys.argv[1]).get("error", ""))' "$payload" 2>/dev/null || echo "")"
+      break
+    fi
+  done
+
+  if [[ "$ok" == "true" ]]; then
+    echo "{\"ok\":true,\"username\":\"$username\",\"database\":\"$db\",\"roles\":\"$roles\"}"
+    return $EXIT_SUCCESS
+  else
+    local msg="${err_msg:-Failed to create user in MongoDB}"
+    echo "{\"ok\":false,\"error\":$(python3 -c 'import sys, json; print(json.dumps(sys.argv[1]))' "$msg"),\"code\":\"EXECUTION_FAILED\"}" >&2
+    return $EXIT_EXECUTION_FAILED
+  fi
 }
 
 cmd_user_drop() {
@@ -614,11 +667,36 @@ cmd_user_drop() {
     return $EXIT_FORBIDDEN
   fi
 
-  local js="db.getSiblingDB('$db').dropUser('$username'); print(JSON.stringify({ok: 1}));"
-  run_mongo_eval "$js" >/dev/null 2>&1 || true
+  local js="
+try {
+  db.getSiblingDB('$db').dropUser('$username');
+  print('HOSTPANEL_USER_OP:' + JSON.stringify({ok: true}));
+} catch(e) {
+  print('HOSTPANEL_USER_OP:' + JSON.stringify({ok: false, error: e.message || String(e)}));
+}
+"
+  local res
+  res="$(run_mongo_eval "$js" 2>&1 || true)"
+  local err_msg=""
+  local ok="false"
 
-  echo "{\"ok\":true,\"username\":\"$username\",\"database\":\"$db\",\"dropped\":true}"
-  return $EXIT_SUCCESS
+  for line in $res; do
+    if [[ "$line" == *"HOSTPANEL_USER_OP:"* ]]; then
+      local payload="${line#*HOSTPANEL_USER_OP:}"
+      ok="$(python3 -c 'import sys, json; print(str(json.loads(sys.argv[1]).get("ok", False)).lower())' "$payload" 2>/dev/null || echo "false")"
+      err_msg="$(python3 -c 'import sys, json; print(json.loads(sys.argv[1]).get("error", ""))' "$payload" 2>/dev/null || echo "")"
+      break
+    fi
+  done
+
+  if [[ "$ok" == "true" ]]; then
+    echo "{\"ok\":true,\"username\":\"$username\",\"database\":\"$db\",\"dropped\":true}"
+    return $EXIT_SUCCESS
+  else
+    local msg="${err_msg:-Failed to drop user in MongoDB}"
+    echo "{\"ok\":false,\"error\":$(python3 -c 'import sys, json; print(json.dumps(sys.argv[1]))' "$msg"),\"code\":\"EXECUTION_FAILED\"}" >&2
+    return $EXIT_EXECUTION_FAILED
+  fi
 }
 
 cmd_user_set_password() {
@@ -645,11 +723,36 @@ cmd_user_set_password() {
     return $EXIT_INVALID_INPUT
   fi
 
-  local js="db.getSiblingDB('$db').changeUserPassword('$username', '$password'); print(JSON.stringify({ok: 1}));"
-  run_mongo_eval "$js" >/dev/null 2>&1 || true
+  local js="
+try {
+  db.getSiblingDB('$db').changeUserPassword('$username', '$password');
+  print('HOSTPANEL_USER_OP:' + JSON.stringify({ok: true}));
+} catch(e) {
+  print('HOSTPANEL_USER_OP:' + JSON.stringify({ok: false, error: e.message || String(e)}));
+}
+"
+  local res
+  res="$(run_mongo_eval "$js" 2>&1 || true)"
+  local err_msg=""
+  local ok="false"
 
-  echo "{\"ok\":true,\"username\":\"$username\",\"database\":\"$db\",\"password_updated\":true}"
-  return $EXIT_SUCCESS
+  for line in $res; do
+    if [[ "$line" == *"HOSTPANEL_USER_OP:"* ]]; then
+      local payload="${line#*HOSTPANEL_USER_OP:}"
+      ok="$(python3 -c 'import sys, json; print(str(json.loads(sys.argv[1]).get("ok", False)).lower())' "$payload" 2>/dev/null || echo "false")"
+      err_msg="$(python3 -c 'import sys, json; print(json.loads(sys.argv[1]).get("error", ""))' "$payload" 2>/dev/null || echo "")"
+      break
+    fi
+  done
+
+  if [[ "$ok" == "true" ]]; then
+    echo "{\"ok\":true,\"username\":\"$username\",\"database\":\"$db\",\"password_updated\":true}"
+    return $EXIT_SUCCESS
+  else
+    local msg="${err_msg:-Failed to update user password in MongoDB}"
+    echo "{\"ok\":false,\"error\":$(python3 -c 'import sys, json; print(json.dumps(sys.argv[1]))' "$msg"),\"code\":\"EXECUTION_FAILED\"}" >&2
+    return $EXIT_EXECUTION_FAILED
+  fi
 }
 
 cmd_grant() {
@@ -662,11 +765,44 @@ cmd_grant() {
     return $EXIT_INVALID_INPUT
   fi
 
-  local js="db.getSiblingDB('admin').grantRolesToUser('$username', [{role: '$roles', db: '$db'}]); print(JSON.stringify({ok: 1}));"
-  run_mongo_eval "$js" >/dev/null 2>&1 || true
+  local js="
+try {
+  var usersAll = [];
+  try {
+    usersAll = db.adminCommand({ usersInfo: { forAllDBs: true } }).users || [];
+  } catch(e1) {
+    usersAll = db.adminCommand({ usersInfo: 1 }).users || [];
+  }
+  var u = usersAll.find(function(x) { return x.user === '$username'; });
+  var authDb = (u && u.db) ? u.db : 'admin';
+  db.getSiblingDB(authDb).grantRolesToUser('$username', [{ role: '$roles', db: '$db' }]);
+  print('HOSTPANEL_USER_OP:' + JSON.stringify({ok: true, auth_database: authDb}));
+} catch(e) {
+  print('HOSTPANEL_USER_OP:' + JSON.stringify({ok: false, error: e.message || String(e)}));
+}
+"
+  local res
+  res="$(run_mongo_eval "$js" 2>&1 || true)"
+  local err_msg=""
+  local ok="false"
 
-  echo "{\"ok\":true,\"username\":\"$username\",\"database\":\"$db\",\"roles\":\"$roles\"}"
-  return $EXIT_SUCCESS
+  for line in $res; do
+    if [[ "$line" == *"HOSTPANEL_USER_OP:"* ]]; then
+      local payload="${line#*HOSTPANEL_USER_OP:}"
+      ok="$(python3 -c 'import sys, json; print(str(json.loads(sys.argv[1]).get("ok", False)).lower())' "$payload" 2>/dev/null || echo "false")"
+      err_msg="$(python3 -c 'import sys, json; print(json.loads(sys.argv[1]).get("error", ""))' "$payload" 2>/dev/null || echo "")"
+      break
+    fi
+  done
+
+  if [[ "$ok" == "true" ]]; then
+    echo "{\"ok\":true,\"username\":\"$username\",\"database\":\"$db\",\"roles\":\"$roles\"}"
+    return $EXIT_SUCCESS
+  else
+    local msg="${err_msg:-Failed to grant roles to user in MongoDB}"
+    echo "{\"ok\":false,\"error\":$(python3 -c 'import sys, json; print(json.dumps(sys.argv[1]))' "$msg"),\"code\":\"EXECUTION_FAILED\"}" >&2
+    return $EXIT_EXECUTION_FAILED
+  fi
 }
 
 cmd_revoke() {
@@ -678,11 +814,55 @@ cmd_revoke() {
     return $EXIT_INVALID_INPUT
   fi
 
-  local js="db.getSiblingDB('admin').revokeRolesFromUser('$username', [{role: 'readWrite', db: '$db'}, {role: 'read', db: '$db'}]); print(JSON.stringify({ok: 1}));"
-  run_mongo_eval "$js" >/dev/null 2>&1 || true
+  local js="
+try {
+  var usersAll = [];
+  try {
+    usersAll = db.adminCommand({ usersInfo: { forAllDBs: true } }).users || [];
+  } catch(e1) {
+    usersAll = db.adminCommand({ usersInfo: 1 }).users || [];
+  }
+  var u = usersAll.find(function(x) { return x.user === '$username'; });
+  var authDb = (u && u.db) ? u.db : 'admin';
+  var rolesToRevoke = [];
+  if (u && u.roles) {
+    u.roles.forEach(function(r) {
+      if (r.db === '$db') {
+        rolesToRevoke.push({ role: r.role, db: '$db' });
+      }
+    });
+  }
+  if (rolesToRevoke.length === 0) {
+    rolesToRevoke = [{ role: 'readWrite', db: '$db' }, { role: 'read', db: '$db' }, { role: 'dbAdmin', db: '$db' }];
+  }
+  db.getSiblingDB(authDb).revokeRolesFromUser('$username', rolesToRevoke);
+  print('HOSTPANEL_USER_OP:' + JSON.stringify({ok: true, auth_database: authDb}));
+} catch(e) {
+  print('HOSTPANEL_USER_OP:' + JSON.stringify({ok: false, error: e.message || String(e)}));
+}
+"
+  local res
+  res="$(run_mongo_eval "$js" 2>&1 || true)"
+  local err_msg=""
+  local ok="false"
 
-  echo "{\"ok\":true,\"username\":\"$username\",\"database\":\"$db\",\"revoked\":true}"
-  return $EXIT_SUCCESS
+  for line in $res; do
+    if [[ "$line" == *"HOSTPANEL_USER_OP:"* ]]; then
+      local payload="${line#*HOSTPANEL_USER_OP:}"
+      ok="$(python3 -c 'import sys, json; print(str(json.loads(sys.argv[1]).get("ok", False)).lower())' "$payload" 2>/dev/null || echo "false")"
+      err_msg="$(python3 -c 'import sys, json; print(json.loads(sys.argv[1]).get("error", ""))' "$payload" 2>/dev/null || echo "")"
+      break
+    fi
+  done
+
+  if [[ "$ok" == "true" ]]; then
+    echo "{\"ok\":true,\"username\":\"$username\",\"database\":\"$db\",\"revoked\":true}"
+    return $EXIT_SUCCESS
+  else
+    local msg="${err_msg:-Failed to revoke roles from user in MongoDB}"
+    echo "{\"ok\":false,\"error\":$(python3 -c 'import sys, json; print(json.dumps(sys.argv[1]))' "$msg"),\"code\":\"EXECUTION_FAILED\"}" >&2
+    return $EXIT_EXECUTION_FAILED
+  fi
 }
 
 ## ==================== ENGINE SERVICE LIFECYCLE ====================
